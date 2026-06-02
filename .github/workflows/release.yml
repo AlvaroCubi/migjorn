@@ -29,8 +29,9 @@ jobs:
                   cargo update --workspace
 
             - name: Publish migjorn
-              run: cargo publish -p migjorn --token ${{ secrets.CRATES_IO_TOKEN }}
-
+              env:
+                  CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+              run: cargo publish -p migjorn --allow-dirty
     # ──────────────────────────────────────────────
     # 2. Build Python wheels for each platform
     # ──────────────────────────────────────────────

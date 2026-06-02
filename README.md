@@ -7,6 +7,7 @@ Migjorn is a toolkit for reading, validating, inspecting, and transforming MCNP 
 Migjorn focuses on the parts of MCNP model handling that are commonly needed in model maintenance and preprocessing pipelines:
 
 - Parse MCNP input files into structured in-memory objects.
+- Very fast multicore parsing --> The 6.5 million lines E-Lite model parsed in 900 ms.
 - Inspect model-level statistics and card collections.
 - Run validation checks to identify consistency issues.
 - Renumber model identifiers safely and write updated models.

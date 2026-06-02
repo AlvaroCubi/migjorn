@@ -1,0 +1,12 @@
+{
+    // Enable test explorer integration
+    "rust-analyzer.testExplorer": true,
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    // Python test discovery
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestArgs": [
+        "python/tests"
+    ],
+}

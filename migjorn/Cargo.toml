@@ -1,0 +1,23 @@
+[package]
+name = "migjorn"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "MCNP model parser and utilities"
+license.workspace = true
+repository.workspace = true
+keywords = ["mcnp", "parser", "nuclear", "simulation"]
+categories = ["parser-implementations", "science"]
+
+[[bin]]
+name = "migjorn"
+path = "src/main.rs"
+
+[dependencies]
+memchr = "2.8.0"
+rayon = "1.11.0"
+thiserror = "2.0.18"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.0"

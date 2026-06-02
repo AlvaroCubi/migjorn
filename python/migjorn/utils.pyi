@@ -1,0 +1,3 @@
+def run(args: list[str]) -> int:
+    """Run the CLI tool with the given arguments, returning the exit code."""
+    ...

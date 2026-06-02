@@ -1,0 +1,17 @@
+[package]
+name = "migjorn-py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[lib]
+name = "_migjorn"
+crate-type = ["cdylib"]
+
+[dependencies]
+migjorn = { path = "../migjorn" }
+pyo3 = { version = "0.23", features = [
+    "extension-module",
+    "abi3-py38",
+    "generate-import-lib",
+] }

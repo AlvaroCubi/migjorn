@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "migjorn"
+dynamic = ["version"]
+description = "MCNP model parser and utilities"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[project.scripts]
+migjorn = "migjorn.__main__:main"
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "migjorn-py/Cargo.toml"
+module-name = "migjorn._migjorn"
+python-source = "python"
+# Version is read from the Cargo.toml workspace version
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

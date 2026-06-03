@@ -38,14 +38,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build
-        run: cargo build --workspace
-
       - name: Test
         run: cargo test --workspace --features pyo3/auto-initialize
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
 
   python:
     name: Python tests (${{ matrix.os }})

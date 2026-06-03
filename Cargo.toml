@@ -7,7 +7,7 @@ version = "0.1.0"
 authors = ["Alvaro Cubi <alvaro.cubi.ricart@gmail.com>"]
 edition = "2024"
 license = "EUPL-1.2"
-repository = "https://github.com/AlvaroCubi/migjorn"
+repository = "https://github.com/Fusion4Energy/migjorn"
 
 [profile.release]
 # debug = true  # Activate debug symbols when profiling

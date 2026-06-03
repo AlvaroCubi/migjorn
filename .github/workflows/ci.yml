@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,6 +24,11 @@ jobs:
         with:
           components: clippy
 
+      - name: Set up Python (Required for PyO3 test linking)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -37,10 +42,10 @@ jobs:
         run: cargo build --workspace
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --features pyo3/auto-initialize
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   python:
     name: Python tests (${{ matrix.os }})
@@ -72,7 +77,7 @@ jobs:
         run: pip install maturin pytest
 
       - name: Build and install Python package (dev mode)
-        run: maturin develop
+        run: pip install -e .
 
       - name: Run Python tests
         run: pytest

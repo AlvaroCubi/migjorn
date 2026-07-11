@@ -17,6 +17,11 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+# Everything needed to run the example notebook:
+#   uv run --with "./crates/crunchy-py[notebook]" jupyter lab ...
+notebook = ["jupyterlab", "ipykernel", "nbconvert"]
+
 [project.urls]
 Repository = "https://github.com/AlvaroCubi/crunchy"
 

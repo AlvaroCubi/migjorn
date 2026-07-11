@@ -12,12 +12,12 @@ repository root:
 # Script tour — one command, builds + runs:
 uv run crates/crunchy-py/examples/crunchy_demo.py
 
-# Notebook (interactive):
-uv run --with ./crates/crunchy-py --with jupyterlab \
+# Notebook (interactive) — the [notebook] extra pulls in jupyterlab/ipykernel/nbconvert:
+uv run --with "./crates/crunchy-py[notebook]" \
   jupyter lab crates/crunchy-py/examples/crunchy_demo.ipynb
 
 # Notebook (execute headless, refresh outputs in place):
-uv run --with ./crates/crunchy-py --with nbconvert --with ipykernel \
+uv run --with "./crates/crunchy-py[notebook]" \
   jupyter nbconvert --to notebook --execute --inplace \
   crates/crunchy-py/examples/crunchy_demo.ipynb
 ```

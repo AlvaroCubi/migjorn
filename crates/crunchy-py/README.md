@@ -26,6 +26,30 @@ The script carries its dependency (the local `crunchy-mcnp` package) as inline
 [PEP 723](https://peps.python.org/pep-0723/) metadata, so `uv run` compiles the
 extension via maturin into an isolated environment automatically.
 
+## Use in an IDE (VS Code / Jupyter kernel)
+
+To run the notebook against a persistent, selectable interpreter (rather than
+uv's ephemeral `uv run` environments), create a `.venv` that contains **both**
+`crunchy` and `ipykernel`. From this directory (`crates/crunchy-py`):
+
+```bash
+uv sync --extra notebook
+```
+
+This builds the extension and installs the notebook stack (jupyterlab, ipykernel,
+nbconvert) into `crates/crunchy-py/.venv`. Then, in your IDE, select the kernel /
+interpreter:
+
+```
+crates/crunchy-py/.venv/Scripts/python.exe      # Windows
+crates/crunchy-py/.venv/bin/python              # macOS / Linux
+```
+
+A kernel without `ipykernel` (e.g. a bare `uv venv`, or `uv sync` **without**
+`--extra notebook`) will fail to start for the notebook — that missing package is
+the usual cause. After changing the Rust code, re-run `uv sync --extra notebook`
+(or `maturin develop`) to rebuild.
+
 ## Install (development, without uv)
 
 ```bash

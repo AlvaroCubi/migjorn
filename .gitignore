@@ -8,6 +8,7 @@ __pycache__/
 *.pyd
 .pytest_cache/
 *.egg-info/
+.venv/
 # uv writes this when it treats the package dir as a project; the example's
 # `uv run --with` commands resolve fresh and don't need a committed lock.
 uv.lock

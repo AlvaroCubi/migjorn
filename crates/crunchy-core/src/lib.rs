@@ -5,10 +5,12 @@
 //! edits (e.g. renumbering) can rewrite the exact tokens while the CST keeps the
 //! rest of the deck byte-for-byte intact.
 
+mod cell;
 mod num;
 mod surface;
 mod transform;
 
+pub use cell::{cells, parse_cell, Cell, CellRef, GeomExpr, SurfaceRef};
 pub use num::{parse_float, parse_int};
 pub use surface::{parse_surface, surfaces, Surface, SurfaceKind};
 pub use transform::{parse_transform, transforms, Transform};

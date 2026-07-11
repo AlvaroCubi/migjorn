@@ -17,10 +17,12 @@ fn main() {
         ("lex", Some(p)) => lex_hist(&p),
         ("parse", Some(p)) => parse_cmd(&p),
         ("surfaces", Some(p)) => surfaces_cmd(&p),
+        ("cells", Some(p)) => cells_cmd(&p),
         _ => {
             eprintln!("usage:");
             eprintln!("  crunchy parse    <file.mcnp>  parse into cards, report structure + diagnostics");
             eprintln!("  crunchy surfaces <file.mcnp>  parse surfaces, report mnemonic histogram");
+            eprintln!("  crunchy cells    <file.mcnp>  parse cells + geometry, report reference counts");
             eprintln!("  crunchy bench <file.mcnp>   measure lex + CST build timings");
             eprintln!("  crunchy lex   <file.mcnp>   print token-kind histogram");
             std::process::exit(2);
@@ -165,6 +167,50 @@ fn parse_cmd(path: &str) {
     if !ok {
         std::process::exit(1);
     }
+}
+
+fn cells_cmd(path: &str) {
+    let src = read(path);
+    let t = Instant::now();
+    let parsed = crunchy_syntax::parse(src);
+    let parse_dt = t.elapsed();
+
+    let t = Instant::now();
+    let (mut count, mut void, mut like, mut malformed) = (0u64, 0u64, 0u64, 0u64);
+    let (mut surf_refs, mut cell_refs) = (0u64, 0u64);
+    let mut max_id = i64::MIN;
+    let debug = std::env::var_os("CRUNCHY_DEBUG").is_some();
+    for c in crunchy_core::cells(&parsed.tree) {
+        count += 1;
+        max_id = max_id.max(c.id);
+        if c.material == Some(0) {
+            void += 1;
+        }
+        if c.like.is_some() {
+            like += 1;
+        }
+        if !c.well_formed {
+            malformed += 1;
+            if debug && malformed <= 5 {
+                let card = &parsed.tree.cards()[c.card_index];
+                let text: String = (card.first_tok..card.tok_end)
+                    .map(|i| parsed.tree.token_text(i))
+                    .collect();
+                eprintln!("[debug] malformed cell {}: {:?}", c.id, text.trim_end());
+            }
+        }
+        surf_refs += c.surface_refs().len() as u64;
+        cell_refs += c.cell_refs().len() as u64;
+    }
+    let typed_dt = t.elapsed();
+
+    eprintln!("parse:     {:>10.3?}", parse_dt);
+    eprintln!("cells:     {:>10.3?}  ({count} cells, max id {max_id})", typed_dt);
+    eprintln!("  void:            {void}");
+    eprintln!("  like-but:        {like}");
+    eprintln!("  malformed:       {malformed}");
+    eprintln!("  surface refs:    {surf_refs}");
+    eprintln!("  cell refs (#n):  {cell_refs}");
 }
 
 fn surfaces_cmd(path: &str) {

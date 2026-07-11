@@ -6,15 +6,21 @@
 //! rest of the deck byte-for-byte intact.
 
 mod cell;
+mod datacard;
+mod deck;
+mod material;
 mod num;
 mod renumber;
 mod surface;
 mod transform;
 
-pub use cell::{cells, parse_cell, scan_cell_refs, Cell, CellRef, GeomExpr, RefKind, SurfaceRef};
+pub use cell::{cell_id, cells, parse_cell, scan_cell_refs, Cell, CellRef, GeomExpr, RefKind, SurfaceRef};
+pub use datacard::{data_cards, parse_data_card, DataCard};
+pub use deck::{Deck, DeckIndex};
+pub use material::{materials, parse_material, Material, MaterialEntry};
 pub use num::{parse_float, parse_int};
 pub use renumber::{renumber_cells, renumber_surfaces};
-pub use surface::{parse_surface, surfaces, Surface, SurfaceKind};
+pub use surface::{parse_surface, surface_id, surfaces, Surface, SurfaceKind};
 pub use transform::{parse_transform, transforms, Transform};
 
 // Re-export the syntax layer so downstream users need only depend on core.

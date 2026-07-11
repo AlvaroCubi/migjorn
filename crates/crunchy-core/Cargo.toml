@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 crunchy-syntax = { path = "../crunchy-syntax" }
+rustc-hash = "2"

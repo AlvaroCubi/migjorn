@@ -19,8 +19,10 @@ fn main() {
         ("surfaces", Some(p)) => surfaces_cmd(&p),
         ("cells", Some(p)) => cells_cmd(&p),
         ("renumber", Some(p)) => renumber_cmd(&p, args.next()),
+        ("deck", Some(p)) => deck_cmd(&p),
         _ => {
             eprintln!("usage:");
+            eprintln!("  crunchy deck     <file.mcnp>          parse via Deck facade, summarize model");
             eprintln!("  crunchy parse    <file.mcnp>          parse into cards, report structure");
             eprintln!("  crunchy surfaces <file.mcnp>          parse surfaces, mnemonic histogram");
             eprintln!("  crunchy cells    <file.mcnp>          parse cells + geometry, ref counts");
@@ -169,6 +171,30 @@ fn parse_cmd(path: &str) {
     if !ok {
         std::process::exit(1);
     }
+}
+
+fn deck_cmd(path: &str) {
+    let src = read(path);
+    let t = Instant::now();
+    let deck = crunchy_core::Deck::parse(src.clone());
+    let parse_dt = t.elapsed();
+
+    let t = Instant::now();
+    let idx = deck.index();
+    let index_dt = t.elapsed();
+
+    let materials: Vec<_> = deck.materials().collect();
+    let total_entries: usize = materials.iter().map(|m| m.entries.len()).sum();
+
+    eprintln!("parse:     {:>10.3?}", parse_dt);
+    eprintln!("index:     {:>10.3?}", index_dt);
+    eprintln!("cells:       {}", idx.cells.len());
+    eprintln!("surfaces:    {}", idx.surfaces.len());
+    eprintln!("materials:   {}  ({total_entries} zaid/fraction entries)", idx.materials.len());
+    eprintln!("transforms:  {}", idx.transforms.len());
+    eprintln!("data cards:  {}", deck.data_cards().count());
+    eprintln!("diagnostics: {}", deck.diagnostics().len());
+    eprintln!("roundtrip:   lossless={}", deck.to_source() == src);
 }
 
 fn renumber_cmd(path: &str, offset_arg: Option<String>) {

@@ -1,0 +1,12 @@
+---
+source: crates/crunchy-syntax/tests/corpus.rs
+expression: summary(&src)
+input_file: crates/crunchy-syntax/tests/corpus/title_like_comment.mcnp
+---
+TITLE_CARD   | 
+CELL_CARD    | 1 0 -1
+CELL_CARD    | 2 0 1
+SURFACE_CARD | 1 SO 5
+DATA_CARD    | m1 1001 1
+--
+diagnostics: none

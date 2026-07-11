@@ -15,8 +15,10 @@ fn main() {
     match (cmd.as_str(), path) {
         ("bench", Some(p)) => bench(&p),
         ("lex", Some(p)) => lex_hist(&p),
+        ("parse", Some(p)) => parse_cmd(&p),
         _ => {
             eprintln!("usage:");
+            eprintln!("  crunchy parse <file.mcnp>   parse into cards, report structure + diagnostics");
             eprintln!("  crunchy bench <file.mcnp>   measure lex + CST build timings");
             eprintln!("  crunchy lex   <file.mcnp>   print token-kind histogram");
             std::process::exit(2);
@@ -124,17 +126,53 @@ fn bench(path: &str) {
     }
 }
 
+fn parse_cmd(path: &str) {
+    let src = read(path);
+    let t = Instant::now();
+    let parsed = crunchy_syntax::parse(src.clone());
+    let dt = t.elapsed();
+
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    for c in parsed.tree.cards() {
+        *counts.entry(format!("{:?}", c.kind)).or_default() += 1;
+    }
+
+    eprintln!(
+        "parse:     {:>10.3?}  {:>8.1} MB/s  ({} tokens, {} cards)",
+        dt,
+        mbps(src.len(), dt),
+        parsed.tree.token_count(),
+        parsed.tree.cards().len(),
+    );
+    for (kind, n) in &counts {
+        eprintln!("  {kind:<14} {n}");
+    }
+
+    // Losslessness on real input.
+    let ok = parsed.tree.to_source() == src;
+    eprintln!("roundtrip: lossless={ok}");
+
+    if parsed.diagnostics.is_empty() {
+        eprintln!("diagnostics: none");
+    } else {
+        eprintln!("diagnostics: {}", parsed.diagnostics.len());
+        for d in parsed.diagnostics.iter().take(20) {
+            eprintln!("  {:?} @ {}..{}: {}", d.severity, d.span.start, d.span.end, d.message);
+        }
+    }
+    if !ok {
+        std::process::exit(1);
+    }
+}
+
 fn lex_hist(path: &str) {
     let src = read(path);
     let mut counts = [0u64; 32];
     lex(src.as_bytes(), |k, _, _| counts[k as usize] += 1);
-    for i in 0..counts.len() {
-        if counts[i] == 0 {
+    for (i, &n) in counts.iter().enumerate() {
+        if n == 0 {
             continue;
         }
-        // SAFETY: only indices we actually emitted are non-zero, and those are
-        // valid SyntaxKind discriminants.
-        let kind: SyntaxKind = unsafe { std::mem::transmute::<u16, SyntaxKind>(i as u16) };
-        println!("{kind:?}: {}", counts[i]);
+        println!("{:?}: {n}", SyntaxKind::from_u16(i as u16));
     }
 }

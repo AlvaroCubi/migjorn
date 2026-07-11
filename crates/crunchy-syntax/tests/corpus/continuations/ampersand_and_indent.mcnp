@@ -1,0 +1,10 @@
+Continuation via ampersand and via 5+ blank columns
+10 0 -1 2 -3 &
+   4 -5 imp:n=1
+20 0 -10 11 -12
+     13 -14 imp:n=1
+
+1 PX 0
+2 PY 0
+
+m1 1001 1

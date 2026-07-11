@@ -3,10 +3,14 @@
 //! This crate owns the lexer and the concrete syntax tree (CST). Higher layers
 //! (`crunchy-core`) project a typed AST on top of it.
 
+mod cst;
+mod diagnostics;
 mod flat;
 mod lexer;
 mod syntax_kind;
 
+pub use cst::{parse, Card, GreenTree, Parsed};
+pub use diagnostics::{Diagnostic, Severity, Span};
 pub use flat::{build_flat_tree, FlatTree};
 pub use lexer::lex;
 pub use syntax_kind::{McnpLang, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};

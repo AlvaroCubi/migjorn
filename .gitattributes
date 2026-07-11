@@ -1,0 +1,6 @@
+# MCNP corpus fixtures must be preserved byte-for-byte so round-trip tests are
+# meaningful. Never apply line-ending or whitespace normalization to them.
+*.mcnp -text -whitespace
+
+# Rust sources: normalize to LF in the repo.
+*.rs text eol=lf

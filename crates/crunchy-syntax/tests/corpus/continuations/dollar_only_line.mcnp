@@ -1,0 +1,11 @@
+Regression: an indented $-only line is a comment continuation, not a blank delimiter
+427004 0 (427015 -427001) imp:n=1 imp:p=1
+           $ blanket_sector_01_r1_c03
+           427018 427022
+          (-428634:428635:428629)
+427005 0 -427001 imp:n=1
+
+1 PX 0
+2 SO 5
+
+m1 1001.31c 1

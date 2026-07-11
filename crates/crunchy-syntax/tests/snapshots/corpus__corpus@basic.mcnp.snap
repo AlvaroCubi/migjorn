@@ -1,0 +1,13 @@
+---
+source: crates/crunchy-syntax/tests/corpus.rs
+expression: summary(&src)
+input_file: crates/crunchy-syntax/tests/corpus/basic.mcnp
+---
+TITLE_CARD   | Basic test deck
+CELL_CARD    | 1 1 -1.0 -1 imp : n = 1
+CELL_CARD    | 2 0 1 imp : n = 0
+SURFACE_CARD | 1 SO 5
+DATA_CARD    | m1 1001.31c 1
+DATA_CARD    | sdef pos = 0 0 0
+--
+diagnostics: none

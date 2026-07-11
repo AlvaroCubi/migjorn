@@ -40,6 +40,16 @@ pub enum SyntaxKind {
     UNKNOWN,
 
     // ---- nodes (interior) ----
+    /// A message block card (precedes the title, optional).
+    MESSAGE_CARD,
+    /// The title card (first logical line of the deck).
+    TITLE_CARD,
+    /// A cell card (a logical line in the cell block).
+    CELL_CARD,
+    /// A surface card (a logical line in the surface block).
+    SURFACE_CARD,
+    /// A data card (a logical line in the data block).
+    DATA_CARD,
     /// One physical source line (grouping used by the M0 spike).
     LINE,
     /// The whole file.
@@ -47,6 +57,43 @@ pub enum SyntaxKind {
 
     #[doc(hidden)]
     __LAST,
+}
+
+impl SyntaxKind {
+    /// Reconstruct a `SyntaxKind` from its `u16` discriminant.
+    #[inline]
+    pub fn from_u16(v: u16) -> SyntaxKind {
+        assert!(v < SyntaxKind::__LAST as u16, "invalid SyntaxKind {v}");
+        // SAFETY: contiguous `#[repr(u16)]` discriminants in `0..__LAST`.
+        unsafe { std::mem::transmute::<u16, SyntaxKind>(v) }
+    }
+
+    /// True for tokens that carry no semantic content (whitespace, comments,
+    /// BOM). The typed layer skips these when reading a card.
+    #[inline]
+    pub fn is_trivia(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::WHITESPACE
+                | SyntaxKind::NEWLINE
+                | SyntaxKind::COMMENT_LINE
+                | SyntaxKind::DOLLAR_COMMENT
+                | SyntaxKind::BOM
+        )
+    }
+
+    /// True for the card-level node kinds.
+    #[inline]
+    pub fn is_card(self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::MESSAGE_CARD
+                | SyntaxKind::TITLE_CARD
+                | SyntaxKind::CELL_CARD
+                | SyntaxKind::SURFACE_CARD
+                | SyntaxKind::DATA_CARD
+        )
+    }
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {

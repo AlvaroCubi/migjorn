@@ -54,8 +54,16 @@ checksum = "7704b5fdd17b18ae31c4c1da5a2e0305a2bf17b5249300a9ee9ed7b72114c636"
 name = "crunchy-cli"
 version = "0.0.0"
 dependencies = [
+ "crunchy-core",
  "crunchy-syntax",
  "rowan",
+]
+
+[[package]]
+name = "crunchy-core"
+version = "0.0.0"
+dependencies = [
+ "crunchy-syntax",
 ]
 
 [[package]]

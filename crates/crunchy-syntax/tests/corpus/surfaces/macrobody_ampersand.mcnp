@@ -1,0 +1,12 @@
+Surfaces: an RPP macrobody continued with trailing ampersands, then comments
+1 0 -158214 imp:n=1
+2 0 158214 imp:n=0
+
+158214   RPP  +558.36 +902.00  &
+              -428.58 -105.42  &
+              +438.70 +662.54
+C a trailing comment describing the surface
+C
+159000   PZ  1808
+
+m1 1001 1

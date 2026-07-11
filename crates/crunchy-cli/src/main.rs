@@ -16,9 +16,11 @@ fn main() {
         ("bench", Some(p)) => bench(&p),
         ("lex", Some(p)) => lex_hist(&p),
         ("parse", Some(p)) => parse_cmd(&p),
+        ("surfaces", Some(p)) => surfaces_cmd(&p),
         _ => {
             eprintln!("usage:");
-            eprintln!("  crunchy parse <file.mcnp>   parse into cards, report structure + diagnostics");
+            eprintln!("  crunchy parse    <file.mcnp>  parse into cards, report structure + diagnostics");
+            eprintln!("  crunchy surfaces <file.mcnp>  parse surfaces, report mnemonic histogram");
             eprintln!("  crunchy bench <file.mcnp>   measure lex + CST build timings");
             eprintln!("  crunchy lex   <file.mcnp>   print token-kind histogram");
             std::process::exit(2);
@@ -162,6 +164,46 @@ fn parse_cmd(path: &str) {
     }
     if !ok {
         std::process::exit(1);
+    }
+}
+
+fn surfaces_cmd(path: &str) {
+    let src = read(path);
+    let t = Instant::now();
+    let parsed = crunchy_syntax::parse(src);
+    let parse_dt = t.elapsed();
+
+    let t = Instant::now();
+    let mut hist: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut count = 0u64;
+    let mut malformed = 0u64;
+    let mut max_id = i64::MIN;
+    let debug = std::env::var_os("CRUNCHY_DEBUG").is_some();
+    for s in crunchy_core::surfaces(&parsed.tree) {
+        count += 1;
+        if !s.well_formed {
+            malformed += 1;
+            if debug && malformed <= 5 {
+                let card = &parsed.tree.cards()[s.card_index];
+                let text: String = (card.first_tok..card.tok_end)
+                    .map(|i| parsed.tree.token_text(i))
+                    .collect();
+                eprintln!("[debug] malformed surface {}: {:?}", s.id, text.trim_end());
+            }
+        }
+        max_id = max_id.max(s.id);
+        *hist.entry(format!("{:?}", s.kind)).or_default() += 1;
+    }
+    let typed_dt = t.elapsed();
+
+    eprintln!("parse:     {:>10.3?}", parse_dt);
+    eprintln!("surfaces:  {:>10.3?}  ({count} surfaces, max id {max_id})", typed_dt);
+    eprintln!("malformed (need shortcut expansion): {malformed}");
+    eprintln!("mnemonic histogram:");
+    let mut entries: Vec<_> = hist.into_iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    for (k, n) in entries {
+        eprintln!("  {k:<14} {n}");
     }
 }
 

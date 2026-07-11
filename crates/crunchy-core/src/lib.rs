@@ -14,7 +14,9 @@ mod renumber;
 mod surface;
 mod transform;
 
-pub use cell::{cell_id, cells, parse_cell, scan_cell_refs, Cell, CellRef, GeomExpr, RefKind, SurfaceRef};
+pub use cell::{
+    cell_id, cells, parse_cell, scan_cell_refs, Cell, CellRef, GeomExpr, RefKind, SurfaceRef,
+};
 pub use datacard::{data_cards, parse_data_card, DataCard};
 pub use deck::{Deck, DeckIndex};
 pub use material::{materials, parse_material, Material, MaterialEntry};
@@ -24,4 +26,6 @@ pub use surface::{parse_surface, surface_id, surfaces, Surface, SurfaceKind};
 pub use transform::{parse_transform, transforms, Transform};
 
 // Re-export the syntax layer so downstream users need only depend on core.
-pub use crunchy_syntax::{self as syntax, parse, Card, Diagnostic, GreenTree, Parsed, Severity, Span, SyntaxKind};
+pub use crunchy_syntax::{
+    self as syntax, parse, Card, Diagnostic, GreenTree, Parsed, Severity, Span, SyntaxKind,
+};

@@ -75,7 +75,13 @@ fn main() {
     rule("surfaces");
     for s in deck.surfaces() {
         let tr = s.transform.map(|t| format!(" (TR{t})")).unwrap_or_default();
-        println!("  {:>3}  {:<4} {:?}{}", s.id, s.kind.mnemonic(), s.coeffs, tr);
+        println!(
+            "  {:>3}  {:<4} {:?}{}",
+            s.id,
+            s.kind.mnemonic(),
+            s.coeffs,
+            tr
+        );
     }
 
     rule("cells");
@@ -133,10 +139,19 @@ fn main() {
 
     rule("edit is lossless everywhere else");
     let edited = deck.to_source();
-    println!("comments preserved:      {}", edited.contains("$ moderator minus the insert"));
+    println!(
+        "comments preserved:      {}",
+        edited.contains("$ moderator minus the insert")
+    );
     println!("continuation preserved:  {}", edited.contains("imp:p=1 &"));
-    println!("surface def renumbered:  {}", edited.contains("1040 RPP -1 1 -1 1 -1 2"));
-    println!("LIKE base renumbered:    {}", edited.contains("910 like 901 but"));
+    println!(
+        "surface def renumbered:  {}",
+        edited.contains("1040 RPP -1 1 -1 1 -1 2")
+    );
+    println!(
+        "LIKE base renumbered:    {}",
+        edited.contains("910 like 901 but")
+    );
 
     println!("\nDone. Full edited deck:\n");
     println!("{edited}");

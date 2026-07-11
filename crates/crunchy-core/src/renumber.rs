@@ -98,7 +98,8 @@ mod tests {
     fn renumber_is_otherwise_lossless() {
         // Everything except the renumbered tokens is byte-identical, including
         // comments and spacing.
-        let src = "title\nc keep me\n1 0 -1   2  imp:n=1 $ trailing\n\n1 SO 5\n2 PX 0\n\nm1 1001 1\n";
+        let src =
+            "title\nc keep me\n1 0 -1   2  imp:n=1 $ trailing\n\n1 SO 5\n2 PX 0\n\nm1 1001 1\n";
         let mut tree = parse(src).tree;
         renumber_surfaces(&mut tree, |id| id + 10);
         let out = tree.to_source();

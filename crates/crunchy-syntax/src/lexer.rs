@@ -178,7 +178,10 @@ mod tests {
         let bytes = src.as_bytes();
         let mut out = Vec::new();
         lex(bytes, |k, s, l| {
-            out.push((k, std::str::from_utf8(&bytes[s as usize..(s + l) as usize]).unwrap()))
+            out.push((
+                k,
+                std::str::from_utf8(&bytes[s as usize..(s + l) as usize]).unwrap(),
+            ))
         });
         out
     }

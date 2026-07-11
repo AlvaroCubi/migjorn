@@ -193,7 +193,13 @@ pub fn parse(src: impl Into<String>) -> Parsed {
 
     // ---- 3. Assign a section to each line and group into cards. ----
     let mut diagnostics = Vec::new();
-    let cards = build_cards(&lines, &tok_kind, &mut diagnostics, src.as_bytes(), &tok_start);
+    let cards = build_cards(
+        &lines,
+        &tok_kind,
+        &mut diagnostics,
+        src.as_bytes(),
+        &tok_start,
+    );
 
     let tree = GreenTree {
         src,
@@ -416,8 +422,7 @@ fn build_cards(
                 // left pending to attach to the next card. Do not reset amp.
             }
             LineClass::Content => {
-                let is_continuation =
-                    cur.is_some() && (l.leading_cols >= 5 || prev_content_amp);
+                let is_continuation = cur.is_some() && (l.leading_cols >= 5 || prev_content_amp);
                 if !is_continuation {
                     // New card starts here; the previous card absorbs any
                     // trailing trivia up to this line's first token.
@@ -446,7 +451,8 @@ mod tests {
 
     #[test]
     fn roundtrips_full_deck() {
-        let src = "\u{feff}Test title\n1 0 -1 imp:n=1 $ void\n2 0 1\n\n1 PX 0.0\n2 SO 5\n\nm1 1001 1\n";
+        let src =
+            "\u{feff}Test title\n1 0 -1 imp:n=1 $ void\n2 0 1\n\n1 PX 0.0\n2 SO 5\n\nm1 1001 1\n";
         let p = parse(src);
         assert_eq!(p.tree.to_source(), src);
     }
@@ -536,7 +542,10 @@ mod tests {
             .expect("cell has an id token");
         assert_eq!(p.tree.token_text(id_tok), "1");
         p.tree.set_token_text(id_tok, "999");
-        assert_eq!(p.tree.to_source(), "title\n999 0 -1\n\n1 PX 0\n\nm1 1001 1\n");
+        assert_eq!(
+            p.tree.to_source(),
+            "title\n999 0 -1\n\n1 PX 0\n\nm1 1001 1\n"
+        );
     }
 
     #[test]

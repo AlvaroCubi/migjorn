@@ -22,11 +22,15 @@ fn main() {
         ("deck", Some(p)) => deck_cmd(&p),
         _ => {
             eprintln!("usage:");
-            eprintln!("  crunchy deck     <file.mcnp>          parse via Deck facade, summarize model");
+            eprintln!(
+                "  crunchy deck     <file.mcnp>          parse via Deck facade, summarize model"
+            );
             eprintln!("  crunchy parse    <file.mcnp>          parse into cards, report structure");
             eprintln!("  crunchy surfaces <file.mcnp>          parse surfaces, mnemonic histogram");
             eprintln!("  crunchy cells    <file.mcnp>          parse cells + geometry, ref counts");
-            eprintln!("  crunchy renumber <file.mcnp> [offset] offset all surfaces + cells, verify");
+            eprintln!(
+                "  crunchy renumber <file.mcnp> [offset] offset all surfaces + cells, verify"
+            );
             eprintln!("  crunchy bench <file.mcnp>   measure lex + CST build timings");
             eprintln!("  crunchy lex   <file.mcnp>   print token-kind histogram");
             std::process::exit(2);
@@ -165,7 +169,10 @@ fn parse_cmd(path: &str) {
     } else {
         eprintln!("diagnostics: {}", parsed.diagnostics.len());
         for d in parsed.diagnostics.iter().take(20) {
-            eprintln!("  {:?} @ {}..{}: {}", d.severity, d.span.start, d.span.end, d.message);
+            eprintln!(
+                "  {:?} @ {}..{}: {}",
+                d.severity, d.span.start, d.span.end, d.message
+            );
         }
     }
     if !ok {
@@ -190,7 +197,10 @@ fn deck_cmd(path: &str) {
     eprintln!("index:     {:>10.3?}", index_dt);
     eprintln!("cells:       {}", idx.cells.len());
     eprintln!("surfaces:    {}", idx.surfaces.len());
-    eprintln!("materials:   {}  ({total_entries} zaid/fraction entries)", idx.materials.len());
+    eprintln!(
+        "materials:   {}  ({total_entries} zaid/fraction entries)",
+        idx.materials.len()
+    );
     eprintln!("transforms:  {}", idx.transforms.len());
     eprintln!("data cards:  {}", deck.data_cards().count());
     eprintln!("diagnostics: {}", deck.diagnostics().len());
@@ -219,7 +229,10 @@ fn renumber_cmd(path: &str, offset_arg: Option<String>) {
     let emit_dt = t.elapsed();
 
     eprintln!("offset:    +{offset}");
-    eprintln!("renumber:  {:>10.3?}  (surfaces + cells, defs + refs)", renum_dt);
+    eprintln!(
+        "renumber:  {:>10.3?}  (surfaces + cells, defs + refs)",
+        renum_dt
+    );
     eprintln!("emit:      {:>10.3?}  ({} bytes)", emit_dt, out.len());
 
     // Validate: re-parse the output and check consistency.
@@ -244,10 +257,23 @@ fn renumber_cmd(path: &str, offset_arg: Option<String>) {
     }
 
     eprintln!("--- validation (re-parsed output) ---");
-    eprintln!("tokens:    {orig_tokens} -> {re_tokens}  {}", ok(orig_tokens == re_tokens));
-    eprintln!("cards:     {orig_cards} -> {re_cards}  {}", ok(orig_cards == re_cards));
-    eprintln!("surfaces:  {orig_surfaces} -> {}  {}", surf_ids.len(), ok(orig_surfaces == surf_ids.len()));
-    eprintln!("min surface id after offset: {min_new}  (>= {offset}? {})", ok(min_new >= offset));
+    eprintln!(
+        "tokens:    {orig_tokens} -> {re_tokens}  {}",
+        ok(orig_tokens == re_tokens)
+    );
+    eprintln!(
+        "cards:     {orig_cards} -> {re_cards}  {}",
+        ok(orig_cards == re_cards)
+    );
+    eprintln!(
+        "surfaces:  {orig_surfaces} -> {}  {}",
+        surf_ids.len(),
+        ok(orig_surfaces == surf_ids.len())
+    );
+    eprintln!(
+        "min surface id after offset: {min_new}  (>= {offset}? {})",
+        ok(min_new >= offset)
+    );
     eprintln!("surface refs checked: {refs}");
     eprintln!("dangling refs: {dangling}  {}", ok(dangling == 0));
 
@@ -305,7 +331,10 @@ fn cells_cmd(path: &str) {
     let typed_dt = t.elapsed();
 
     eprintln!("parse:     {:>10.3?}", parse_dt);
-    eprintln!("cells:     {:>10.3?}  ({count} cells, max id {max_id})", typed_dt);
+    eprintln!(
+        "cells:     {:>10.3?}  ({count} cells, max id {max_id})",
+        typed_dt
+    );
     eprintln!("  void:            {void}");
     eprintln!("  like-but:        {like}");
     eprintln!("  malformed:       {malformed}");
@@ -343,7 +372,10 @@ fn surfaces_cmd(path: &str) {
     let typed_dt = t.elapsed();
 
     eprintln!("parse:     {:>10.3?}", parse_dt);
-    eprintln!("surfaces:  {:>10.3?}  ({count} surfaces, max id {max_id})", typed_dt);
+    eprintln!(
+        "surfaces:  {:>10.3?}  ({count} surfaces, max id {max_id})",
+        typed_dt
+    );
     eprintln!("malformed (need shortcut expansion): {malformed}");
     eprintln!("mnemonic histogram:");
     let mut entries: Vec<_> = hist.into_iter().collect();

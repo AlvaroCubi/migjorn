@@ -149,7 +149,10 @@ pub fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
     // `LIKE n BUT` form?
     if toks
         .get(pos)
-        .map(|&i| tree.token_kind(i) == SyntaxKind::IDENT && tree.token_text(i).eq_ignore_ascii_case("like"))
+        .map(|&i| {
+            tree.token_kind(i) == SyntaxKind::IDENT
+                && tree.token_text(i).eq_ignore_ascii_case("like")
+        })
         .unwrap_or(false)
     {
         pos += 1;
@@ -276,7 +279,11 @@ pub enum RefKind {
 /// geometry region is a surface reference unless it immediately follows `#`
 /// (a cell complement); `#(` opens a region complement whose interior numbers
 /// are surface references.
-pub fn scan_cell_refs(tree: &GreenTree, card_index: usize, mut visit: impl FnMut(RefKind, u32, i64)) {
+pub fn scan_cell_refs(
+    tree: &GreenTree,
+    card_index: usize,
+    mut visit: impl FnMut(RefKind, u32, i64),
+) {
     let card = tree.cards()[card_index];
     if card.kind != SyntaxKind::CELL_CARD {
         return;
@@ -297,10 +304,9 @@ pub fn scan_cell_refs(tree: &GreenTree, card_index: usize, mut visit: impl FnMut
     visit(RefKind::CellId, id_tok, id);
 
     // LIKE n BUT: the only reference is the base cell; no geometry.
-    if toks
-        .get(1)
-        .is_some_and(|&i| tree.token_kind(i) == SyntaxKind::IDENT && tree.token_text(i).eq_ignore_ascii_case("like"))
-    {
+    if toks.get(1).is_some_and(|&i| {
+        tree.token_kind(i) == SyntaxKind::IDENT && tree.token_text(i).eq_ignore_ascii_case("like")
+    }) {
         if let Some(&rt) = toks.get(2) {
             if let Some(v) = parse_int(&tree.token_text(rt)) {
                 visit(RefKind::CellRef, rt, v);
@@ -353,7 +359,9 @@ struct GeomParser<'a> {
 
 impl GeomParser<'_> {
     fn peek(&self) -> Option<(SyntaxKind, u32)> {
-        self.toks.get(self.pos).map(|&i| (self.tree.token_kind(i), i))
+        self.toks
+            .get(self.pos)
+            .map(|&i| (self.tree.token_kind(i), i))
     }
 
     fn bump(&mut self) {
@@ -377,7 +385,8 @@ impl GeomParser<'_> {
     /// intersection := factor (factor)*   (juxtaposition)
     fn parse_intersection(&mut self) -> GeomExpr {
         let mut parts = vec![self.parse_factor()];
-        while let Some((SyntaxKind::NUMBER | SyntaxKind::HASH | SyntaxKind::L_PAREN, _)) = self.peek()
+        while let Some((SyntaxKind::NUMBER | SyntaxKind::HASH | SyntaxKind::L_PAREN, _)) =
+            self.peek()
         {
             parts.push(self.parse_factor());
         }
@@ -488,9 +497,21 @@ mod tests {
         assert_eq!(
             refs,
             vec![
-                SurfaceRef { token: refs[0].token, id: 1, negative: true },
-                SurfaceRef { token: refs[1].token, id: 2, negative: false },
-                SurfaceRef { token: refs[2].token, id: 3, negative: true },
+                SurfaceRef {
+                    token: refs[0].token,
+                    id: 1,
+                    negative: true
+                },
+                SurfaceRef {
+                    token: refs[1].token,
+                    id: 2,
+                    negative: false
+                },
+                SurfaceRef {
+                    token: refs[2].token,
+                    id: 3,
+                    negative: true
+                },
             ]
         );
     }
@@ -531,7 +552,11 @@ mod tests {
         // The fast scan must report the same refs as the GeomExpr tree walk.
         let t = deck("5 1 -2.0 (-1 : -2) 3 #4 #(5 -6) imp:n=1");
         let c = first_cell(&t);
-        let tree_surface: Vec<_> = c.surface_refs().iter().map(|r| (r.id, r.negative)).collect();
+        let tree_surface: Vec<_> = c
+            .surface_refs()
+            .iter()
+            .map(|r| (r.id, r.negative))
+            .collect();
         let tree_cell: Vec<_> = c.cell_refs().iter().map(|r| r.id).collect();
 
         let mut scan_surface = Vec::new();

@@ -375,7 +375,11 @@ impl Deck {
     /// Parser diagnostics (empty on a clean parse).
     #[getter]
     fn diagnostics(&self) -> Vec<Diagnostic> {
-        self.inner.diagnostics().iter().map(Diagnostic::from).collect()
+        self.inner
+            .diagnostics()
+            .iter()
+            .map(Diagnostic::from)
+            .collect()
     }
 
     /// All cells, in source order (materialises a list).

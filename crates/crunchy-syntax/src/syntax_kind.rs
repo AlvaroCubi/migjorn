@@ -112,7 +112,11 @@ impl rowan::Language for McnpLang {
 
     #[inline]
     fn kind_from_raw(raw: rowan::SyntaxKind) -> SyntaxKind {
-        assert!(raw.0 < SyntaxKind::__LAST as u16, "invalid SyntaxKind {}", raw.0);
+        assert!(
+            raw.0 < SyntaxKind::__LAST as u16,
+            "invalid SyntaxKind {}",
+            raw.0
+        );
         // SAFETY: `SyntaxKind` is `#[repr(u16)]` with contiguous discriminants
         // in `0..__LAST`, and we just checked the bound.
         unsafe { std::mem::transmute::<u16, SyntaxKind>(raw.0) }

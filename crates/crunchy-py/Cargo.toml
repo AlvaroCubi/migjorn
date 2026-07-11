@@ -5,8 +5,9 @@ version.workspace = true
 license.workspace = true
 
 [lib]
-# The Python import name is `crunchy`; the built extension module takes this name.
-name = "crunchy"
+# The compiled extension is the private `crunchy._crunchy` submodule; the public
+# `crunchy` package (python/crunchy) re-exports it and carries the type stubs.
+name = "_crunchy"
 crate-type = ["cdylib"]
 
 [dependencies]

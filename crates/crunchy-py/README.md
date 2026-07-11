@@ -95,6 +95,15 @@ deck.save("model_renumbered.mcnp")
 text = str(deck)                         # or deck.to_source()
 ```
 
+## Type checking / IDE support
+
+The package is typed (PEP 561): the compiled extension is the private
+`crunchy._crunchy` submodule, wrapped by the `crunchy` package which ships type
+stubs (`python/crunchy/__init__.pyi`) and a `py.typed` marker. Pylance, pyright,
+and mypy pick these up automatically once the wheel is installed — no more
+"unknown import"/"untyped" warnings. When you change the bindings in
+`src/lib.rs`, update `python/crunchy/__init__.pyi` to match.
+
 ## Notes
 
 - `deck.cells` / `deck.surfaces` / `deck.materials` / `deck.transforms` /

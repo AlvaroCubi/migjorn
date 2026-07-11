@@ -557,9 +557,10 @@ fn parse(text: &str) -> Deck {
     Deck::new(text)
 }
 
-/// crunchy -- a fast, lossless MCNP parser.
+/// crunchy -- a fast, lossless MCNP parser (private compiled module; the public
+/// API is re-exported by the `crunchy` Python package).
 #[pymodule]
-fn crunchy(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _crunchy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(parse, m)?)?;
     m.add_class::<Deck>()?;

@@ -26,7 +26,9 @@ notebook = ["jupyterlab", "ipykernel", "nbconvert"]
 Repository = "https://github.com/AlvaroCubi/crunchy"
 
 [tool.maturin]
-# The extension module is named `crunchy` (see crate [lib] name). Build stable
-# abi3 wheels so one wheel serves CPython 3.9+.
-module-name = "crunchy"
+# The compiled extension is the private `crunchy._crunchy` submodule; the public
+# `crunchy` package lives in python/crunchy and carries the type stubs. Build
+# stable abi3 wheels so one wheel serves CPython 3.9+.
+module-name = "crunchy._crunchy"
 features = ["pyo3/extension-module"]
+python-source = "python"

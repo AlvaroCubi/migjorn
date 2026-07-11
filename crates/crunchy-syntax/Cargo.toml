@@ -1,0 +1,8 @@
+[package]
+name = "crunchy-syntax"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+rowan = "0.16"

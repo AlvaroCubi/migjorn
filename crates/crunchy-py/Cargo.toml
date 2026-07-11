@@ -1,0 +1,15 @@
+[package]
+name = "crunchy-py"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+# The Python import name is `crunchy`; the built extension module takes this name.
+name = "crunchy"
+crate-type = ["cdylib"]
+
+[dependencies]
+crunchy-core = { path = "../crunchy-core" }
+rustc-hash = "2"
+pyo3 = { version = "0.23", features = ["abi3-py39", "extension-module"] }

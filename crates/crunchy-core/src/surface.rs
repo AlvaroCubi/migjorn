@@ -60,6 +60,55 @@ pub enum SurfaceKind {
 }
 
 impl SurfaceKind {
+    /// The canonical MCNP mnemonic string for this kind.
+    pub fn mnemonic(&self) -> String {
+        use SurfaceKind::*;
+        let s = match self {
+            P => "P",
+            Px => "PX",
+            Py => "PY",
+            Pz => "PZ",
+            So => "SO",
+            S => "S",
+            Sx => "SX",
+            Sy => "SY",
+            Sz => "SZ",
+            Cx => "CX",
+            Cy => "CY",
+            Cz => "CZ",
+            CParX => "C/X",
+            CParY => "C/Y",
+            CParZ => "C/Z",
+            Kx => "KX",
+            Ky => "KY",
+            Kz => "KZ",
+            KParX => "K/X",
+            KParY => "K/Y",
+            KParZ => "K/Z",
+            Sq => "SQ",
+            Gq => "GQ",
+            Tx => "TX",
+            Ty => "TY",
+            Tz => "TZ",
+            X => "X",
+            Y => "Y",
+            Z => "Z",
+            Box => "BOX",
+            Rpp => "RPP",
+            Sph => "SPH",
+            Rcc => "RCC",
+            Rhp => "RHP",
+            Hex => "HEX",
+            Rec => "REC",
+            Trc => "TRC",
+            Ell => "ELL",
+            Wed => "WED",
+            Arb => "ARB",
+            Other(s) => return s.to_string(),
+        };
+        s.to_string()
+    }
+
     /// Parse a mnemonic case-insensitively.
     pub fn from_mnemonic(s: &str) -> SurfaceKind {
         use SurfaceKind::*;

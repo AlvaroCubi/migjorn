@@ -81,12 +81,12 @@ impl Deck {
     }
 
     /// Renumber every surface (definitions + references) via `map`.
-    pub fn renumber_surfaces(&mut self, map: impl Fn(i64) -> i64) {
+    pub fn renumber_surfaces(&mut self, map: impl FnMut(i64) -> i64) {
         renumber_surfaces(&mut self.tree, map);
     }
 
     /// Renumber every cell (definitions + references) via `map`.
-    pub fn renumber_cells(&mut self, map: impl Fn(i64) -> i64) {
+    pub fn renumber_cells(&mut self, map: impl FnMut(i64) -> i64) {
         renumber_cells(&mut self.tree, map);
     }
 }

@@ -4,6 +4,7 @@ members = [
     "crates/crunchy-syntax",
     "crates/crunchy-core",
     "crates/crunchy-cli",
+    "crates/crunchy-py",
 ]
 
 [workspace.package]
@@ -16,4 +17,6 @@ repository = "https://github.com/AlvaroCubi/crunchy"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# NB: no `panic = "abort"` — the Python extension (crunchy-py) needs panics to
+# unwind so PyO3 can turn them into Python exceptions at the FFI boundary rather
+# than aborting the host process.

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "crunchy-mcnp"
+description = "A fast, lossless MCNP input parser with whole-geometry editing."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Alvaro Cubi" }]
+keywords = ["mcnp", "parser", "monte-carlo", "neutronics"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/AlvaroCubi/crunchy"
+
+[tool.maturin]
+# The extension module is named `crunchy` (see crate [lib] name). Build stable
+# abi3 wheels so one wheel serves CPython 3.9+.
+module-name = "crunchy"
+features = ["pyo3/extension-module"]

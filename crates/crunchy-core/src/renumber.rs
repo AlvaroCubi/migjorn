@@ -19,7 +19,7 @@ use crate::surface::surface_id;
 ///
 /// `map` is applied to the *original* ids; the pass is single-shot, so a map
 /// need not be injective, but a non-injective map can of course alias surfaces.
-pub fn renumber_surfaces(tree: &mut GreenTree, map: impl Fn(i64) -> i64) {
+pub fn renumber_surfaces(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
     let ncards = tree.cards().len();
     // Reused across cards to avoid per-card allocation.
     let mut edits: Vec<(u32, i64)> = Vec::new();
@@ -49,7 +49,7 @@ pub fn renumber_surfaces(tree: &mut GreenTree, map: impl Fn(i64) -> i64) {
 
 /// Renumber every cell using `map` (old id → new id). Updates cell card
 /// definitions, `#n` complement references, and `LIKE n` base references.
-pub fn renumber_cells(tree: &mut GreenTree, map: impl Fn(i64) -> i64) {
+pub fn renumber_cells(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
     let ncards = tree.cards().len();
     let mut edits: Vec<(u32, i64)> = Vec::new();
     for i in 0..ncards {

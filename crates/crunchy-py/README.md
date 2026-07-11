@@ -33,7 +33,7 @@ uv's ephemeral `uv run` environments), create a `.venv` that contains **both**
 `crunchy` and `ipykernel`. From this directory (`crates/crunchy-py`):
 
 ```bash
-uv sync --extra notebook
+uv sync --no-editable --extra notebook
 ```
 
 This builds the extension and installs the notebook stack (jupyterlab, ipykernel,
@@ -47,8 +47,14 @@ crates/crunchy-py/.venv/bin/python              # macOS / Linux
 
 A kernel without `ipykernel` (e.g. a bare `uv venv`, or `uv sync` **without**
 `--extra notebook`) will fail to start for the notebook — that missing package is
-the usual cause. After changing the Rust code, re-run `uv sync --extra notebook`
-(or `maturin develop`) to rebuild.
+the usual cause. After changing the Rust code, re-run
+`uv sync --no-editable --extra notebook` (or `maturin develop`) to rebuild.
+
+> **Why `--no-editable`?** An editable install points a `.pth` at the external
+> `python/` source dir; Pylance often won't follow that to find the stubs, so you
+> get no autocomplete/typing. A non-editable install places `crunchy/__init__.pyi`
+> and `py.typed` physically in `site-packages`, which every type checker resolves.
+> (Trade-off: after editing the code you must re-sync to pick up changes.)
 
 ## Install (development, without uv)
 

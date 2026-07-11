@@ -4,7 +4,8 @@ These mirror the runtime API implemented in `crates/crunchy-py/src/lib.rs`.
 Keep them in sync when the bindings change.
 """
 
-from typing import Callable, Optional, Union
+from collections.abc import Callable
+from typing import Optional, Union
 
 __version__: str
 
@@ -125,7 +126,6 @@ class Deck:
 
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
-
     @property
     def diagnostics(self) -> list[Diagnostic]:
         """Parser diagnostics (empty on a clean parse)."""

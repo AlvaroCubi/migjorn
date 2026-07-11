@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        # crunchy-py is a Python extension; it is built and linted in the Python
+        # job (it needs a Python toolchain). Everything else is pure Rust.
+        run: cargo clippy --workspace --exclude crunchy-py --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace --exclude crunchy-py
+
+  python:
+    name: Python (bindings + stub drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      # Builds the extension via maturin and installs it non-editably (so the
+      # type stubs land on disk), then runs the binding tests and the stub-drift
+      # check (tests/test_stubs.py) which fails if crunchy/__init__.pyi and the
+      # runtime API disagree.
+      - name: Build, install & test
+        run: uv run --no-project --with ./crates/crunchy-py --with pytest pytest crates/crunchy-py/tests -q

@@ -25,7 +25,9 @@
 //! untouched bytes exactly as they were.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::fmt::Write as _;
+
+use rustc_hash::FxHashMap;
 
 use crate::diagnostics::{Diagnostic, Span};
 use crate::lexer::lex;
@@ -49,8 +51,19 @@ pub struct GreenTree {
     tok_start: Vec<u32>,
     /// Card nodes in source order; they tile the token stream.
     cards: Vec<Card>,
-    /// Sparse per-token text overrides (empty until the first edit).
-    overrides: HashMap<u32, Box<str>>,
+    /// Sparse per-token overrides (empty until the first edit). A fast
+    /// (non-DoS-resistant) hasher — keys are our own token indices, and bulk
+    /// renumbering does tens of millions of inserts + lookups.
+    overrides: FxHashMap<u32, Override>,
+}
+
+/// A replacement value for a token. `Int` avoids allocating a string per edit,
+/// which matters for bulk edits like whole-geometry renumbering (millions of
+/// numeric tokens); the digits are written directly on re-emission.
+#[derive(Debug, Clone)]
+enum Override {
+    Int(i64),
+    Text(Box<str>),
 }
 
 impl GreenTree {
@@ -90,7 +103,8 @@ impl GreenTree {
     #[inline]
     pub fn token_text(&self, i: u32) -> Cow<'_, str> {
         match self.overrides.get(&i) {
-            Some(o) => Cow::Borrowed(o),
+            Some(Override::Text(o)) => Cow::Borrowed(o),
+            Some(Override::Int(v)) => Cow::Owned(v.to_string()),
             None => Cow::Borrowed(self.token_src_text(i)),
         }
     }
@@ -102,9 +116,15 @@ impl GreenTree {
     }
 
     /// Override the text of token `i`. Used by higher layers to implement
-    /// semantic edits (e.g. renumbering) losslessly.
+    /// semantic edits losslessly.
     pub fn set_token_text(&mut self, i: u32, text: impl Into<Box<str>>) {
-        self.overrides.insert(i, text.into());
+        self.overrides.insert(i, Override::Text(text.into()));
+    }
+
+    /// Override token `i` with an integer value, formatted on re-emission.
+    /// Allocation-free per edit — the path for bulk renumbering.
+    pub fn set_token_int(&mut self, i: u32, value: i64) {
+        self.overrides.insert(i, Override::Int(value));
     }
 
     /// Whether any edits have been applied.
@@ -131,7 +151,11 @@ impl GreenTree {
         }
         for i in 0..n {
             match self.overrides.get(&(i as u32)) {
-                Some(o) => out.push_str(o),
+                Some(Override::Text(o)) => out.push_str(o),
+                Some(Override::Int(v)) => {
+                    // Write digits straight into `out`, no temporary allocation.
+                    let _ = write!(out, "{v}");
+                }
                 None => {
                     let s = self.tok_start[i] as usize;
                     let e = self.tok_start[i + 1] as usize;
@@ -176,7 +200,7 @@ pub fn parse(src: impl Into<String>) -> Parsed {
         tok_kind,
         tok_start,
         cards,
-        overrides: HashMap::new(),
+        overrides: FxHashMap::default(),
     };
     Parsed { tree, diagnostics }
 }

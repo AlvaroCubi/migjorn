@@ -243,6 +243,93 @@ pub fn cells(tree: &GreenTree) -> impl Iterator<Item = Cell> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_cell(tree, i))
 }
 
+/// What a scanned reference is. Reported by [`scan_cell_refs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefKind {
+    /// The cell's own id.
+    CellId,
+    /// A signed surface reference; the reported value is the magnitude.
+    SurfaceRef { negative: bool },
+    /// A cell reference (`#n` complement or `LIKE n` base).
+    CellRef,
+}
+
+/// Allocation-light scan of a cell card's references, for bulk edits like
+/// renumbering. Invokes `visit(kind, token, value)` for the cell id, every
+/// surface reference (value = magnitude, sense in `kind`), and every cell
+/// reference. Builds no geometry tree.
+///
+/// It applies the same structural rules as [`parse_cell`]: a `NUMBER` in the
+/// geometry region is a surface reference unless it immediately follows `#`
+/// (a cell complement); `#(` opens a region complement whose interior numbers
+/// are surface references.
+pub fn scan_cell_refs(tree: &GreenTree, card_index: usize, mut visit: impl FnMut(RefKind, u32, i64)) {
+    let card = tree.cards()[card_index];
+    if card.kind != SyntaxKind::CELL_CARD {
+        return;
+    }
+    let toks: Vec<u32> = tree
+        .card_content_tokens(&card)
+        .filter(|&i| tree.token_kind(i) != SyntaxKind::AMP)
+        .collect();
+
+    // Cell id.
+    let Some(&id_tok) = toks.first() else { return };
+    if tree.token_kind(id_tok) != SyntaxKind::NUMBER {
+        return;
+    }
+    let Some(id) = parse_int(&tree.token_text(id_tok)) else {
+        return;
+    };
+    visit(RefKind::CellId, id_tok, id);
+
+    // LIKE n BUT: the only reference is the base cell; no geometry.
+    if toks
+        .get(1)
+        .is_some_and(|&i| tree.token_kind(i) == SyntaxKind::IDENT && tree.token_text(i).eq_ignore_ascii_case("like"))
+    {
+        if let Some(&rt) = toks.get(2) {
+            if let Some(v) = parse_int(&tree.token_text(rt)) {
+                visit(RefKind::CellRef, rt, v);
+            }
+        }
+        return;
+    }
+
+    // Skip material (+ density when not void).
+    let mut pos = 1;
+    let material = match toks.get(pos) {
+        Some(&i) if tree.token_kind(i) == SyntaxKind::NUMBER => parse_int(&tree.token_text(i)),
+        _ => return,
+    };
+    pos += 1;
+    if material != Some(0) {
+        pos += 1; // density
+    }
+
+    // Geometry region, up to the first IDENT (start of parameters).
+    let mut prev_hash = false;
+    for &t in &toks[pos..] {
+        match tree.token_kind(t) {
+            SyntaxKind::IDENT => break,
+            SyntaxKind::HASH => {
+                prev_hash = true;
+            }
+            SyntaxKind::NUMBER => {
+                if let Some(v) = parse_int(&tree.token_text(t)) {
+                    if prev_hash {
+                        visit(RefKind::CellRef, t, v);
+                    } else {
+                        visit(RefKind::SurfaceRef { negative: v < 0 }, t, v.abs());
+                    }
+                }
+                prev_hash = false;
+            }
+            _ => prev_hash = false, // COLON, parens, etc.
+        }
+    }
+}
+
 /// Recursive-descent parser for a geometry token slice.
 struct GeomParser<'a> {
     tree: &'a GreenTree,
@@ -424,6 +511,27 @@ mod tests {
         assert!(c.well_formed, "nested parens must parse");
         let ids: Vec<_> = c.surface_refs().iter().map(|r| r.id).collect();
         assert_eq!(ids, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn scan_matches_tree_walk() {
+        // The fast scan must report the same refs as the GeomExpr tree walk.
+        let t = deck("5 1 -2.0 (-1 : -2) 3 #4 #(5 -6) imp:n=1");
+        let c = first_cell(&t);
+        let tree_surface: Vec<_> = c.surface_refs().iter().map(|r| (r.id, r.negative)).collect();
+        let tree_cell: Vec<_> = c.cell_refs().iter().map(|r| r.id).collect();
+
+        let mut scan_surface = Vec::new();
+        let mut scan_cell = Vec::new();
+        let mut ids = Vec::new();
+        scan_cell_refs(&t, c.card_index, |kind, _tok, val| match kind {
+            RefKind::CellId => ids.push(val),
+            RefKind::SurfaceRef { negative } => scan_surface.push((val, negative)),
+            RefKind::CellRef => scan_cell.push(val),
+        });
+        assert_eq!(ids, vec![5]);
+        assert_eq!(scan_surface, tree_surface);
+        assert_eq!(scan_cell, tree_cell);
     }
 
     #[test]

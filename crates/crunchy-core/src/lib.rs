@@ -7,11 +7,13 @@
 
 mod cell;
 mod num;
+mod renumber;
 mod surface;
 mod transform;
 
-pub use cell::{cells, parse_cell, Cell, CellRef, GeomExpr, SurfaceRef};
+pub use cell::{cells, parse_cell, scan_cell_refs, Cell, CellRef, GeomExpr, RefKind, SurfaceRef};
 pub use num::{parse_float, parse_int};
+pub use renumber::{renumber_cells, renumber_surfaces};
 pub use surface::{parse_surface, surfaces, Surface, SurfaceKind};
 pub use transform::{parse_transform, transforms, Transform};
 

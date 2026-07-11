@@ -215,6 +215,27 @@ pub fn surfaces(tree: &GreenTree) -> impl Iterator<Item = Surface> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_surface(tree, i))
 }
 
+/// Minimal surface-header read for bulk edits: `(id_token, id, white)`.
+/// Allocation-free — skips coefficient parsing entirely.
+pub fn surface_id(tree: &GreenTree, card_index: usize) -> Option<(u32, i64, bool)> {
+    let card = tree.cards()[card_index];
+    if card.kind != SyntaxKind::SURFACE_CARD {
+        return None;
+    }
+    let mut it = tree.card_content_tokens(&card);
+    let mut tok = it.next()?;
+    if tree.token_kind(tok) == SyntaxKind::STAR {
+        tok = it.next()?;
+    }
+    if tree.token_kind(tok) != SyntaxKind::NUMBER {
+        return None;
+    }
+    let text = tree.token_text(tok);
+    let white = text.starts_with('+');
+    let id = parse_int(&text)?;
+    Some((tok, id, white))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

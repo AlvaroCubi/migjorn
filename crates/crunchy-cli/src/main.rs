@@ -18,11 +18,13 @@ fn main() {
         ("parse", Some(p)) => parse_cmd(&p),
         ("surfaces", Some(p)) => surfaces_cmd(&p),
         ("cells", Some(p)) => cells_cmd(&p),
+        ("renumber", Some(p)) => renumber_cmd(&p, args.next()),
         _ => {
             eprintln!("usage:");
-            eprintln!("  crunchy parse    <file.mcnp>  parse into cards, report structure + diagnostics");
-            eprintln!("  crunchy surfaces <file.mcnp>  parse surfaces, report mnemonic histogram");
-            eprintln!("  crunchy cells    <file.mcnp>  parse cells + geometry, report reference counts");
+            eprintln!("  crunchy parse    <file.mcnp>          parse into cards, report structure");
+            eprintln!("  crunchy surfaces <file.mcnp>          parse surfaces, mnemonic histogram");
+            eprintln!("  crunchy cells    <file.mcnp>          parse cells + geometry, ref counts");
+            eprintln!("  crunchy renumber <file.mcnp> [offset] offset all surfaces + cells, verify");
             eprintln!("  crunchy bench <file.mcnp>   measure lex + CST build timings");
             eprintln!("  crunchy lex   <file.mcnp>   print token-kind histogram");
             std::process::exit(2);
@@ -166,6 +168,78 @@ fn parse_cmd(path: &str) {
     }
     if !ok {
         std::process::exit(1);
+    }
+}
+
+fn renumber_cmd(path: &str, offset_arg: Option<String>) {
+    let offset: i64 = offset_arg.and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    let src = read(path);
+
+    let parsed = crunchy_syntax::parse(&src);
+    let orig_tokens = parsed.tree.token_count();
+    let orig_cards = parsed.tree.cards().len();
+    let orig_surfaces = crunchy_core::surfaces(&parsed.tree).count();
+
+    // Apply the whole-geometry renumber: every surface and cell shifted by
+    // `offset` (definitions + all references).
+    let mut tree = parsed.tree;
+    let t = Instant::now();
+    crunchy_core::renumber_surfaces(&mut tree, |id| id + offset);
+    crunchy_core::renumber_cells(&mut tree, |id| id + offset);
+    let renum_dt = t.elapsed();
+
+    let t = Instant::now();
+    let out = tree.to_source();
+    let emit_dt = t.elapsed();
+
+    eprintln!("offset:    +{offset}");
+    eprintln!("renumber:  {:>10.3?}  (surfaces + cells, defs + refs)", renum_dt);
+    eprintln!("emit:      {:>10.3?}  ({} bytes)", emit_dt, out.len());
+
+    // Validate: re-parse the output and check consistency.
+    let re = crunchy_syntax::parse(&out);
+    let re_tokens = re.tree.token_count();
+    let re_cards = re.tree.cards().len();
+
+    // Every surface reference in a cell must resolve to a surface definition.
+    let surf_ids: std::collections::HashSet<i64> =
+        crunchy_core::surfaces(&re.tree).map(|s| s.id).collect();
+    let mut dangling = 0u64;
+    let mut refs = 0u64;
+    let mut min_new = i64::MAX;
+    for c in crunchy_core::cells(&re.tree) {
+        for r in c.surface_refs() {
+            refs += 1;
+            min_new = min_new.min(r.id);
+            if !surf_ids.contains(&r.id) {
+                dangling += 1;
+            }
+        }
+    }
+
+    eprintln!("--- validation (re-parsed output) ---");
+    eprintln!("tokens:    {orig_tokens} -> {re_tokens}  {}", ok(orig_tokens == re_tokens));
+    eprintln!("cards:     {orig_cards} -> {re_cards}  {}", ok(orig_cards == re_cards));
+    eprintln!("surfaces:  {orig_surfaces} -> {}  {}", surf_ids.len(), ok(orig_surfaces == surf_ids.len()));
+    eprintln!("min surface id after offset: {min_new}  (>= {offset}? {})", ok(min_new >= offset));
+    eprintln!("surface refs checked: {refs}");
+    eprintln!("dangling refs: {dangling}  {}", ok(dangling == 0));
+
+    let all_ok = orig_tokens == re_tokens
+        && orig_cards == re_cards
+        && orig_surfaces == surf_ids.len()
+        && dangling == 0;
+    eprintln!("RESULT: {}", if all_ok { "OK" } else { "FAILED" });
+    if !all_ok {
+        std::process::exit(1);
+    }
+}
+
+fn ok(b: bool) -> &'static str {
+    if b {
+        "ok"
+    } else {
+        "MISMATCH"
     }
 }
 

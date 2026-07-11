@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 rowan = "0.16"
+rustc-hash = "2"
 
 [dev-dependencies]
 insta = { version = "1", features = ["glob"] }

@@ -3,7 +3,30 @@
 Fast, **lossless** MCNP input parsing with whole-geometry editing, backed by a
 Rust core.
 
-## Install (development)
+## Run the examples with uv (no manual build)
+
+[`uv`](https://docs.astral.sh/uv/) builds the Rust extension for you. From the
+repository root:
+
+```bash
+# Script tour — one command, builds + runs:
+uv run crates/crunchy-py/examples/crunchy_demo.py
+
+# Notebook (interactive):
+uv run --with ./crates/crunchy-py --with jupyterlab \
+  jupyter lab crates/crunchy-py/examples/crunchy_demo.ipynb
+
+# Notebook (execute headless, refresh outputs in place):
+uv run --with ./crates/crunchy-py --with nbconvert --with ipykernel \
+  jupyter nbconvert --to notebook --execute --inplace \
+  crates/crunchy-py/examples/crunchy_demo.ipynb
+```
+
+The script carries its dependency (the local `crunchy-mcnp` package) as inline
+[PEP 723](https://peps.python.org/pep-0723/) metadata, so `uv run` compiles the
+extension via maturin into an isolated environment automatically.
+
+## Install (development, without uv)
 
 ```bash
 pip install maturin

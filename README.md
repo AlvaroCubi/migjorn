@@ -38,10 +38,6 @@ std::fs::write("out.mcnp", deck.to_source())?;
 
 ## Python
 
-```bash
-pip install maturin && (cd crates/crunchy-py && maturin develop --release)
-```
-
 ```python
 import crunchy
 deck = crunchy.Deck.from_file("model.mcnp")
@@ -50,7 +46,20 @@ deck.offset_surfaces(1_000_000)     # or deck.renumber_surfaces({1: 100, ...})
 deck.save("out.mcnp")
 ```
 
-See `crates/crunchy-py/README.md` for the full Python API.
+Run the example with [uv](https://docs.astral.sh/uv/) — it builds the extension
+for you:
+
+```bash
+uv run crates/crunchy-py/examples/crunchy_demo.py
+```
+
+Or build/install manually with maturin:
+
+```bash
+pip install maturin && (cd crates/crunchy-py && maturin develop --release)
+```
+
+See `crates/crunchy-py/README.md` for the full Python API and more uv commands.
 
 ## Testing
 

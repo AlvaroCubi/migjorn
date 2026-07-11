@@ -1,3 +1,10 @@
 /target
 **/*.rs.bk
 Cargo.lock.orig
+
+# Python
+__pycache__/
+*.pyc
+*.pyd
+.pytest_cache/
+*.egg-info/

@@ -98,7 +98,7 @@ def main():
 
     rule("whole-geometry renumbering")
     print("cell 3 before:", cell_line(str(deck), 3))
-    deck.offset_surfaces(1000)             # every surface +1000 (defs + refs)
+    deck.offset_surfaces(1000)  # every surface +1000 (defs + refs)
     deck.renumber_cells(lambda n: n + 900)  # every cell   +900  (defs + #n + LIKE)
     print("cell 3 after: ", cell_line(str(deck), 903))
 

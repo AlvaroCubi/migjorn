@@ -5,13 +5,12 @@ Keep them in sync when the bindings change.
 """
 
 from collections.abc import Callable
-from typing import Optional, Union
 
 __version__: str
 
 # A surface/cell number mapping accepted by the renumber methods: either an
 # explicit dict (unmapped ids are unchanged) or a callable applied per id.
-Mapping = Union[dict[int, int], Callable[[int], int]]
+Mapping = dict[int, int] | Callable[[int], int]
 
 def parse(text: str) -> Deck:
     """Parse MCNP ``text`` into a :class:`Deck`."""
@@ -26,7 +25,7 @@ class Surface:
     """MCNP mnemonic, e.g. ``"PX"``, ``"GQ"``, ``"C/X"``, ``"RPP"``."""
     coeffs: list[float]
     """Surface coefficients."""
-    transform: Optional[int]
+    transform: int | None
     """Transformation number (negative => periodic), or ``None``."""
     reflective: bool
     """Reflective boundary (leading ``*``)."""
@@ -41,13 +40,13 @@ class Cell:
 
     id: int
     """Cell number."""
-    material: Optional[int]
+    material: int | None
     """Material number (0 = void); ``None`` for ``LIKE n BUT`` cells."""
-    density: Optional[float]
+    density: float | None
     """Density (positive = atom, negative = mass), or ``None`` for void."""
     is_void: bool
     """``True`` when the material number is 0."""
-    like: Optional[int]
+    like: int | None
     """Base cell number for a ``LIKE n BUT`` card, or ``None``."""
     surface_ids: list[int]
     """Referenced surface numbers (magnitudes)."""
@@ -88,7 +87,7 @@ class DataCard:
 
     name: str
     """Uppercased mnemonic including any number (``"SDEF"``, ``"F4"``)."""
-    particle: Optional[str]
+    particle: str | None
     """Particle designator after ``:`` (``"n"``, ``"n,p"``), or ``None``."""
     starred: bool
     """Leading ``*`` modifier (``*F``, ``*TR``)."""
@@ -166,19 +165,19 @@ class Deck:
         """Number of surfaces (cheap; does not build the surface list)."""
         ...
 
-    def surface(self, id: int) -> Optional[Surface]:
+    def surface(self, id: int) -> Surface | None:
         """Look up a surface by number, or ``None``."""
         ...
 
-    def cell(self, id: int) -> Optional[Cell]:
+    def cell(self, id: int) -> Cell | None:
         """Look up a cell by number, or ``None``."""
         ...
 
-    def material(self, id: int) -> Optional[Material]:
+    def material(self, id: int) -> Material | None:
         """Look up a material by number, or ``None``."""
         ...
 
-    def transform(self, id: int) -> Optional[Transform]:
+    def transform(self, id: int) -> Transform | None:
         """Look up a transform by number, or ``None``."""
         ...
 

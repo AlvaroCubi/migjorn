@@ -11,7 +11,15 @@ import os
 
 import crunchy
 
-PUBLIC_CLASSES = ["Deck", "Surface", "Cell", "Material", "Transform", "DataCard", "Diagnostic"]
+PUBLIC_CLASSES = [
+    "Deck",
+    "Surface",
+    "Cell",
+    "Material",
+    "Transform",
+    "DataCard",
+    "Diagnostic",
+]
 
 
 def _load_stub() -> ast.Module:

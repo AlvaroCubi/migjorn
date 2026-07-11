@@ -32,3 +32,15 @@ Repository = "https://github.com/AlvaroCubi/crunchy"
 module-name = "crunchy._crunchy"
 features = ["pyo3/extension-module"]
 python-source = "python"
+
+[tool.ruff]
+target-version = "py39"
+# Notebooks are demo artifacts with pre-computed outputs; don't format them.
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+# Keep the re-export imports (`X as X`) in a single combined block.
+combine-as-imports = true

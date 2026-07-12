@@ -250,6 +250,12 @@ class Model:
         unchanged."""
         ...
 
+    def renumber_tallies(self, mapping: Mapping) -> None:
+        """Renumber every tally *id* (``Fn`` and companion cards) via
+        ``mapping``. Cell/surface ids inside tally bins are updated by
+        ``renumber_cells`` / ``renumber_surfaces`` instead."""
+        ...
+
     def offset_surfaces(self, delta: int) -> None:
         """Shift every surface number by ``delta``."""
         ...

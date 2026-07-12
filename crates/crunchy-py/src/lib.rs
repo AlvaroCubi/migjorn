@@ -744,6 +744,18 @@ impl Model {
         Ok(())
     }
 
+    /// Renumber every tally *id* (`Fn` and companion cards like `E`, `FM`,
+    /// `SD`, ...) via `mapping`. The cell/surface ids inside tally bins are
+    /// updated by :meth:`renumber_cells` / :meth:`renumber_surfaces`, not here.
+    /// `mapping` is a dict or callable, as for :meth:`renumber_surfaces`.
+    fn renumber_tallies(&mut self, mapping: Bound<'_, PyAny>) -> PyResult<()> {
+        let mut mapper = Mapper::build(mapping)?;
+        self.inner.renumber_tallies(|id| mapper.map(id));
+        mapper.into_result()?;
+        self.invalidate();
+        Ok(())
+    }
+
     /// Shift every surface number by `delta` (a fast convenience for
     /// ``renumber_surfaces(lambda n: n + delta)``).
     fn offset_surfaces(&mut self, delta: i64) {

@@ -13,7 +13,8 @@ use crate::datacard::{data_cards, DataCard};
 use crate::emit::emit_cell;
 use crate::material::{materials, parse_material, Material};
 use crate::renumber::{
-    renumber_cells, renumber_materials, renumber_surfaces, renumber_transforms, renumber_universes,
+    renumber_cells, renumber_materials, renumber_surfaces, renumber_tallies, renumber_transforms,
+    renumber_universes,
 };
 use crate::surface::{parse_surface, surface_id, surfaces, Surface};
 use crate::transform::{transforms, Transform};
@@ -122,6 +123,13 @@ impl Model {
     /// including lattice fill arrays) via `map`. Universe 0 is left unchanged.
     pub fn renumber_universes(&mut self, map: impl FnMut(i64) -> i64) {
         renumber_universes(&mut self.tree, map);
+    }
+
+    /// Renumber every tally *id* (`Fn` and companion cards) via `map`. The
+    /// cell/surface ids inside tally bins are updated by
+    /// [`Model::renumber_cells`]/[`Model::renumber_surfaces`], not here.
+    pub fn renumber_tallies(&mut self, map: impl FnMut(i64) -> i64) {
+        renumber_tallies(&mut self.tree, map);
     }
 
     /// Read the cell at `card_index`, preferring a structurally-edited (owned)

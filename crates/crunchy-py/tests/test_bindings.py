@@ -249,6 +249,25 @@ def test_renumber_universes():
     assert "u=500" in out and "fill=500" in out
 
 
+def test_renumber_tallies_and_bins():
+    src = (
+        "Tally demo\n"
+        "1 0 -1\n2 0 1\n\n"
+        "1 SO 5\n\n"
+        "m1 1001 1\n"
+        "f4:n 1 2\n"  # cell-flux tally
+        "e4 1 10\n"  # energy bins (companion)
+    )
+    model = crunchy.parse(src)
+    # Renumbering cells updates the tally's cell bins.
+    model.renumber_cells(lambda n: n + 10)
+    assert "f4:n 11 12" in str(model)
+    # renumber_tallies renames the tally id and its companion cards.
+    model.renumber_tallies({4: 24})
+    out = str(model)
+    assert "f24:n" in out and "e24 1 10" in out
+
+
 if __name__ == "__main__":
     test_parse_and_lossless()
     test_typed_access()
@@ -268,4 +287,5 @@ if __name__ == "__main__":
     test_add_rejects_bad_text()
     test_renumber_materials_and_transforms()
     test_renumber_universes()
+    test_renumber_tallies_and_bins()
     print("all crunchy binding smoke tests passed")

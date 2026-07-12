@@ -25,7 +25,8 @@ pub use material::{materials, parse_material, Material, MaterialEntry};
 pub use model::{CellRead, EditError, Model, ModelIndex};
 pub use num::{parse_float, parse_int};
 pub use renumber::{
-    renumber_cells, renumber_materials, renumber_surfaces, renumber_transforms, renumber_universes,
+    renumber_cells, renumber_materials, renumber_surfaces, renumber_tallies, renumber_transforms,
+    renumber_universes,
 };
 pub use surface::{parse_surface, surface_id, surfaces, Surface, SurfaceKind};
 pub use transform::{parse_transform, transforms, Transform};

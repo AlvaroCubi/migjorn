@@ -44,6 +44,8 @@ pub fn renumber_surfaces(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) 
                 edits.push((tok, if negative { -new } else { new }));
             }
         });
+        // Surface ids in surface-tally (F1/F2) bins (sign = direction, kept).
+        push_tally_bin_edits(tree, i, TallyKind::Surface, &mut map, &mut edits);
         for &(tok, val) in &edits {
             tree.set_token_int(tok, val);
         }
@@ -61,6 +63,8 @@ pub fn renumber_cells(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
             RefKind::CellId | RefKind::CellRef => edits.push((tok, map(id))),
             RefKind::SurfaceRef { .. } => {}
         });
+        // Cell ids in cell-tally (F4/F6/F7/F8) bins.
+        push_tally_bin_edits(tree, i, TallyKind::Cell, &mut map, &mut edits);
         for &(tok, val) in &edits {
             tree.set_token_int(tok, val);
         }
@@ -240,6 +244,159 @@ fn push_universe_edit(
     }
 }
 
+/// What a tally's bins reference, from its type (the last digit of the number).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TallyKind {
+    /// F1/F2 — surface bins.
+    Surface,
+    /// F4/F6/F7/F8 — cell bins.
+    Cell,
+    /// F5 — point detector (coordinates, not cell/surface ids).
+    Detector,
+    /// Any other trailing digit.
+    Other,
+}
+
+/// A parsed `Fn` tally card: its number token, number, kind, and the id tokens
+/// of its cell/surface bin list.
+struct Tally {
+    number_token: u32,
+    number: i64,
+    kind: TallyKind,
+    bin_tokens: Vec<u32>,
+}
+
+/// Parse the `Fn` tally card at `i` (`*Fn`, `Fn:p` handled), or `None` if the
+/// card is not an `Fn` tally. Cheap for non-data cards (kind check first), so it
+/// is safe to call on every card in the hot renumber loops.
+fn parse_tally(tree: &GreenTree, i: usize) -> Option<Tally> {
+    let card = tree.cards()[i];
+    if card.kind != SyntaxKind::DATA_CARD {
+        return None;
+    }
+    let toks: Vec<u32> = tree
+        .card_content_tokens(&card)
+        .filter(|&t| tree.token_kind(t) != SyntaxKind::AMP)
+        .collect();
+    let mut p = 0;
+    if toks.first().map(|&t| tree.token_kind(t)) == Some(SyntaxKind::STAR) {
+        p = 1;
+    }
+    let name_tok = *toks.get(p)?;
+    if tree.token_kind(name_tok) != SyntaxKind::IDENT {
+        return None;
+    }
+    let up = tree.token_text(name_tok).to_ascii_uppercase();
+    // Exactly `F` + digits (not FC/FM/FS/...); those are companion cards.
+    let digits = up.strip_prefix('F')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let number = parse_int(digits)?;
+    p += 1;
+    // Optional `:particle`.
+    if toks.get(p).map(|&t| tree.token_kind(t)) == Some(SyntaxKind::COLON) {
+        p += 1;
+        if toks.get(p).map(|&t| tree.token_kind(t)) == Some(SyntaxKind::IDENT) {
+            p += 1;
+        }
+    }
+    let kind = match number % 10 {
+        1 | 2 => TallyKind::Surface,
+        4 | 6 | 7 | 8 => TallyKind::Cell,
+        5 => TallyKind::Detector,
+        _ => TallyKind::Other,
+    };
+    let bin_tokens = toks[p..]
+        .iter()
+        .copied()
+        .filter(|&t| tree.token_kind(t) == SyntaxKind::NUMBER)
+        .collect();
+    Some(Tally {
+        number_token: name_tok,
+        number,
+        kind,
+        bin_tokens,
+    })
+}
+
+/// Tally companion-card prefixes that carry the tally number (`E5`, `FM5`, …).
+/// Matched with an all-digit remainder, so a longer prefix wins (`EM5` matches
+/// `EM`, not `E`).
+const TALLY_PREFIXES: &[&str] = &[
+    "FC", "FM", "FS", "FQ", "FT", "FU", "FIC", "FIP", "FIR", "FMESH", "SD", "DE", "DF", "EM", "TM",
+    "CM", "TF", "DD", "E", "T", "C",
+];
+
+/// If card `i` is a tally companion card (`<prefix><digits>`), return its
+/// mnemonic token and the referenced tally number.
+fn tally_companion_ref(tree: &GreenTree, i: usize) -> Option<(u32, i64)> {
+    let card = tree.cards()[i];
+    if card.kind != SyntaxKind::DATA_CARD {
+        return None;
+    }
+    let mut it = tree.card_content_tokens(&card);
+    let mut tok = it.next()?;
+    if tree.token_kind(tok) == SyntaxKind::STAR {
+        tok = it.next()?;
+    }
+    if tree.token_kind(tok) != SyntaxKind::IDENT {
+        return None;
+    }
+    let up = tree.token_text(tok).to_ascii_uppercase();
+    for pre in TALLY_PREFIXES {
+        if let Some(rest) = up.strip_prefix(pre) {
+            if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+                return Some((tok, parse_int(rest)?));
+            }
+        }
+    }
+    None
+}
+
+/// If card `i` is a tally of `want` kind, queue renumber edits for every id in
+/// its bin list (magnitude mapped; sign preserved; 0 skipped). Called from the
+/// cell/surface renumber passes so tally bins stay consistent.
+fn push_tally_bin_edits(
+    tree: &GreenTree,
+    i: usize,
+    want: TallyKind,
+    map: &mut impl FnMut(i64) -> i64,
+    edits: &mut Vec<(u32, i64)>,
+) {
+    let Some(t) = parse_tally(tree, i) else {
+        return;
+    };
+    if t.kind != want {
+        return;
+    }
+    for tok in t.bin_tokens {
+        if let Some(v) = parse_int(&tree.token_text(tok)) {
+            if v != 0 {
+                let new = map(v.abs());
+                edits.push((tok, if v < 0 { -new } else { new }));
+            }
+        }
+    }
+}
+
+/// Renumber every tally using `map` (old id → new id). Updates each `Fn` tally
+/// number and common companion cards (`FC`, `FM`, `FS`, `E`, `T`, `C`, `SD`, …).
+/// Note: this renumbers the tally *ids*; the cell/surface ids inside tally bins
+/// are updated by [`renumber_cells`]/[`renumber_surfaces`] instead.
+pub fn renumber_tallies(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
+    let ncards = tree.cards().len();
+    for i in 0..ncards {
+        if let Some(t) = parse_tally(tree, i) {
+            rewrite_trailing_number(tree, t.number_token, map(t.number));
+            continue;
+        }
+        if let Some((tok, id)) = tally_companion_ref(tree, i) {
+            rewrite_trailing_number(tree, tok, map(id));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +497,48 @@ mod tests {
         let out = tree.to_source();
         assert!(out.contains("u=-23"), "sign not preserved: {out}"); // -3 -> -23
         assert!(out.contains("fill=0"), "universe 0 must not change: {out}");
+    }
+
+    #[test]
+    fn renumber_tallies_updates_number_and_companions() {
+        let src = "title\n1 0 -1\n\n1 SO 5\n\nm1 1001 1\nf4:n 1\nfc4 flux\ne4 1 10\nsd4 1\n";
+        let mut tree = parse(src).tree;
+        renumber_tallies(&mut tree, |id| id + 10);
+        let out = tree.to_source();
+        assert!(out.contains("f14:n 1")); // tally number
+        assert!(out.contains("fc14 flux")); // FC comment card
+        assert!(out.contains("e14 1 10")); // energy bins
+        assert!(out.contains("sd14 1")); // segment divisor
+    }
+
+    #[test]
+    fn renumber_cells_updates_cell_tally_bins() {
+        let src = "title\n1 0 -1\n2 0 1\n\n1 SO 5\n\nm1 1001 1\nf4:n 1 2\n";
+        let mut tree = parse(src).tree;
+        renumber_cells(&mut tree, |id| id + 100);
+        let out = tree.to_source();
+        assert!(out.contains("101 0 -1")); // cell def
+        assert!(out.contains("f4:n 101 102")); // cell-flux tally bins follow
+    }
+
+    #[test]
+    fn renumber_surfaces_updates_surface_tally_bins() {
+        let src = "title\n1 0 -1\n\n1 SO 5\n2 PX 0\n\nm1 1001 1\nf1:n 1 -2\n";
+        let mut tree = parse(src).tree;
+        renumber_surfaces(&mut tree, |id| id + 100);
+        let out = tree.to_source();
+        assert!(out.contains("101 SO 5")); // surface def
+        assert!(out.contains("f1:n 101 -102")); // surface-current tally bins (sign kept)
+    }
+
+    #[test]
+    fn renumber_cells_leaves_surface_tally_bins_alone() {
+        // A surface tally's bins are surface ids -- renumbering cells must not
+        // touch them.
+        let src = "title\n1 0 -1\n\n1 SO 5\n2 PX 0\n\nm1 1001 1\nf2:n 1 2\n";
+        let mut tree = parse(src).tree;
+        renumber_cells(&mut tree, |id| id + 100);
+        assert!(tree.to_source().contains("f2:n 1 2"));
     }
 
     #[test]

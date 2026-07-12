@@ -733,6 +733,17 @@ impl Model {
         Ok(())
     }
 
+    /// Renumber every universe -- `u=` definitions and `fill=` references
+    /// (including lattice fill arrays) -- consistently. Universe 0 is left
+    /// unchanged. `mapping` is a dict or callable, as for :meth:`renumber_surfaces`.
+    fn renumber_universes(&mut self, mapping: Bound<'_, PyAny>) -> PyResult<()> {
+        let mut mapper = Mapper::build(mapping)?;
+        self.inner.renumber_universes(|id| mapper.map(id));
+        mapper.into_result()?;
+        self.invalidate();
+        Ok(())
+    }
+
     /// Shift every surface number by `delta` (a fast convenience for
     /// ``renumber_surfaces(lambda n: n + delta)``).
     fn offset_surfaces(&mut self, delta: i64) {

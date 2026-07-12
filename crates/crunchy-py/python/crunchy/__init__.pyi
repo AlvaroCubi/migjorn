@@ -244,6 +244,12 @@ class Model:
         fields, periodic sign preserved) via ``mapping``."""
         ...
 
+    def renumber_universes(self, mapping: Mapping) -> None:
+        """Renumber every universe (``u=`` defs and ``fill=`` references,
+        including lattice fill arrays) via ``mapping``. Universe 0 is left
+        unchanged."""
+        ...
+
     def offset_surfaces(self, delta: int) -> None:
         """Shift every surface number by ``delta``."""
         ...

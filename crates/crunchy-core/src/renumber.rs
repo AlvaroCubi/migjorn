@@ -10,7 +10,7 @@
 
 use crunchy_syntax::{GreenTree, SyntaxKind};
 
-use crate::cell::{cell_material, scan_cell_refs, RefKind};
+use crate::cell::{cell_material, cell_params, scan_cell_refs, RefKind};
 use crate::material::parse_material;
 use crate::num::parse_int;
 use crate::surface::{parse_surface, surface_id};
@@ -149,6 +149,97 @@ pub fn renumber_transforms(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64
     }
 }
 
+/// The universe-number tokens inside a `fill=` value list. Handles a simple
+/// `fill=N` (optionally `N (TR…)`) and a lattice array
+/// `fill= i1:i2 j1:j2 k1:k2  u u u …` (the universe entries after the ranges;
+/// parenthesised transform groups are skipped).
+fn fill_universe_tokens(tree: &GreenTree, values: &[u32]) -> Vec<u32> {
+    let has_range = values
+        .iter()
+        .any(|&t| tree.token_kind(t) == SyntaxKind::COLON);
+    if !has_range {
+        // Simple fill: the first number before any parenthesised group.
+        for &t in values {
+            match tree.token_kind(t) {
+                SyntaxKind::NUMBER => return vec![t],
+                SyntaxKind::L_PAREN => break,
+                _ => {}
+            }
+        }
+        return Vec::new();
+    }
+    // Lattice fill: consume leading `lo : hi` range triples, then take the
+    // universe numbers that follow (outside any parenthesised group).
+    let mut k = 0;
+    while k + 2 < values.len()
+        && tree.token_kind(values[k]) == SyntaxKind::NUMBER
+        && tree.token_kind(values[k + 1]) == SyntaxKind::COLON
+        && tree.token_kind(values[k + 2]) == SyntaxKind::NUMBER
+    {
+        k += 3;
+    }
+    let mut out = Vec::new();
+    let mut depth = 0u32;
+    for &t in &values[k..] {
+        match tree.token_kind(t) {
+            SyntaxKind::L_PAREN => depth += 1,
+            SyntaxKind::R_PAREN => depth = depth.saturating_sub(1),
+            SyntaxKind::NUMBER if depth == 0 => out.push(t),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Renumber every universe using `map` (old id → new id). Updates `u=`
+/// definitions and `fill=` references (single fills and lattice fill arrays);
+/// the sign of a `u=` value is preserved. Universe 0 (the real world) is left
+/// unchanged.
+pub fn renumber_universes(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
+    let ncards = tree.cards().len();
+    let mut edits: Vec<(u32, i64)> = Vec::new();
+    for i in 0..ncards {
+        edits.clear();
+        for p in cell_params(tree, i) {
+            let toks: &[u32] = match p.key.as_str() {
+                "U" => &p.value_tokens,
+                "FILL" => {
+                    for tok in fill_universe_tokens(tree, &p.value_tokens) {
+                        push_universe_edit(tree, tok, &mut map, &mut edits);
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            // `u=` takes the first number (with sign preserved).
+            if let Some(&tok) = toks
+                .iter()
+                .find(|&&t| tree.token_kind(t) == SyntaxKind::NUMBER)
+            {
+                push_universe_edit(tree, tok, &mut map, &mut edits);
+            }
+        }
+        for &(tok, val) in &edits {
+            tree.set_token_int(tok, val);
+        }
+    }
+}
+
+/// Queue a renumber of the universe number at `tok` (sign preserved, 0 skipped).
+fn push_universe_edit(
+    tree: &GreenTree,
+    tok: u32,
+    map: &mut impl FnMut(i64) -> i64,
+    edits: &mut Vec<(u32, i64)>,
+) {
+    if let Some(v) = parse_int(&tree.token_text(tok)) {
+        if v != 0 {
+            let new = map(v.abs());
+            edits.push((tok, if v < 0 { -new } else { new }));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +308,38 @@ mod tests {
         assert!(out.contains("*tr17 0 0 0")); // *TR definition, star preserved
         assert!(out.contains("1 13 PZ 50")); // surface transform field
         assert!(out.contains("2 -13 SO 5")); // periodic sign preserved
+    }
+
+    #[test]
+    fn renumber_universes_updates_u_and_fill() {
+        let src =
+            "title\n1 0 -1 u=5 imp:n=1\n2 0 -2 fill=5 imp:n=1\n\n1 SO 5\n2 SO 9\n\nm1 1001 1\n";
+        let mut tree = parse(src).tree;
+        renumber_universes(&mut tree, |id| id + 100);
+        let out = tree.to_source();
+        assert!(out.contains("1 0 -1 u=105 imp:n=1"), "got: {out}");
+        assert!(out.contains("2 0 -2 fill=105 imp:n=1"), "got: {out}");
+    }
+
+    #[test]
+    fn renumber_universes_lattice_fill_array() {
+        // A lattice cell whose fill array references universes 5 and 6.
+        let src = "title\n1 0 -1 lat=1 fill=0:1 0:0 0:0 5 6 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n";
+        let mut tree = parse(src).tree;
+        renumber_universes(&mut tree, |id| id + 10);
+        let out = tree.to_source();
+        // Ranges untouched; universe entries renumbered.
+        assert!(out.contains("fill=0:1 0:0 0:0 15 16"), "got: {out}");
+    }
+
+    #[test]
+    fn renumber_universes_preserves_sign_and_zero() {
+        let src = "title\n1 0 -1 u=-3 fill=0 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n";
+        let mut tree = parse(src).tree;
+        renumber_universes(&mut tree, |id| id + 20);
+        let out = tree.to_source();
+        assert!(out.contains("u=-23"), "sign not preserved: {out}"); // -3 -> -23
+        assert!(out.contains("fill=0"), "universe 0 must not change: {out}");
     }
 
     #[test]

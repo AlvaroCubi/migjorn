@@ -428,6 +428,99 @@ pub fn cells(tree: &GreenTree) -> impl Iterator<Item = Cell> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_cell(tree, i))
 }
 
+/// One `keyword=value…` entry from a cell's parameter section (`imp`, `vol`,
+/// `u`, `fill`, `trcl`, …). The value tokens are the meaningful tokens up to the
+/// next keyword; interpretation is left to callers (e.g. universe renumbering).
+#[derive(Debug, Clone)]
+pub struct CellParam {
+    /// Uppercased keyword without any `:particle` designator (e.g. `"U"`).
+    pub key: String,
+    /// Token index of the keyword mnemonic.
+    pub key_token: u32,
+    /// The value tokens (numbers, colons, parens, …) belonging to this keyword.
+    pub value_tokens: Vec<u32>,
+}
+
+/// True if `toks[j]` starts a new cell parameter keyword: an `IDENT` followed by
+/// `=`, or by `:particle =`.
+fn is_keyword_start(tree: &GreenTree, toks: &[u32], j: usize) -> bool {
+    if tree.token_kind(toks[j]) != SyntaxKind::IDENT {
+        return false;
+    }
+    let mut k = j + 1;
+    if k < toks.len() && tree.token_kind(toks[k]) == SyntaxKind::COLON {
+        k += 1;
+        if k < toks.len() && tree.token_kind(toks[k]) == SyntaxKind::IDENT {
+            k += 1;
+        }
+    }
+    k < toks.len() && tree.token_kind(toks[k]) == SyntaxKind::EQ
+}
+
+/// Parse the parameter section (after the geometry) of the cell at `card_index`
+/// into `keyword=value…` entries. Empty for non-cells, `LIKE n BUT` cells, or
+/// cells without parameters. Keywords may carry a `*` prefix (`*fill`, `*trcl`)
+/// and a `:particle` designator (`imp:n`); both are handled.
+pub fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam> {
+    let Some(cell) = parse_cell(tree, card_index) else {
+        return Vec::new();
+    };
+    let Some(params_start) = cell.params_start else {
+        return Vec::new();
+    };
+    let card = tree.cards()[card_index];
+    let toks: Vec<u32> = tree
+        .card_content_tokens(&card)
+        .filter(|&i| tree.token_kind(i) != SyntaxKind::AMP)
+        .collect();
+    let Some(mut j) = toks.iter().position(|&t| t == params_start) else {
+        return Vec::new();
+    };
+    let n = toks.len();
+    let mut params = Vec::new();
+    while j < n {
+        // A keyword may be prefixed with `*` (e.g. `*fill`, `*trcl`).
+        if tree.token_kind(toks[j]) == SyntaxKind::STAR {
+            j += 1;
+        }
+        if j >= n || tree.token_kind(toks[j]) != SyntaxKind::IDENT {
+            break;
+        }
+        let key_token = toks[j];
+        let key = tree.token_text(key_token).to_ascii_uppercase();
+        j += 1;
+        // Optional `:particle`.
+        if j < n && tree.token_kind(toks[j]) == SyntaxKind::COLON {
+            j += 1;
+            if j < n && tree.token_kind(toks[j]) == SyntaxKind::IDENT {
+                j += 1;
+            }
+        }
+        if j < n && tree.token_kind(toks[j]) == SyntaxKind::EQ {
+            j += 1;
+        }
+        // Values run until the next keyword (optionally `*`-prefixed).
+        let vstart = j;
+        while j < n {
+            let at_next = match tree.token_kind(toks[j]) {
+                SyntaxKind::STAR => j + 1 < n && is_keyword_start(tree, &toks, j + 1),
+                SyntaxKind::IDENT => is_keyword_start(tree, &toks, j),
+                _ => false,
+            };
+            if at_next {
+                break;
+            }
+            j += 1;
+        }
+        params.push(CellParam {
+            key,
+            key_token,
+            value_tokens: toks[vstart..j].to_vec(),
+        });
+    }
+    params
+}
+
 /// Minimal read of a cell's material field: `(material_token, material)`, or
 /// `None` for a non-cell card or a `LIKE n BUT` cell (which has no material
 /// field). Allocation-light; used by material renumbering.

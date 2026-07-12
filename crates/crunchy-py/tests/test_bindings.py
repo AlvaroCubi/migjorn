@@ -235,6 +235,20 @@ def test_renumber_materials_and_transforms():
     assert "tr6 0 0 5" in str(model)
 
 
+def test_renumber_universes():
+    src = (
+        "Universe demo\n"
+        "1 0 -1 u=5 imp:n=1\n"
+        "2 0 -2 fill=5 imp:n=1\n\n"
+        "1 SO 5\n2 SO 9\n\n"
+        "m1 1001 1\n"
+    )
+    model = crunchy.parse(src)
+    model.renumber_universes({5: 500})
+    out = str(model)
+    assert "u=500" in out and "fill=500" in out
+
+
 if __name__ == "__main__":
     test_parse_and_lossless()
     test_typed_access()
@@ -253,4 +267,5 @@ if __name__ == "__main__":
     test_remove_cell_and_validate()
     test_add_rejects_bad_text()
     test_renumber_materials_and_transforms()
+    test_renumber_universes()
     print("all crunchy binding smoke tests passed")

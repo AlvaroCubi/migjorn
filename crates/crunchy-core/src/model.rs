@@ -12,7 +12,9 @@ use crate::cell::{cell_id, cells, parse_cell, promote_cell, Cell, GeomExpr, Owne
 use crate::datacard::{data_cards, DataCard};
 use crate::emit::emit_cell;
 use crate::material::{materials, parse_material, Material};
-use crate::renumber::{renumber_cells, renumber_materials, renumber_surfaces, renumber_transforms};
+use crate::renumber::{
+    renumber_cells, renumber_materials, renumber_surfaces, renumber_transforms, renumber_universes,
+};
 use crate::surface::{parse_surface, surface_id, surfaces, Surface};
 use crate::transform::{transforms, Transform};
 
@@ -114,6 +116,12 @@ impl Model {
     /// periodic sign preserved) via `map`.
     pub fn renumber_transforms(&mut self, map: impl FnMut(i64) -> i64) {
         renumber_transforms(&mut self.tree, map);
+    }
+
+    /// Renumber every universe (`u=` definitions and `fill=` references,
+    /// including lattice fill arrays) via `map`. Universe 0 is left unchanged.
+    pub fn renumber_universes(&mut self, map: impl FnMut(i64) -> i64) {
+        renumber_universes(&mut self.tree, map);
     }
 
     /// Read the cell at `card_index`, preferring a structurally-edited (owned)

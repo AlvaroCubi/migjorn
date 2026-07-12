@@ -14,7 +14,7 @@ use crate::num::{parse_float, parse_int};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SurfaceRef {
     /// CST token index of the (signed) surface number.
-    pub token: u32,
+    pub(crate) token: u32,
     /// Surface number magnitude (always positive).
     pub id: i64,
     /// True if written with a negative sense (`-id`).
@@ -25,7 +25,7 @@ pub struct SurfaceRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellRef {
     /// CST token index of the cell number.
-    pub token: u32,
+    pub(crate) token: u32,
     /// Cell number.
     pub id: i64,
 }
@@ -185,8 +185,8 @@ fn collapse(mut parts: Vec<GeomExpr>, build: fn(Vec<GeomExpr>) -> GeomExpr) -> O
 
 /// A promoted, owned cell: geometry is typed and editable, while the parameter
 /// tail (`imp`, `u`, `fill`, inline `$` comments, ...) is kept verbatim so
-/// editing the geometry never drops it. Emitted back to MCNP text via
-/// [`crate::emit::emit_cell`].
+/// editing the geometry never drops it. Emitted back to MCNP text by the
+/// internal emitter when the cell is re-serialised.
 #[derive(Debug, Clone)]
 pub struct OwnedCell {
     /// Cell number.
@@ -228,7 +228,7 @@ impl OwnedCell {
 /// Promote the cell at `card_index` into an editable [`OwnedCell`], or `None`
 /// if it has no editable geometry (a `LIKE n BUT` cell) or its geometry did not
 /// parse cleanly. The parameter tail is captured verbatim from the source.
-pub fn promote_cell(tree: &GreenTree, card_index: usize) -> Option<OwnedCell> {
+pub(crate) fn promote_cell(tree: &GreenTree, card_index: usize) -> Option<OwnedCell> {
     let cell = parse_cell(tree, card_index)?;
     let geometry = cell.geometry.clone()?;
     if !cell.well_formed {
@@ -260,22 +260,20 @@ pub struct Cell {
     pub card_index: usize,
     /// Cell number.
     pub id: i64,
-    /// Token index of the id (for renumbering).
-    pub id_token: u32,
     /// Material number (0 = void). `None` for `LIKE n BUT` cells.
     pub material: Option<i64>,
     /// Token index of the material number, if present.
-    pub material_token: Option<u32>,
+    pub(crate) material_token: Option<u32>,
     /// Density (positive = atom/b-cm, negative = mass g/cc). Absent for void.
     pub density: Option<f64>,
     /// Token index of the density value, if the cell has one (for edits).
-    pub density_token: Option<u32>,
+    pub(crate) density_token: Option<u32>,
     /// For a `LIKE n BUT` card, the referenced base cell.
     pub like: Option<CellRef>,
     /// The geometry expression (absent for `LIKE n BUT`).
     pub geometry: Option<GeomExpr>,
     /// First token index of the parameter section (IMP, VOL, …), if any.
-    pub params_start: Option<u32>,
+    pub(crate) params_start: Option<u32>,
     /// False if some part failed to parse.
     pub well_formed: bool,
 }
@@ -304,7 +302,7 @@ impl Cell {
 }
 
 /// Parse the cell card at `card_index`, or `None` if it is not a cell card.
-pub fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
+pub(crate) fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
     let card = &tree.cards()[card_index];
     if card.kind != SyntaxKind::CELL_CARD {
         return None;
@@ -351,7 +349,6 @@ pub fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
         return Some(Cell {
             card_index,
             id,
-            id_token,
             material: None,
             material_token: None,
             density: None,
@@ -411,7 +408,6 @@ pub fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
     Some(Cell {
         card_index,
         id,
-        id_token,
         material: Some(material),
         material_token: Some(mat_tok),
         density,
@@ -424,7 +420,7 @@ pub fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
 }
 
 /// Iterate all parseable cells in the model, in source order.
-pub fn cells(tree: &GreenTree) -> impl Iterator<Item = Cell> + '_ {
+pub(crate) fn cells(tree: &GreenTree) -> impl Iterator<Item = Cell> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_cell(tree, i))
 }
 
@@ -435,10 +431,8 @@ pub fn cells(tree: &GreenTree) -> impl Iterator<Item = Cell> + '_ {
 pub struct CellParam {
     /// Uppercased keyword without any `:particle` designator (e.g. `"U"`).
     pub key: String,
-    /// Token index of the keyword mnemonic.
-    pub key_token: u32,
     /// The value tokens (numbers, colons, parens, …) belonging to this keyword.
-    pub value_tokens: Vec<u32>,
+    pub(crate) value_tokens: Vec<u32>,
 }
 
 /// True if `toks[j]` starts a new cell parameter keyword: an `IDENT` followed by
@@ -461,7 +455,7 @@ fn is_keyword_start(tree: &GreenTree, toks: &[u32], j: usize) -> bool {
 /// into `keyword=value…` entries. Empty for non-cells, `LIKE n BUT` cells, or
 /// cells without parameters. Keywords may carry a `*` prefix (`*fill`, `*trcl`)
 /// and a `:particle` designator (`imp:n`); both are handled.
-pub fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam> {
+pub(crate) fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam> {
     let Some(cell) = parse_cell(tree, card_index) else {
         return Vec::new();
     };
@@ -486,8 +480,7 @@ pub fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam> {
         if j >= n || tree.token_kind(toks[j]) != SyntaxKind::IDENT {
             break;
         }
-        let key_token = toks[j];
-        let key = tree.token_text(key_token).to_ascii_uppercase();
+        let key = tree.token_text(toks[j]).to_ascii_uppercase();
         j += 1;
         // Optional `:particle`.
         if j < n && tree.token_kind(toks[j]) == SyntaxKind::COLON {
@@ -514,7 +507,6 @@ pub fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam> {
         }
         params.push(CellParam {
             key,
-            key_token,
             value_tokens: toks[vstart..j].to_vec(),
         });
     }
@@ -524,7 +516,7 @@ pub fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam> {
 /// Minimal read of a cell's material field: `(material_token, material)`, or
 /// `None` for a non-cell card or a `LIKE n BUT` cell (which has no material
 /// field). Allocation-light; used by material renumbering.
-pub fn cell_material(tree: &GreenTree, card_index: usize) -> Option<(u32, i64)> {
+pub(crate) fn cell_material(tree: &GreenTree, card_index: usize) -> Option<(u32, i64)> {
     let card = tree.cards()[card_index];
     if card.kind != SyntaxKind::CELL_CARD {
         return None;
@@ -545,7 +537,7 @@ pub fn cell_material(tree: &GreenTree, card_index: usize) -> Option<(u32, i64)> 
 }
 
 /// Minimal cell-header read for indexing: `(id_token, id)`. Allocation-free.
-pub fn cell_id(tree: &GreenTree, card_index: usize) -> Option<(u32, i64)> {
+pub(crate) fn cell_id(tree: &GreenTree, card_index: usize) -> Option<(u32, i64)> {
     let card = tree.cards()[card_index];
     if card.kind != SyntaxKind::CELL_CARD {
         return None;
@@ -559,7 +551,7 @@ pub fn cell_id(tree: &GreenTree, card_index: usize) -> Option<(u32, i64)> {
 
 /// What a scanned reference is. Reported by [`scan_cell_refs`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefKind {
+pub(crate) enum RefKind {
     /// The cell's own id.
     CellId,
     /// A signed surface reference; the reported value is the magnitude.
@@ -577,7 +569,7 @@ pub enum RefKind {
 /// geometry region is a surface reference unless it immediately follows `#`
 /// (a cell complement); `#(` opens a region complement whose interior numbers
 /// are surface references.
-pub fn scan_cell_refs(
+pub(crate) fn scan_cell_refs(
     tree: &GreenTree,
     card_index: usize,
     mut visit: impl FnMut(RefKind, u32, i64),

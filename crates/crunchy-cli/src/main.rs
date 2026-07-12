@@ -195,13 +195,13 @@ fn model_cmd(path: &str) {
 
     eprintln!("parse:     {:>10.3?}", parse_dt);
     eprintln!("index:     {:>10.3?}", index_dt);
-    eprintln!("cells:       {}", idx.cells.len());
-    eprintln!("surfaces:    {}", idx.surfaces.len());
+    eprintln!("cells:       {}", idx.cell_count());
+    eprintln!("surfaces:    {}", idx.surface_count());
     eprintln!(
         "materials:   {}  ({total_entries} zaid/fraction entries)",
-        idx.materials.len()
+        idx.material_count()
     );
-    eprintln!("transforms:  {}", idx.transforms.len());
+    eprintln!("transforms:  {}", idx.transform_count());
     eprintln!("data cards:  {}", model.data_cards().count());
     eprintln!("diagnostics: {}", model.diagnostics().len());
     eprintln!("roundtrip:   lossless={}", model.to_source() == src);
@@ -211,21 +211,24 @@ fn renumber_cmd(path: &str, offset_arg: Option<String>) {
     let offset: i64 = offset_arg.and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
     let src = read(path);
 
-    let parsed = crunchy_syntax::parse(&src);
-    let orig_tokens = parsed.tree.token_count();
-    let orig_cards = parsed.tree.cards().len();
-    let orig_surfaces = crunchy_core::surfaces(&parsed.tree).count();
+    // Raw token/card counts come straight from the syntax layer (a dev-CLI
+    // dependency); the typed work and the renumber go through `Model`.
+    let orig = crunchy_syntax::parse(&src);
+    let orig_tokens = orig.tree.token_count();
+    let orig_cards = orig.tree.cards().len();
+
+    let mut model = crunchy_core::Model::parse(src);
+    let orig_surfaces = model.surfaces().count();
 
     // Apply the whole-geometry renumber: every surface and cell shifted by
     // `offset` (definitions + all references).
-    let mut tree = parsed.tree;
     let t = Instant::now();
-    crunchy_core::renumber_surfaces(&mut tree, |id| id + offset);
-    crunchy_core::renumber_cells(&mut tree, |id| id + offset);
+    model.renumber_surfaces(|id| id + offset);
+    model.renumber_cells(|id| id + offset);
     let renum_dt = t.elapsed();
 
     let t = Instant::now();
-    let out = tree.to_source();
+    let out = model.to_source();
     let emit_dt = t.elapsed();
 
     eprintln!("offset:    +{offset}");
@@ -236,17 +239,17 @@ fn renumber_cmd(path: &str, offset_arg: Option<String>) {
     eprintln!("emit:      {:>10.3?}  ({} bytes)", emit_dt, out.len());
 
     // Validate: re-parse the output and check consistency.
-    let re = crunchy_syntax::parse(&out);
-    let re_tokens = re.tree.token_count();
-    let re_cards = re.tree.cards().len();
+    let re = crunchy_core::Model::parse(&out);
+    let re_syntax = crunchy_syntax::parse(&out);
+    let re_tokens = re_syntax.tree.token_count();
+    let re_cards = re_syntax.tree.cards().len();
 
     // Every surface reference in a cell must resolve to a surface definition.
-    let surf_ids: std::collections::HashSet<i64> =
-        crunchy_core::surfaces(&re.tree).map(|s| s.id).collect();
+    let surf_ids: std::collections::HashSet<i64> = re.surfaces().map(|s| s.id).collect();
     let mut dangling = 0u64;
     let mut refs = 0u64;
     let mut min_new = i64::MAX;
-    for c in crunchy_core::cells(&re.tree) {
+    for c in re.cells() {
         for r in c.surface_refs() {
             refs += 1;
             min_new = min_new.min(r.id);
@@ -298,7 +301,7 @@ fn ok(b: bool) -> &'static str {
 fn cells_cmd(path: &str) {
     let src = read(path);
     let t = Instant::now();
-    let parsed = crunchy_syntax::parse(src);
+    let model = crunchy_core::Model::parse(src);
     let parse_dt = t.elapsed();
 
     let t = Instant::now();
@@ -306,7 +309,7 @@ fn cells_cmd(path: &str) {
     let (mut surf_refs, mut cell_refs) = (0u64, 0u64);
     let mut max_id = i64::MIN;
     let debug = std::env::var_os("CRUNCHY_DEBUG").is_some();
-    for c in crunchy_core::cells(&parsed.tree) {
+    for c in model.cells() {
         count += 1;
         max_id = max_id.max(c.id);
         if c.material == Some(0) {
@@ -318,10 +321,7 @@ fn cells_cmd(path: &str) {
         if !c.well_formed {
             malformed += 1;
             if debug && malformed <= 5 {
-                let card = &parsed.tree.cards()[c.card_index];
-                let text: String = (card.first_tok..card.tok_end)
-                    .map(|i| parsed.tree.token_text(i))
-                    .collect();
+                let text = model.card_source(c.card_index);
                 eprintln!("[debug] malformed cell {}: {:?}", c.id, text.trim_end());
             }
         }
@@ -345,7 +345,7 @@ fn cells_cmd(path: &str) {
 fn surfaces_cmd(path: &str) {
     let src = read(path);
     let t = Instant::now();
-    let parsed = crunchy_syntax::parse(src);
+    let model = crunchy_core::Model::parse(src);
     let parse_dt = t.elapsed();
 
     let t = Instant::now();
@@ -354,15 +354,12 @@ fn surfaces_cmd(path: &str) {
     let mut malformed = 0u64;
     let mut max_id = i64::MIN;
     let debug = std::env::var_os("CRUNCHY_DEBUG").is_some();
-    for s in crunchy_core::surfaces(&parsed.tree) {
+    for s in model.surfaces() {
         count += 1;
         if !s.well_formed {
             malformed += 1;
             if debug && malformed <= 5 {
-                let card = &parsed.tree.cards()[s.card_index];
-                let text: String = (card.first_tok..card.tok_end)
-                    .map(|i| parsed.tree.token_text(i))
-                    .collect();
+                let text = model.card_source(s.card_index);
                 eprintln!("[debug] malformed surface {}: {:?}", s.id, text.trim_end());
             }
         }

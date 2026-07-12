@@ -18,7 +18,11 @@ impl Span {
 }
 
 /// Severity of a diagnostic.
+///
+/// `#[non_exhaustive]`: more severities (e.g. a `Note` level) may be added, so
+/// downstream matches should include a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Severity {
     Error,
     Warning,

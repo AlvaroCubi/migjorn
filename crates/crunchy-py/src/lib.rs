@@ -61,8 +61,7 @@ impl Cell {
         let m = self.model.bind(py).borrow();
         let ci = m
             .inner
-            .tree()
-            .card_by_slot(self.slot)
+            .card_index_of_slot(self.slot)
             .ok_or_else(stale_handle)?;
         let view = m
             .inner
@@ -81,8 +80,7 @@ impl Cell {
         let mut m = self.model.bind(py).borrow_mut();
         let ci = m
             .inner
-            .tree()
-            .card_by_slot(self.slot)
+            .card_index_of_slot(self.slot)
             .ok_or_else(stale_handle)?;
         let r = f(&mut m.inner, ci).map_err(edit_error)?;
         m.invalidate();
@@ -139,9 +137,11 @@ impl Cell {
     #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
         let m = self.model.bind(py).borrow();
-        let tree = m.inner.tree();
-        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
-        Ok(tree.card_source(ci))
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        Ok(m.inner.card_source(ci))
     }
 
     /// Intersect the geometry with a signed surface (negative int = negative
@@ -200,11 +200,31 @@ struct Surface {
 impl Surface {
     fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Surface) -> R) -> PyResult<R> {
         let m = self.model.bind(py).borrow();
-        let tree = m.inner.tree();
-        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
-        let surface = core::parse_surface(tree, ci)
+        if m.inner.card_index_of_slot(self.slot).is_none() {
+            return Err(stale_handle());
+        }
+        let surface = m
+            .inner
+            .surface_by_slot(self.slot)
             .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid surface"))?;
         Ok(f(&surface))
+    }
+
+    /// Run a mutation `f` on the model for this handle's card, then invalidate
+    /// the id index.
+    fn edit<R>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&mut core::Model, usize) -> Result<R, core::EditError>,
+    ) -> PyResult<R> {
+        let mut m = self.model.bind(py).borrow_mut();
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        let r = f(&mut m.inner, ci).map_err(edit_error)?;
+        m.invalidate();
+        Ok(r)
     }
 }
 
@@ -222,9 +242,38 @@ impl Surface {
     fn coeffs(&self, py: Python<'_>) -> PyResult<Vec<f64>> {
         self.read(py, |s| s.coeffs.clone())
     }
+    /// Rewrite every coefficient in place. The number of values must match the
+    /// current coefficient count (changing it is a structural edit).
+    #[setter]
+    fn set_coeffs(&self, py: Python<'_>, values: Vec<f64>) -> PyResult<()> {
+        let current = self.read(py, |s| s.coeffs.len())?;
+        if values.len() != current {
+            return Err(PyValueError::new_err(format!(
+                "expected {current} coefficient(s), got {}",
+                values.len()
+            )));
+        }
+        let mut m = self.model.bind(py).borrow_mut();
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        for (i, v) in values.iter().enumerate() {
+            m.inner.set_surface_coeff(ci, i, *v).map_err(edit_error)?;
+        }
+        m.invalidate();
+        Ok(())
+    }
     #[getter]
     fn transform(&self, py: Python<'_>) -> PyResult<Option<i64>> {
         self.read(py, |s| s.transform)
+    }
+    /// Change the transformation number in place (negative => periodic). Adding
+    /// or removing the transform field entirely is a structural edit and raises
+    /// ``ValueError``.
+    #[setter]
+    fn set_transform(&self, py: Python<'_>, value: Option<i64>) -> PyResult<()> {
+        self.edit(py, |m, ci| m.set_surface_transform(ci, value))
     }
     #[getter]
     fn reflective(&self, py: Python<'_>) -> PyResult<bool> {
@@ -241,10 +290,19 @@ impl Surface {
     #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
         let m = self.model.bind(py).borrow();
-        let tree = m.inner.tree();
-        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
-        Ok(tree.card_source(ci))
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        Ok(m.inner.card_source(ci))
     }
+
+    /// Set a single coefficient (by index) in place. Raises ``ValueError`` for
+    /// an out-of-range index.
+    fn set_coeff(&self, py: Python<'_>, index: usize, value: f64) -> PyResult<()> {
+        self.edit(py, |m, ci| m.set_surface_coeff(ci, index, value))
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         self.read(py, |s| {
             format!(
@@ -274,11 +332,31 @@ struct Material {
 impl Material {
     fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Material) -> R) -> PyResult<R> {
         let m = self.model.bind(py).borrow();
-        let tree = m.inner.tree();
-        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
-        let material = core::parse_material(tree, ci)
+        if m.inner.card_index_of_slot(self.slot).is_none() {
+            return Err(stale_handle());
+        }
+        let material = m
+            .inner
+            .material_by_slot(self.slot)
             .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid material"))?;
         Ok(f(&material))
+    }
+
+    /// Run a mutation `f` on the model for this handle's card, then invalidate
+    /// the id index.
+    fn edit<R>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&mut core::Model, usize) -> Result<R, core::EditError>,
+    ) -> PyResult<R> {
+        let mut m = self.model.bind(py).borrow_mut();
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        let r = f(&mut m.inner, ci).map_err(edit_error)?;
+        m.invalidate();
+        Ok(r)
     }
 }
 
@@ -304,10 +382,25 @@ impl Material {
     #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
         let m = self.model.bind(py).borrow();
-        let tree = m.inner.tree();
-        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
-        Ok(tree.card_source(ci))
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        Ok(m.inner.card_source(ci))
     }
+
+    /// Set the fraction of the ``entry``-th ``(zaid, fraction)`` pair in place
+    /// (positive = atomic, negative = by weight). Raises ``ValueError`` for an
+    /// out-of-range index.
+    fn set_fraction(&self, py: Python<'_>, entry: usize, value: f64) -> PyResult<()> {
+        self.edit(py, |m, ci| m.set_material_fraction(ci, entry, value))
+    }
+
+    /// Set the ZAID of the ``entry``-th pair in place (e.g. ``"1001.31c"``).
+    fn set_zaid(&self, py: Python<'_>, entry: usize, zaid: &str) -> PyResult<()> {
+        self.edit(py, |m, ci| m.set_material_zaid(ci, entry, zaid))
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         self.read(py, |m| {
             format!("Material(id={}, entries={})", m.id, m.entries.len())
@@ -332,11 +425,31 @@ struct Transform {
 impl Transform {
     fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Transform) -> R) -> PyResult<R> {
         let m = self.model.bind(py).borrow();
-        let tree = m.inner.tree();
-        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
-        let transform = core::parse_transform(tree, ci)
+        if m.inner.card_index_of_slot(self.slot).is_none() {
+            return Err(stale_handle());
+        }
+        let transform = m
+            .inner
+            .transform_by_slot(self.slot)
             .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid transform"))?;
         Ok(f(&transform))
+    }
+
+    /// Run a mutation `f` on the model for this handle's card, then invalidate
+    /// the id index.
+    fn edit<R>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&mut core::Model, usize) -> Result<R, core::EditError>,
+    ) -> PyResult<R> {
+        let mut m = self.model.bind(py).borrow_mut();
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        let r = f(&mut m.inner, ci).map_err(edit_error)?;
+        m.invalidate();
+        Ok(r)
     }
 }
 
@@ -356,6 +469,14 @@ impl Transform {
             (t.displacement[0], t.displacement[1], t.displacement[2])
         })
     }
+    /// Set the displacement vector in place. A component that was not written in
+    /// the source (defaulted to 0) has no token to rewrite, so setting it is a
+    /// structural edit and raises ``ValueError``.
+    #[setter]
+    fn set_displacement(&self, py: Python<'_>, value: (f64, f64, f64)) -> PyResult<()> {
+        let d = [value.0, value.1, value.2];
+        self.edit(py, |m, ci| m.set_transform_displacement(ci, d))
+    }
     #[getter]
     fn rotation(&self, py: Python<'_>) -> PyResult<Vec<f64>> {
         self.read(py, |t| t.rotation.clone())
@@ -363,10 +484,19 @@ impl Transform {
     #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
         let m = self.model.bind(py).borrow();
-        let tree = m.inner.tree();
-        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
-        Ok(tree.card_source(ci))
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        Ok(m.inner.card_source(ci))
     }
+
+    /// Rewrite the rotation entries in place. The number of values must match
+    /// the current rotation-entry count (changing it is a structural edit).
+    fn set_rotation(&self, py: Python<'_>, rotation: Vec<f64>) -> PyResult<()> {
+        self.edit(py, |m, ci| m.set_transform_rotation(ci, &rotation))
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         self.read(py, |t| {
             format!("Transform(id={}, degrees={})", t.id, t.degrees)
@@ -436,6 +566,7 @@ impl From<&core::Diagnostic> for Diagnostic {
         let severity = match d.severity {
             core::Severity::Error => "error",
             core::Severity::Warning => "warning",
+            _ => "unknown",
         };
         Diagnostic {
             severity: severity.to_string(),
@@ -528,10 +659,10 @@ impl Model {
         let idx = self.idx();
         format!(
             "Model(cells={}, surfaces={}, materials={}, transforms={}, diagnostics={})",
-            idx.cells.len(),
-            idx.surfaces.len(),
-            idx.materials.len(),
-            idx.transforms.len(),
+            idx.cell_count(),
+            idx.surface_count(),
+            idx.material_count(),
+            idx.transform_count(),
             self.inner.diagnostics().len(),
         )
     }
@@ -552,12 +683,12 @@ impl Model {
         let py = slf.py();
         let model_py: Py<Model> = slf.clone().unbind();
         let m = slf.borrow();
-        let tree = m.inner.tree();
-        (0..tree.cards().len())
-            .filter(|&pos| core::parse_cell(tree, pos).is_some())
-            .map(|pos| Cell {
+        m.inner
+            .cell_slots()
+            .into_iter()
+            .map(|slot| Cell {
                 model: model_py.clone_ref(py),
-                slot: tree.card_slot(pos),
+                slot,
             })
             .collect()
     }
@@ -568,12 +699,12 @@ impl Model {
         let py = slf.py();
         let model_py: Py<Model> = slf.clone().unbind();
         let m = slf.borrow();
-        let tree = m.inner.tree();
-        (0..tree.cards().len())
-            .filter(|&pos| core::parse_surface(tree, pos).is_some())
-            .map(|pos| Surface {
+        m.inner
+            .surface_slots()
+            .into_iter()
+            .map(|slot| Surface {
                 model: model_py.clone_ref(py),
-                slot: tree.card_slot(pos),
+                slot,
             })
             .collect()
     }
@@ -584,12 +715,12 @@ impl Model {
         let py = slf.py();
         let model_py: Py<Model> = slf.clone().unbind();
         let m = slf.borrow();
-        let tree = m.inner.tree();
-        (0..tree.cards().len())
-            .filter(|&pos| core::parse_transform(tree, pos).is_some())
-            .map(|pos| Transform {
+        m.inner
+            .transform_slots()
+            .into_iter()
+            .map(|slot| Transform {
                 model: model_py.clone_ref(py),
-                slot: tree.card_slot(pos),
+                slot,
             })
             .collect()
     }
@@ -600,12 +731,12 @@ impl Model {
         let py = slf.py();
         let model_py: Py<Model> = slf.clone().unbind();
         let m = slf.borrow();
-        let tree = m.inner.tree();
-        (0..tree.cards().len())
-            .filter(|&pos| core::parse_material(tree, pos).is_some())
-            .map(|pos| Material {
+        m.inner
+            .material_slots()
+            .into_iter()
+            .map(|slot| Material {
                 model: model_py.clone_ref(py),
-                slot: tree.card_slot(pos),
+                slot,
             })
             .collect()
     }
@@ -619,32 +750,32 @@ impl Model {
     /// Number of cells (cheap; does not build the cell list).
     #[getter]
     fn num_cells(&self) -> usize {
-        self.idx().cells.len()
+        self.idx().cell_count()
     }
 
     /// Number of surfaces (cheap; does not build the surface list).
     #[getter]
     fn num_surfaces(&self) -> usize {
-        self.idx().surfaces.len()
+        self.idx().surface_count()
     }
 
     /// Number of materials (cheap; does not build the material list).
     #[getter]
     fn num_materials(&self) -> usize {
-        self.idx().materials.len()
+        self.idx().material_count()
     }
 
     /// Number of transforms (cheap; does not build the transform list).
     #[getter]
     fn num_transforms(&self) -> usize {
-        self.idx().transforms.len()
+        self.idx().transform_count()
     }
 
     /// Look up a surface by number, or ``None``.
     fn surface(slf: Bound<'_, Self>, id: i64) -> Option<Surface> {
         let m = slf.borrow();
-        let ci = *m.idx().surfaces.get(&id)?;
-        let slot = m.inner.tree().card_slot(ci);
+        let ci = m.idx().surface(id)?;
+        let slot = m.inner.slot_at(ci);
         Some(Surface {
             model: slf.clone().unbind(),
             slot,
@@ -654,8 +785,8 @@ impl Model {
     /// Look up a cell by number, or ``None``.
     fn cell(slf: Bound<'_, Self>, id: i64) -> Option<Cell> {
         let m = slf.borrow();
-        let ci = *m.idx().cells.get(&id)?;
-        let slot = m.inner.tree().card_slot(ci);
+        let ci = m.idx().cell(id)?;
+        let slot = m.inner.slot_at(ci);
         Some(Cell {
             model: slf.clone().unbind(),
             slot,
@@ -665,8 +796,8 @@ impl Model {
     /// Look up a material by number, or ``None``.
     fn material(slf: Bound<'_, Self>, id: i64) -> Option<Material> {
         let m = slf.borrow();
-        let ci = *m.idx().materials.get(&id)?;
-        let slot = m.inner.tree().card_slot(ci);
+        let ci = m.idx().material(id)?;
+        let slot = m.inner.slot_at(ci);
         Some(Material {
             model: slf.clone().unbind(),
             slot,
@@ -676,8 +807,8 @@ impl Model {
     /// Look up a transform by number, or ``None``.
     fn transform(slf: Bound<'_, Self>, id: i64) -> Option<Transform> {
         let m = slf.borrow();
-        let ci = *m.idx().transforms.get(&id)?;
-        let slot = m.inner.tree().card_slot(ci);
+        let ci = m.idx().transform(id)?;
+        let slot = m.inner.slot_at(ci);
         Some(Transform {
             model: slf.clone().unbind(),
             slot,

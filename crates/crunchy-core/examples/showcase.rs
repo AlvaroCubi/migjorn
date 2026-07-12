@@ -46,16 +46,10 @@ fn rule(title: &str) {
     println!("\n=== {title} ===");
 }
 
-/// Reconstruct a cell's on-disk text from the CST (to show edits visually).
+/// A cell's on-disk text (to show edits visually).
 fn cell_source(model: &Model, id: i64) -> Option<String> {
-    let idx = model.index();
-    let &ci = idx.cells.get(&id)?;
-    let tree = model.tree();
-    let card = tree.cards()[ci];
-    let text: String = (card.first_tok..card.tok_end)
-        .map(|i| tree.token_text(i))
-        .collect();
-    Some(text.trim_end().to_string())
+    let ci = model.index().cell(id)?;
+    Some(model.card_source(ci).trim_end().to_string())
 }
 
 fn main() {
@@ -66,10 +60,10 @@ fn main() {
     let idx = model.index();
     println!(
         "cells={}  surfaces={}  materials={}  transforms={}",
-        idx.cells.len(),
-        idx.surfaces.len(),
-        idx.materials.len(),
-        idx.transforms.len(),
+        idx.cell_count(),
+        idx.surface_count(),
+        idx.material_count(),
+        idx.transform_count(),
     );
 
     rule("surfaces");

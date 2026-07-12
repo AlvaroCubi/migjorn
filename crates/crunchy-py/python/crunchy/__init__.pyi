@@ -17,16 +17,23 @@ def parse(text: str) -> Model:
     ...
 
 class Surface:
-    """A surface card (a live handle onto its model)."""
+    """A surface card (a live handle onto its model).
+
+    ``coeffs`` and ``transform`` are assignable in place. Assigning ``coeffs``
+    rewrites every coefficient and requires a list of the same length (changing
+    the count is a structural edit -> ``ValueError``); changing ``transform``
+    between a number and ``None`` (adding/removing the field) also raises
+    ``ValueError``.
+    """
 
     id: int
     """Surface number."""
     kind: str
     """MCNP mnemonic, e.g. ``"PX"``, ``"GQ"``, ``"C/X"``, ``"RPP"``."""
     coeffs: list[float]
-    """Surface coefficients."""
+    """Surface coefficients. Writable (same-length list)."""
     transform: int | None
-    """Transformation number (negative => periodic), or ``None``."""
+    """Transformation number (negative => periodic), or ``None``. Writable."""
     reflective: bool
     """Reflective boundary (leading ``*``)."""
     white: bool
@@ -35,6 +42,12 @@ class Surface:
     """``False`` if a coefficient could not be parsed."""
     text: str
     """The card's exact source text, reflecting any edits."""
+
+    def set_coeff(self, index: int, value: float) -> None:
+        """Set a single coefficient (by index) in place. Raises ``ValueError``
+        for an out-of-range index."""
+        ...
+
     def __repr__(self) -> str: ...
 
 class Cell:
@@ -100,21 +113,45 @@ class Material:
     """``False`` if entries were not clean ZAID/fraction pairs."""
     text: str
     """The card's exact source text, reflecting any edits."""
+
+    def set_fraction(self, entry: int, value: float) -> None:
+        """Set the fraction of the ``entry``-th ``(zaid, fraction)`` pair in
+        place (positive = atomic, negative = by weight). Raises ``ValueError``
+        for an out-of-range index."""
+        ...
+
+    def set_zaid(self, entry: int, zaid: str) -> None:
+        """Set the ZAID of the ``entry``-th pair in place (e.g.
+        ``"1001.31c"``)."""
+        ...
+
     def __repr__(self) -> str: ...
 
 class Transform:
-    """A coordinate transformation (``TRn`` / ``*TRn``) card (a live handle)."""
+    """A coordinate transformation (``TRn`` / ``*TRn``) card (a live handle).
+
+    ``displacement`` is assignable in place; a component not written in the
+    source (defaulted to 0) has no token to rewrite, so setting it raises
+    ``ValueError``.
+    """
 
     id: int
     """Transformation number."""
     degrees: bool
     """Rotation entries are angles in degrees (``*TRn``)."""
     displacement: tuple[float, float, float]
-    """Origin displacement."""
+    """Origin displacement. Writable."""
     rotation: list[float]
     """Rotation entries as written."""
     text: str
     """The card's exact source text, reflecting any edits."""
+
+    def set_rotation(self, rotation: list[float]) -> None:
+        """Rewrite the rotation entries in place. ``rotation`` must have the same
+        length as the current entries (changing the count is a structural edit
+        -> ``ValueError``)."""
+        ...
+
     def __repr__(self) -> str: ...
 
 class DataCard:

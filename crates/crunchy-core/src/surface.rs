@@ -6,7 +6,11 @@ use crate::num::{parse_float, parse_int};
 
 /// A surface mnemonic. `Other` preserves anything we don't recognise (including
 /// macrobody variants not yet enumerated) so parsing never fails on it.
+///
+/// `#[non_exhaustive]`: new named mnemonics may be added in future releases, so
+/// downstream matches should include a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SurfaceKind {
     // Planes
     P,
@@ -167,12 +171,10 @@ pub struct Surface {
     pub card_index: usize,
     /// Surface number.
     pub id: i64,
-    /// Token index of the id (for renumbering edits).
-    pub id_token: u32,
     /// Optional transformation number; negative denotes a periodic surface.
     pub transform: Option<i64>,
     /// Token index of the transform number, if present (for renumbering).
-    pub transform_token: Option<u32>,
+    pub(crate) transform_token: Option<u32>,
     /// Leading `*` — a reflective boundary.
     pub reflective: bool,
     /// Leading `+` on the id — a white boundary.
@@ -181,6 +183,9 @@ pub struct Surface {
     pub kind: SurfaceKind,
     /// Coefficients that parsed successfully.
     pub coeffs: Vec<f64>,
+    /// Token index of each coefficient in `coeffs` (parallel to it), for
+    /// in-place value edits.
+    pub(crate) coeff_tokens: Vec<u32>,
     /// False if a coefficient token failed to parse (e.g. an unexpanded
     /// repeat shortcut like `2R`); such cards need shortcut expansion first.
     pub well_formed: bool,
@@ -188,7 +193,7 @@ pub struct Surface {
 
 /// Parse the surface card at `card_index`, or `None` if it does not look like a
 /// surface (no id + mnemonic).
-pub fn parse_surface(tree: &GreenTree, card_index: usize) -> Option<Surface> {
+pub(crate) fn parse_surface(tree: &GreenTree, card_index: usize) -> Option<Surface> {
     let card = &tree.cards()[card_index];
     if card.kind != SyntaxKind::SURFACE_CARD {
         return None;
@@ -233,12 +238,16 @@ pub fn parse_surface(tree: &GreenTree, card_index: usize) -> Option<Surface> {
 
     // Coefficients. `&` is a line-continuation marker, not a coefficient.
     let mut coeffs = Vec::with_capacity(toks.len() - pos);
+    let mut coeff_tokens = Vec::with_capacity(toks.len() - pos);
     let mut well_formed = true;
     for &t in &toks[pos..] {
         match tree.token_kind(t) {
             SyntaxKind::AMP => continue,
             SyntaxKind::NUMBER => match parse_float(&tree.token_text(t)) {
-                Some(v) => coeffs.push(v),
+                Some(v) => {
+                    coeffs.push(v);
+                    coeff_tokens.push(t);
+                }
                 None => well_formed = false,
             },
             _ => well_formed = false,
@@ -248,25 +257,25 @@ pub fn parse_surface(tree: &GreenTree, card_index: usize) -> Option<Surface> {
     Some(Surface {
         card_index,
         id,
-        id_token: id_tok,
         transform,
         transform_token,
         reflective,
         white,
         kind,
         coeffs,
+        coeff_tokens,
         well_formed,
     })
 }
 
 /// Iterate all parseable surfaces in the model, in source order.
-pub fn surfaces(tree: &GreenTree) -> impl Iterator<Item = Surface> + '_ {
+pub(crate) fn surfaces(tree: &GreenTree) -> impl Iterator<Item = Surface> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_surface(tree, i))
 }
 
 /// Minimal surface-header read for bulk edits: `(id_token, id, white)`.
 /// Allocation-free — skips coefficient parsing entirely.
-pub fn surface_id(tree: &GreenTree, card_index: usize) -> Option<(u32, i64, bool)> {
+pub(crate) fn surface_id(tree: &GreenTree, card_index: usize) -> Option<(u32, i64, bool)> {
     let card = tree.cards()[card_index];
     if card.kind != SyntaxKind::SURFACE_CARD {
         return None;

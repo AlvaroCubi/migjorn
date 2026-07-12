@@ -12,19 +12,26 @@ pub struct Transform {
     /// Transformation number.
     pub id: i64,
     /// Token index of the id (embedded in the `TRn` mnemonic; for edits).
-    pub id_token: u32,
+    pub(crate) id_token: u32,
     /// Leading `*` — rotation entries are angles in degrees.
     pub degrees: bool,
     /// Displacement vector (missing components default to 0).
     pub displacement: [f64; 3],
+    /// Token index of each displacement component that is present in the source
+    /// (`None` for a component that defaulted to 0 and thus has no token). For
+    /// in-place value edits.
+    pub(crate) displacement_tokens: [Option<u32>; 3],
     /// Rotation entries as written (0, 3, 5, 6, or 9 per MCNP conventions).
     pub rotation: Vec<f64>,
+    /// Token index of each rotation entry in `rotation` (parallel to it), for
+    /// in-place value edits.
+    pub(crate) rotation_tokens: Vec<u32>,
     /// False if a numeric entry failed to parse.
     pub well_formed: bool,
 }
 
 /// Parse the transform card at `card_index`, or `None` if it is not a `TRn`.
-pub fn parse_transform(tree: &GreenTree, card_index: usize) -> Option<Transform> {
+pub(crate) fn parse_transform(tree: &GreenTree, card_index: usize) -> Option<Transform> {
     let card = &tree.cards()[card_index];
     if card.kind != SyntaxKind::DATA_CARD {
         return None;
@@ -52,15 +59,19 @@ pub fn parse_transform(tree: &GreenTree, card_index: usize) -> Option<Transform>
     let id = parse_int(digits)?;
     pos += 1;
 
-    // Numeric entries.
+    // Numeric entries (values plus their token indices, kept parallel).
     let mut nums = Vec::with_capacity(toks.len() - pos);
+    let mut num_tokens = Vec::with_capacity(toks.len() - pos);
     let mut well_formed = true;
     for &t in &toks[pos..] {
         match tree.token_kind(t) {
             // `&` is a line-continuation marker, not a value.
             SyntaxKind::AMP => continue,
             SyntaxKind::NUMBER => match parse_float(&tree.token_text(t)) {
-                Some(v) => nums.push(v),
+                Some(v) => {
+                    nums.push(v);
+                    num_tokens.push(t);
+                }
                 None => well_formed = false,
             },
             _ => well_formed = false,
@@ -68,15 +79,17 @@ pub fn parse_transform(tree: &GreenTree, card_index: usize) -> Option<Transform>
     }
 
     let mut displacement = [0.0; 3];
-    for (i, d) in displacement.iter_mut().enumerate() {
+    let mut displacement_tokens = [None; 3];
+    for i in 0..3 {
         if let Some(&v) = nums.get(i) {
-            *d = v;
+            displacement[i] = v;
+            displacement_tokens[i] = Some(num_tokens[i]);
         }
     }
-    let rotation = if nums.len() > 3 {
-        nums[3..].to_vec()
+    let (rotation, rotation_tokens) = if nums.len() > 3 {
+        (nums[3..].to_vec(), num_tokens[3..].to_vec())
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     Some(Transform {
@@ -85,13 +98,15 @@ pub fn parse_transform(tree: &GreenTree, card_index: usize) -> Option<Transform>
         id_token: name_tok,
         degrees,
         displacement,
+        displacement_tokens,
         rotation,
+        rotation_tokens,
         well_formed,
     })
 }
 
 /// Iterate all `TRn` transforms in the model, in source order.
-pub fn transforms(tree: &GreenTree) -> impl Iterator<Item = Transform> + '_ {
+pub(crate) fn transforms(tree: &GreenTree) -> impl Iterator<Item = Transform> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_transform(tree, i))
 }
 

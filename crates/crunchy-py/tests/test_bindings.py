@@ -132,6 +132,89 @@ def test_edit_requiring_structural_change_raises():
         raise AssertionError("expected ValueError on a void/non-void change")
 
 
+def test_edit_surface_coeffs_in_place():
+    model = crunchy.parse(MODEL)
+    s = model.surface(1)  # "1 SO 5"
+    s.set_coeff(0, 7.5)
+    assert model.surface(1).coeffs == [7.5]
+    assert "1 SO 7.5" in str(model)
+    # Whole-vector assignment (same length) also works.
+    s.coeffs = [9.0]
+    assert "1 SO 9" in str(model)
+    # A wrong-length list is rejected (changing the count is structural).
+    try:
+        s.coeffs = [1.0, 2.0]
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for wrong coefficient count")
+    # Out-of-range single-coefficient set is rejected too.
+    try:
+        s.set_coeff(9, 1.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for out-of-range coefficient")
+    # Everything else stays byte-identical and re-parses cleanly.
+    assert "2 0 1 imp:n=0" in str(model)
+    assert crunchy.parse(str(model)).diagnostics == []
+
+
+def test_edit_surface_transform_field():
+    src = "Xf demo\n1 0 -1\n\n1 3 SO 5\n2 SO 9\n\nm1 1001 1\ntr3 0 0 0\n"
+    model = crunchy.parse(src)
+    s1 = model.surface(1)
+    assert s1.transform == 3
+    s1.transform = 4
+    assert "1 4 SO 5" in str(model)
+    # Surface 2 has no transform field: adding one is a structural edit.
+    try:
+        model.surface(2).transform = 3
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError adding a transform field")
+
+
+def test_edit_material_entries_in_place():
+    model = crunchy.parse(MODEL)  # m1 1001.31c 0.667 8016.31c 0.333
+    m = model.material(1)
+    m.set_fraction(0, 0.7)
+    m.set_zaid(1, "8016.70c")
+    assert "m1 1001.31c 0.7 8016.70c 0.333" in str(model)
+    assert model.material(1).entries[0] == ("1001.31c", 0.7)
+    try:
+        m.set_fraction(9, 1.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for out-of-range entry")
+
+
+def test_edit_transform_displacement_and_rotation():
+    model = crunchy.parse(MODEL)  # tr1 0 0 5
+    tr = model.transform(1)
+    tr.displacement = (1.0, 2.0, 3.0)
+    assert "tr1 1 2 3" in str(model)
+    assert model.transform(1).displacement == (1.0, 2.0, 3.0)
+    # No rotation entries: an empty set is a no-op; adding entries is structural.
+    tr.set_rotation([])
+    try:
+        tr.set_rotation([90.0])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError adding rotation entries")
+
+
+def test_edit_transform_rotation_same_arity():
+    src = "Rot demo\n1 0 -1\n\n1 SO 5\n\nm1 1001 1\n*tr2 0 0 0 1 0 0 0 1 0 0 0 1\n"
+    model = crunchy.parse(src)
+    tr = model.transform(2)
+    tr.set_rotation([2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0])
+    assert "0 0 0 2 0 0 0 2 0 0 0 2" in str(model)
+
+
 def test_num_materials_and_transforms():
     model = crunchy.parse(MODEL)
     assert model.num_materials == 1
@@ -277,6 +360,11 @@ if __name__ == "__main__":
     test_card_text_includes_inline_comment()
     test_edit_material_and_density_in_place()
     test_edit_requiring_structural_change_raises()
+    test_edit_surface_coeffs_in_place()
+    test_edit_surface_transform_field()
+    test_edit_material_entries_in_place()
+    test_edit_transform_displacement_and_rotation()
+    test_edit_transform_rotation_same_arity()
     test_num_materials_and_transforms()
     test_add_and_remove_surface_in_geometry()
     test_add_and_remove_complement()

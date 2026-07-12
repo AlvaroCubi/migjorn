@@ -126,6 +126,20 @@ def main():
     print("after: ", c.signed_surfaces, " complements", c.cell_refs)
     print(cell_line(str(demo), 2))
 
+    rule("editing surfaces, materials & transforms")
+    # Every card type is a live, writable handle -- not just cells.
+    s = demo.surface(3)  # "3 CZ 5.0"
+    s.set_coeff(0, 6.0)  # grow the cylinder radius (5.0 -> 6.0)
+    print("surface 3:", s.text.strip())
+
+    m = demo.material(1)  # enriched uranium
+    m.set_fraction(0, 0.05)  # tweak the U-235 atom fraction in place
+    print("m1:       ", m.text.strip())
+
+    t = demo.transform(1)  # "tr1 0 0 5"
+    t.displacement = (0.0, 0.0, 7.5)  # shift the transform along z
+    print("tr1:      ", t.text.strip())
+
     rule("building & removing cards")
     demo2 = crunchy.parse(MODEL)
     demo2.add_surface("50 SO 200")

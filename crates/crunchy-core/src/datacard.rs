@@ -15,8 +15,6 @@ pub struct DataCard {
     /// Mnemonic, uppercased and including any trailing number (`SDEF`, `F4`,
     /// `M1`, `TR1`, `PHYS:N`→`PHYS`).
     pub name: String,
-    /// Token index of the mnemonic.
-    pub name_token: u32,
     /// Particle designator after a `:` (`n`, `p`, `n,p`), if present.
     pub particle: Option<String>,
     /// Leading `*` modifier (`*F`, `*TR`, `*C`).
@@ -25,7 +23,7 @@ pub struct DataCard {
 
 /// Parse the data card at `card_index` generically, or `None` if it is not a
 /// data card or has no mnemonic.
-pub fn parse_data_card(tree: &GreenTree, card_index: usize) -> Option<DataCard> {
+pub(crate) fn parse_data_card(tree: &GreenTree, card_index: usize) -> Option<DataCard> {
     let card = &tree.cards()[card_index];
     if card.kind != SyntaxKind::DATA_CARD {
         return None;
@@ -62,14 +60,13 @@ pub fn parse_data_card(tree: &GreenTree, card_index: usize) -> Option<DataCard> 
     Some(DataCard {
         card_index,
         name,
-        name_token,
         particle,
         starred,
     })
 }
 
 /// Iterate all data cards generically, in source order.
-pub fn data_cards(tree: &GreenTree) -> impl Iterator<Item = DataCard> + '_ {
+pub(crate) fn data_cards(tree: &GreenTree) -> impl Iterator<Item = DataCard> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_data_card(tree, i))
 }
 

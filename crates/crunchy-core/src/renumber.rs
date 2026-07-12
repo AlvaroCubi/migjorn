@@ -22,7 +22,7 @@ use crate::transform::parse_transform;
 ///
 /// `map` is applied to the *original* ids; the pass is single-shot, so a map
 /// need not be injective, but a non-injective map can of course alias surfaces.
-pub fn renumber_surfaces(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
+pub(crate) fn renumber_surfaces(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
     let ncards = tree.cards().len();
     // Reused across cards to avoid per-card allocation.
     let mut edits: Vec<(u32, i64)> = Vec::new();
@@ -54,7 +54,7 @@ pub fn renumber_surfaces(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) 
 
 /// Renumber every cell using `map` (old id → new id). Updates cell card
 /// definitions, `#n` complement references, and `LIKE n` base references.
-pub fn renumber_cells(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
+pub(crate) fn renumber_cells(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
     let ncards = tree.cards().len();
     let mut edits: Vec<(u32, i64)> = Vec::new();
     for i in 0..ncards {
@@ -107,7 +107,7 @@ fn mt_mx_material_ref(tree: &GreenTree, i: usize) -> Option<(u32, i64)> {
 /// Renumber every material using `map` (old id → new id). Updates `Mn`
 /// definitions, the material field of every cell, and `MTn`/`MXn` cards that
 /// reference a material. Void cells (material 0) are left unchanged.
-pub fn renumber_materials(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
+pub(crate) fn renumber_materials(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
     let ncards = tree.cards().len();
     for i in 0..ncards {
         // `Mn` definition.
@@ -134,7 +134,7 @@ pub fn renumber_materials(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64)
 /// Renumber every transform using `map` (old id → new id). Updates `TRn`/`*TRn`
 /// definitions and every surface's transform field (the periodic negative sign
 /// is preserved).
-pub fn renumber_transforms(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
+pub(crate) fn renumber_transforms(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
     let ncards = tree.cards().len();
     for i in 0..ncards {
         // `TRn` / `*TRn` definition.
@@ -199,7 +199,7 @@ fn fill_universe_tokens(tree: &GreenTree, values: &[u32]) -> Vec<u32> {
 /// definitions and `fill=` references (single fills and lattice fill arrays);
 /// the sign of a `u=` value is preserved. Universe 0 (the real world) is left
 /// unchanged.
-pub fn renumber_universes(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
+pub(crate) fn renumber_universes(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
     let ncards = tree.cards().len();
     let mut edits: Vec<(u32, i64)> = Vec::new();
     for i in 0..ncards {
@@ -384,7 +384,7 @@ fn push_tally_bin_edits(
 /// number and common companion cards (`FC`, `FM`, `FS`, `E`, `T`, `C`, `SD`, …).
 /// Note: this renumbers the tally *ids*; the cell/surface ids inside tally bins
 /// are updated by [`renumber_cells`]/[`renumber_surfaces`] instead.
-pub fn renumber_tallies(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
+pub(crate) fn renumber_tallies(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
     let ncards = tree.cards().len();
     for i in 0..ncards {
         if let Some(t) = parse_tally(tree, i) {

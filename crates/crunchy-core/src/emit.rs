@@ -32,7 +32,7 @@ fn emit_child(child: &GeomExpr, min: u8) -> String {
 
 /// Emit a geometry region as MCNP text (senses, `#` complements, unions with
 /// `:`, intersections by juxtaposition, parenthesised where precedence needs).
-pub fn emit_geometry(e: &GeomExpr) -> String {
+pub(crate) fn emit_geometry(e: &GeomExpr) -> String {
     match e {
         GeomExpr::Surface(s) => {
             if s.negative {
@@ -62,7 +62,7 @@ pub fn emit_geometry(e: &GeomExpr) -> String {
 /// Emit an owned cell card body: `id [material [density]] geometry [params]`.
 /// A void cell (material 0) has no density; the parameter tail is appended
 /// verbatim.
-pub fn emit_cell(c: &OwnedCell) -> String {
+pub(crate) fn emit_cell(c: &OwnedCell) -> String {
     let mut s = format!("{} ", c.id);
     match (c.material, c.density) {
         // Void, or a `LIKE`-shaped node that lost its material (shouldn't occur).

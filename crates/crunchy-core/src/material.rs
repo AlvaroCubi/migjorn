@@ -15,12 +15,12 @@ use crate::num::{parse_float, parse_int};
 pub struct MaterialEntry {
     /// The ZAID as written, e.g. `1001.31c`, `92235.80c`, or `6000`.
     pub zaid: String,
-    /// Token index of the ZAID.
-    pub zaid_token: u32,
+    /// Token index of the ZAID (for in-place value edits).
+    pub(crate) zaid_token: u32,
     /// Fraction (positive = atom fraction, negative = weight fraction).
     pub fraction: f64,
-    /// Token index of the fraction.
-    pub fraction_token: u32,
+    /// Token index of the fraction (for in-place value edits).
+    pub(crate) fraction_token: u32,
 }
 
 impl MaterialEntry {
@@ -39,7 +39,7 @@ pub struct Material {
     /// Material number (the `n` in `Mn`).
     pub id: i64,
     /// Token index of the id (embedded in the `Mn` mnemonic; for edits).
-    pub id_token: u32,
+    pub(crate) id_token: u32,
     /// The `ZAID fraction` composition entries.
     pub entries: Vec<MaterialEntry>,
     /// False if the entries were not clean `ZAID fraction` pairs.
@@ -47,7 +47,7 @@ pub struct Material {
 }
 
 /// Parse the material card at `card_index`, or `None` if it is not an `Mn` card.
-pub fn parse_material(tree: &GreenTree, card_index: usize) -> Option<Material> {
+pub(crate) fn parse_material(tree: &GreenTree, card_index: usize) -> Option<Material> {
     let card = &tree.cards()[card_index];
     if card.kind != SyntaxKind::DATA_CARD {
         return None;
@@ -110,7 +110,7 @@ pub fn parse_material(tree: &GreenTree, card_index: usize) -> Option<Material> {
 }
 
 /// Iterate all `Mn` materials in the model, in source order.
-pub fn materials(tree: &GreenTree) -> impl Iterator<Item = Material> + '_ {
+pub(crate) fn materials(tree: &GreenTree) -> impl Iterator<Item = Material> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_material(tree, i))
 }
 

@@ -15,23 +15,19 @@ mod renumber;
 mod surface;
 mod transform;
 
-pub use cell::{
-    cell_id, cell_material, cell_params, cells, parse_cell, promote_cell, scan_cell_refs, Cell,
-    CellParam, CellRef, GeomExpr, OwnedCell, RefKind, SurfaceRef,
-};
-pub use datacard::{data_cards, parse_data_card, DataCard};
-pub use emit::{emit_cell, emit_geometry};
-pub use material::{materials, parse_material, Material, MaterialEntry};
+// The public API is `Model` (the facade) plus the owned typed views it returns
+// and the structured error/diagnostic types. The typed-projection functions,
+// the emitter, numeric parsing, renumbering internals, and the whole CST layer
+// are implementation details and are intentionally *not* re-exported here — all
+// capability is reached through `Model`'s methods.
+pub use cell::{Cell, CellRef, GeomExpr, OwnedCell, SurfaceRef};
+pub use datacard::DataCard;
+pub use material::{Material, MaterialEntry};
 pub use model::{CellRead, EditError, Model, ModelIndex};
-pub use num::{parse_float, parse_int};
-pub use renumber::{
-    renumber_cells, renumber_materials, renumber_surfaces, renumber_tallies, renumber_transforms,
-    renumber_universes,
-};
-pub use surface::{parse_surface, surface_id, surfaces, Surface, SurfaceKind};
-pub use transform::{parse_transform, transforms, Transform};
+pub use surface::{Surface, SurfaceKind};
+pub use transform::Transform;
 
-// Re-export the syntax layer so downstream users need only depend on core.
-pub use crunchy_syntax::{
-    self as syntax, parse, Card, Diagnostic, GreenTree, Parsed, Severity, Span, SyntaxKind,
-};
+// Parser diagnostics are part of the public contract (see `Model::diagnostics`).
+// They originate in the internal `crunchy-syntax` layer; re-export just these so
+// downstream users depend only on `crunchy-core` and never see the CST.
+pub use crunchy_syntax::{Diagnostic, Severity, Span};

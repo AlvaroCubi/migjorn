@@ -7,7 +7,7 @@
 
 /// Parse an MCNP numeric literal into `f64`, accepting exponent-without-`e`
 /// forms (`1.0-5`, `6.02+23`). Returns `None` if the token is not numeric.
-pub fn parse_float(s: &str) -> Option<f64> {
+pub(crate) fn parse_float(s: &str) -> Option<f64> {
     if let Ok(v) = s.parse::<f64>() {
         return Some(v);
     }
@@ -33,7 +33,7 @@ pub fn parse_float(s: &str) -> Option<f64> {
 }
 
 /// Parse an MCNP integer literal (allows a leading `+`).
-pub fn parse_int(s: &str) -> Option<i64> {
+pub(crate) fn parse_int(s: &str) -> Option<i64> {
     let s = s.strip_prefix('+').unwrap_or(s);
     s.parse::<i64>().ok()
 }

@@ -19,7 +19,7 @@ pub use cell::{
 };
 pub use datacard::{data_cards, parse_data_card, DataCard};
 pub use material::{materials, parse_material, Material, MaterialEntry};
-pub use model::{Model, ModelIndex};
+pub use model::{EditError, Model, ModelIndex};
 pub use num::{parse_float, parse_int};
 pub use renumber::{renumber_cells, renumber_surfaces};
 pub use surface::{parse_surface, surface_id, surfaces, Surface, SurfaceKind};

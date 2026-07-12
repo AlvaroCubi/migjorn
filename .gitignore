@@ -6,6 +6,7 @@ Cargo.lock.orig
 __pycache__/
 *.pyc
 *.pyd
+*.pdb
 .pytest_cache/
 *.egg-info/
 .venv/

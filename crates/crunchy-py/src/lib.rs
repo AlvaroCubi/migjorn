@@ -2,18 +2,155 @@
 //!
 //! The public surface mirrors `crunchy-core`'s `Model` facade with Pythonic
 //! ergonomics: `crunchy.parse(text)` (or `crunchy.Model.from_file(path)`) returns
-//! a `Model` exposing typed lists, id lookups, lossless re-emission, and
+//! a `Model` exposing typed access, id lookups, lossless re-emission, and
 //! whole-geometry renumbering.
+//!
+//! The typed objects (`Cell`, `Surface`, `Material`, `Transform`) are **live
+//! handles**, not snapshots: each holds a reference to its `Model` plus a stable
+//! card slot. Getters read the current card on demand and setters (e.g.
+//! `cell.material = 124`) write straight through the lossless override engine, so
+//! edits are visible immediately and the rest of the model stays byte-for-byte.
 
 use std::cell::OnceCell;
 
 use crunchy_core as core;
-use pyo3::exceptions::PyIOError;
+use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rustc_hash::FxHashMap;
 
-/// A surface card.
+/// Error raised when a handle's card no longer exists (it was deleted, or the
+/// model was structurally changed out from under it).
+fn stale_handle() -> PyErr {
+    PyRuntimeError::new_err("stale handle: the referenced card no longer exists")
+}
+
+/// Map a core editing error (all of which describe unsupported structural edits)
+/// to a Python `ValueError`.
+fn edit_error(e: core::EditError) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
+/// A cell card (a live handle onto its model).
+///
+/// Attributes:
+///     id (int): Cell number.
+///     material (int | None): Material number (0 = void; None for ``LIKE n BUT``).
+///         Assignable in place (subject to the void/non-void restriction).
+///     density (float | None): Density (positive = atom, negative = mass).
+///         Assignable in place for a non-void cell.
+///     is_void (bool): True when the material number is 0.
+///     like (int | None): Base cell for a ``LIKE n BUT`` card.
+///     surface_ids (list[int]): Referenced surface numbers (magnitudes).
+///     signed_surfaces (list[int]): Referenced surfaces with sense (sign).
+///     cell_refs (list[int]): Referenced cells (``#n`` complements, ``LIKE n``).
+///     well_formed (bool): False if the geometry could not be fully parsed.
+///     text (str): The card's exact source (incl. inline ``$`` comments),
+///         reflecting any edits.
+#[pyclass(module = "crunchy")]
+struct Cell {
+    model: Py<Model>,
+    slot: u32,
+}
+
+impl Cell {
+    /// Resolve this handle's current card and parse it, running `f` on the
+    /// typed view. Raises if the card no longer exists or is no longer a cell.
+    fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Cell) -> R) -> PyResult<R> {
+        let m = self.model.bind(py).borrow();
+        let tree = m.inner.tree();
+        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
+        let cell = core::parse_cell(tree, ci)
+            .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid cell"))?;
+        Ok(f(&cell))
+    }
+}
+
+#[pymethods]
+impl Cell {
+    #[getter]
+    fn id(&self, py: Python<'_>) -> PyResult<i64> {
+        self.read(py, |c| c.id)
+    }
+    #[getter]
+    fn material(&self, py: Python<'_>) -> PyResult<Option<i64>> {
+        self.read(py, |c| c.material)
+    }
+    #[setter]
+    fn set_material(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        let mut m = self.model.bind(py).borrow_mut();
+        let ci = m
+            .inner
+            .tree()
+            .card_by_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        m.inner.set_cell_material(ci, value).map_err(edit_error)?;
+        m.invalidate();
+        Ok(())
+    }
+    #[getter]
+    fn density(&self, py: Python<'_>) -> PyResult<Option<f64>> {
+        self.read(py, |c| c.density)
+    }
+    #[setter]
+    fn set_density(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+        let mut m = self.model.bind(py).borrow_mut();
+        let ci = m
+            .inner
+            .tree()
+            .card_by_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        m.inner.set_cell_density(ci, value).map_err(edit_error)?;
+        m.invalidate();
+        Ok(())
+    }
+    #[getter]
+    fn is_void(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |c| c.material == Some(0))
+    }
+    #[getter]
+    fn like(&self, py: Python<'_>) -> PyResult<Option<i64>> {
+        self.read(py, |c| c.like.map(|r| r.id))
+    }
+    #[getter]
+    fn surface_ids(&self, py: Python<'_>) -> PyResult<Vec<i64>> {
+        self.read(py, |c| c.surface_refs().iter().map(|r| r.id).collect())
+    }
+    #[getter]
+    fn signed_surfaces(&self, py: Python<'_>) -> PyResult<Vec<i64>> {
+        self.read(py, |c| {
+            c.surface_refs()
+                .iter()
+                .map(|r| if r.negative { -r.id } else { r.id })
+                .collect()
+        })
+    }
+    #[getter]
+    fn cell_refs(&self, py: Python<'_>) -> PyResult<Vec<i64>> {
+        self.read(py, |c| c.cell_refs().iter().map(|r| r.id).collect())
+    }
+    #[getter]
+    fn well_formed(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |c| c.well_formed)
+    }
+    #[getter]
+    fn text(&self, py: Python<'_>) -> PyResult<String> {
+        let m = self.model.bind(py).borrow();
+        let tree = m.inner.tree();
+        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
+        Ok(tree.card_source(ci))
+    }
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        self.read(py, |c| {
+            format!(
+                "Cell(id={}, material={:?}, density={:?})",
+                c.id, c.material, c.density
+            )
+        })
+    }
+}
+
+/// A surface card (a live handle onto its model).
 ///
 /// Attributes:
 ///     id (int): Surface number.
@@ -23,191 +160,187 @@ use rustc_hash::FxHashMap;
 ///     reflective (bool): Reflective boundary (leading ``*``).
 ///     white (bool): White boundary (leading ``+``).
 ///     well_formed (bool): False if a coefficient could not be parsed.
-#[pyclass(frozen, module = "crunchy")]
-#[derive(Clone)]
+///     text (str): The card's exact source, reflecting any edits.
+#[pyclass(module = "crunchy")]
 struct Surface {
-    #[pyo3(get)]
-    id: i64,
-    #[pyo3(get)]
-    kind: String,
-    #[pyo3(get)]
-    coeffs: Vec<f64>,
-    #[pyo3(get)]
-    transform: Option<i64>,
-    #[pyo3(get)]
-    reflective: bool,
-    #[pyo3(get)]
-    white: bool,
-    #[pyo3(get)]
-    well_formed: bool,
+    model: Py<Model>,
+    slot: u32,
 }
 
-impl From<core::Surface> for Surface {
-    fn from(s: core::Surface) -> Self {
-        Surface {
-            id: s.id,
-            kind: s.kind.mnemonic(),
-            coeffs: s.coeffs,
-            transform: s.transform,
-            reflective: s.reflective,
-            white: s.white,
-            well_formed: s.well_formed,
-        }
+impl Surface {
+    fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Surface) -> R) -> PyResult<R> {
+        let m = self.model.bind(py).borrow();
+        let tree = m.inner.tree();
+        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
+        let surface = core::parse_surface(tree, ci)
+            .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid surface"))?;
+        Ok(f(&surface))
     }
 }
 
 #[pymethods]
 impl Surface {
-    fn __repr__(&self) -> String {
-        format!(
-            "Surface(id={}, kind={:?}, coeffs={:?})",
-            self.id, self.kind, self.coeffs
-        )
+    #[getter]
+    fn id(&self, py: Python<'_>) -> PyResult<i64> {
+        self.read(py, |s| s.id)
+    }
+    #[getter]
+    fn kind(&self, py: Python<'_>) -> PyResult<String> {
+        self.read(py, |s| s.kind.mnemonic())
+    }
+    #[getter]
+    fn coeffs(&self, py: Python<'_>) -> PyResult<Vec<f64>> {
+        self.read(py, |s| s.coeffs.clone())
+    }
+    #[getter]
+    fn transform(&self, py: Python<'_>) -> PyResult<Option<i64>> {
+        self.read(py, |s| s.transform)
+    }
+    #[getter]
+    fn reflective(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |s| s.reflective)
+    }
+    #[getter]
+    fn white(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |s| s.white)
+    }
+    #[getter]
+    fn well_formed(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |s| s.well_formed)
+    }
+    #[getter]
+    fn text(&self, py: Python<'_>) -> PyResult<String> {
+        let m = self.model.bind(py).borrow();
+        let tree = m.inner.tree();
+        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
+        Ok(tree.card_source(ci))
+    }
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        self.read(py, |s| {
+            format!(
+                "Surface(id={}, kind={:?}, coeffs={:?})",
+                s.id,
+                s.kind.mnemonic(),
+                s.coeffs
+            )
+        })
     }
 }
 
-/// A cell card.
-///
-/// Attributes:
-///     id (int): Cell number.
-///     material (int | None): Material number (0 = void; None for ``LIKE n BUT``).
-///     density (float | None): Density (positive = atom, negative = mass).
-///     is_void (bool): True when the material number is 0.
-///     like (int | None): Base cell for a ``LIKE n BUT`` card.
-///     surface_ids (list[int]): Referenced surface numbers (magnitudes).
-///     signed_surfaces (list[int]): Referenced surfaces with sense (sign).
-///     cell_refs (list[int]): Referenced cells (``#n`` complements, ``LIKE n``).
-///     well_formed (bool): False if the geometry could not be fully parsed.
-#[pyclass(frozen, module = "crunchy")]
-#[derive(Clone)]
-struct Cell {
-    #[pyo3(get)]
-    id: i64,
-    #[pyo3(get)]
-    material: Option<i64>,
-    #[pyo3(get)]
-    density: Option<f64>,
-    #[pyo3(get)]
-    is_void: bool,
-    #[pyo3(get)]
-    like: Option<i64>,
-    #[pyo3(get)]
-    surface_ids: Vec<i64>,
-    #[pyo3(get)]
-    signed_surfaces: Vec<i64>,
-    #[pyo3(get)]
-    cell_refs: Vec<i64>,
-    #[pyo3(get)]
-    well_formed: bool,
-}
-
-impl From<core::Cell> for Cell {
-    fn from(c: core::Cell) -> Self {
-        let surface_refs = c.surface_refs();
-        let surface_ids = surface_refs.iter().map(|r| r.id).collect();
-        let signed_surfaces = surface_refs
-            .iter()
-            .map(|r| if r.negative { -r.id } else { r.id })
-            .collect();
-        let cell_refs = c.cell_refs().iter().map(|r| r.id).collect();
-        Cell {
-            id: c.id,
-            material: c.material,
-            density: c.density,
-            is_void: c.material == Some(0),
-            like: c.like.map(|r| r.id),
-            surface_ids,
-            signed_surfaces,
-            cell_refs,
-            well_formed: c.well_formed,
-        }
-    }
-}
-
-#[pymethods]
-impl Cell {
-    fn __repr__(&self) -> String {
-        format!(
-            "Cell(id={}, material={:?}, density={:?}, surfaces={:?})",
-            self.id, self.material, self.density, self.signed_surfaces
-        )
-    }
-}
-
-/// A material (``Mn``) card.
+/// A material (``Mn``) card (a live handle onto its model).
 ///
 /// Attributes:
 ///     id (int): Material number.
 ///     entries (list[tuple[str, float]]): ``(zaid, fraction)`` pairs; a
 ///         positive fraction is atomic, a negative fraction is by weight.
 ///     well_formed (bool): False if entries were not clean ZAID/fraction pairs.
-#[pyclass(frozen, module = "crunchy")]
-#[derive(Clone)]
+///     text (str): The card's exact source, reflecting any edits.
+#[pyclass(module = "crunchy")]
 struct Material {
-    #[pyo3(get)]
-    id: i64,
-    #[pyo3(get)]
-    entries: Vec<(String, f64)>,
-    #[pyo3(get)]
-    well_formed: bool,
+    model: Py<Model>,
+    slot: u32,
 }
 
-impl From<core::Material> for Material {
-    fn from(m: core::Material) -> Self {
-        Material {
-            id: m.id,
-            entries: m
-                .entries
-                .into_iter()
-                .map(|e| (e.zaid, e.fraction))
-                .collect(),
-            well_formed: m.well_formed,
-        }
+impl Material {
+    fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Material) -> R) -> PyResult<R> {
+        let m = self.model.bind(py).borrow();
+        let tree = m.inner.tree();
+        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
+        let material = core::parse_material(tree, ci)
+            .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid material"))?;
+        Ok(f(&material))
     }
 }
 
 #[pymethods]
 impl Material {
-    fn __repr__(&self) -> String {
-        format!("Material(id={}, entries={})", self.id, self.entries.len())
+    #[getter]
+    fn id(&self, py: Python<'_>) -> PyResult<i64> {
+        self.read(py, |m| m.id)
+    }
+    #[getter]
+    fn entries(&self, py: Python<'_>) -> PyResult<Vec<(String, f64)>> {
+        self.read(py, |m| {
+            m.entries
+                .iter()
+                .map(|e| (e.zaid.clone(), e.fraction))
+                .collect()
+        })
+    }
+    #[getter]
+    fn well_formed(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |m| m.well_formed)
+    }
+    #[getter]
+    fn text(&self, py: Python<'_>) -> PyResult<String> {
+        let m = self.model.bind(py).borrow();
+        let tree = m.inner.tree();
+        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
+        Ok(tree.card_source(ci))
+    }
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        self.read(py, |m| {
+            format!("Material(id={}, entries={})", m.id, m.entries.len())
+        })
     }
 }
 
-/// A coordinate transformation (``TRn`` / ``*TRn``) card.
+/// A coordinate transformation (``TRn`` / ``*TRn``) card (a live handle).
 ///
 /// Attributes:
 ///     id (int): Transformation number.
 ///     degrees (bool): Rotation entries are angles in degrees (``*TRn``).
 ///     displacement (tuple[float, float, float]): Origin displacement.
 ///     rotation (list[float]): Rotation entries as written.
-#[pyclass(frozen, module = "crunchy")]
-#[derive(Clone)]
+///     text (str): The card's exact source, reflecting any edits.
+#[pyclass(module = "crunchy")]
 struct Transform {
-    #[pyo3(get)]
-    id: i64,
-    #[pyo3(get)]
-    degrees: bool,
-    #[pyo3(get)]
-    displacement: (f64, f64, f64),
-    #[pyo3(get)]
-    rotation: Vec<f64>,
+    model: Py<Model>,
+    slot: u32,
 }
 
-impl From<core::Transform> for Transform {
-    fn from(t: core::Transform) -> Self {
-        Transform {
-            id: t.id,
-            degrees: t.degrees,
-            displacement: (t.displacement[0], t.displacement[1], t.displacement[2]),
-            rotation: t.rotation,
-        }
+impl Transform {
+    fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Transform) -> R) -> PyResult<R> {
+        let m = self.model.bind(py).borrow();
+        let tree = m.inner.tree();
+        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
+        let transform = core::parse_transform(tree, ci)
+            .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid transform"))?;
+        Ok(f(&transform))
     }
 }
 
 #[pymethods]
 impl Transform {
-    fn __repr__(&self) -> String {
-        format!("Transform(id={}, degrees={})", self.id, self.degrees)
+    #[getter]
+    fn id(&self, py: Python<'_>) -> PyResult<i64> {
+        self.read(py, |t| t.id)
+    }
+    #[getter]
+    fn degrees(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |t| t.degrees)
+    }
+    #[getter]
+    fn displacement(&self, py: Python<'_>) -> PyResult<(f64, f64, f64)> {
+        self.read(py, |t| {
+            (t.displacement[0], t.displacement[1], t.displacement[2])
+        })
+    }
+    #[getter]
+    fn rotation(&self, py: Python<'_>) -> PyResult<Vec<f64>> {
+        self.read(py, |t| t.rotation.clone())
+    }
+    #[getter]
+    fn text(&self, py: Python<'_>) -> PyResult<String> {
+        let m = self.model.bind(py).borrow();
+        let tree = m.inner.tree();
+        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
+        Ok(tree.card_source(ci))
+    }
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        self.read(py, |t| {
+            format!("Transform(id={}, degrees={})", t.id, t.degrees)
+        })
     }
 }
 
@@ -298,10 +431,11 @@ impl Diagnostic {
 /// Construct with :func:`crunchy.parse`, ``Model(text)``, or
 /// :meth:`Model.from_file`. The model is *lossless*: :meth:`to_source` (and
 /// ``str(model)``) reproduce the input byte-for-byte until you edit it, and edits
-/// such as :meth:`renumber_surfaces` change only the affected numbers.
+/// such as :meth:`renumber_surfaces` or ``cell.material = ...`` change only the
+/// affected tokens.
 ///
 /// The ``cells``/``surfaces``/``materials``/``transforms``/``data_cards``
-/// properties materialise full lists -- convenient, but for very large models
+/// properties materialise handle lists -- convenient, but for very large models
 /// prefer the id lookups (:meth:`surface`, :meth:`cell`, ...) and the ``num_*``
 /// counts, which do not build the whole list.
 #[pyclass(unsendable, module = "crunchy")]
@@ -345,7 +479,7 @@ impl Model {
     }
 
     /// Re-emit the model as MCNP text (byte-for-byte identical to the input when
-    /// unedited; only edited numbers differ otherwise).
+    /// unedited; only edited tokens differ otherwise).
     fn to_source(&self) -> String {
         self.inner.to_source()
     }
@@ -382,28 +516,68 @@ impl Model {
             .collect()
     }
 
-    /// All cells, in source order (materialises a list).
+    /// All cells, in source order (materialises a list of handles).
     #[getter]
-    fn cells(&self) -> Vec<Cell> {
-        self.inner.cells().map(Cell::from).collect()
+    fn cells(slf: Bound<'_, Self>) -> Vec<Cell> {
+        let py = slf.py();
+        let model_py: Py<Model> = slf.clone().unbind();
+        let m = slf.borrow();
+        let tree = m.inner.tree();
+        (0..tree.cards().len())
+            .filter(|&pos| core::parse_cell(tree, pos).is_some())
+            .map(|pos| Cell {
+                model: model_py.clone_ref(py),
+                slot: tree.card_slot(pos),
+            })
+            .collect()
     }
 
-    /// All surfaces, in source order (materialises a list).
+    /// All surfaces, in source order (materialises a list of handles).
     #[getter]
-    fn surfaces(&self) -> Vec<Surface> {
-        self.inner.surfaces().map(Surface::from).collect()
+    fn surfaces(slf: Bound<'_, Self>) -> Vec<Surface> {
+        let py = slf.py();
+        let model_py: Py<Model> = slf.clone().unbind();
+        let m = slf.borrow();
+        let tree = m.inner.tree();
+        (0..tree.cards().len())
+            .filter(|&pos| core::parse_surface(tree, pos).is_some())
+            .map(|pos| Surface {
+                model: model_py.clone_ref(py),
+                slot: tree.card_slot(pos),
+            })
+            .collect()
     }
 
     /// All ``TRn`` transforms, in source order.
     #[getter]
-    fn transforms(&self) -> Vec<Transform> {
-        self.inner.transforms().map(Transform::from).collect()
+    fn transforms(slf: Bound<'_, Self>) -> Vec<Transform> {
+        let py = slf.py();
+        let model_py: Py<Model> = slf.clone().unbind();
+        let m = slf.borrow();
+        let tree = m.inner.tree();
+        (0..tree.cards().len())
+            .filter(|&pos| core::parse_transform(tree, pos).is_some())
+            .map(|pos| Transform {
+                model: model_py.clone_ref(py),
+                slot: tree.card_slot(pos),
+            })
+            .collect()
     }
 
     /// All ``Mn`` materials, in source order.
     #[getter]
-    fn materials(&self) -> Vec<Material> {
-        self.inner.materials().map(Material::from).collect()
+    fn materials(slf: Bound<'_, Self>) -> Vec<Material> {
+        let py = slf.py();
+        let model_py: Py<Model> = slf.clone().unbind();
+        let m = slf.borrow();
+        let tree = m.inner.tree();
+        (0..tree.cards().len())
+            .filter(|&pos| core::parse_material(tree, pos).is_some())
+            .map(|pos| Material {
+                model: model_py.clone_ref(py),
+                slot: tree.card_slot(pos),
+            })
+            .collect()
     }
 
     /// All data cards (generic view), in source order.
@@ -424,28 +598,60 @@ impl Model {
         self.idx().surfaces.len()
     }
 
+    /// Number of materials (cheap; does not build the material list).
+    #[getter]
+    fn num_materials(&self) -> usize {
+        self.idx().materials.len()
+    }
+
+    /// Number of transforms (cheap; does not build the transform list).
+    #[getter]
+    fn num_transforms(&self) -> usize {
+        self.idx().transforms.len()
+    }
+
     /// Look up a surface by number, or ``None``.
-    fn surface(&self, id: i64) -> Option<Surface> {
-        let ci = *self.idx().surfaces.get(&id)?;
-        core::parse_surface(self.inner.tree(), ci).map(Surface::from)
+    fn surface(slf: Bound<'_, Self>, id: i64) -> Option<Surface> {
+        let m = slf.borrow();
+        let ci = *m.idx().surfaces.get(&id)?;
+        let slot = m.inner.tree().card_slot(ci);
+        Some(Surface {
+            model: slf.clone().unbind(),
+            slot,
+        })
     }
 
     /// Look up a cell by number, or ``None``.
-    fn cell(&self, id: i64) -> Option<Cell> {
-        let ci = *self.idx().cells.get(&id)?;
-        core::parse_cell(self.inner.tree(), ci).map(Cell::from)
+    fn cell(slf: Bound<'_, Self>, id: i64) -> Option<Cell> {
+        let m = slf.borrow();
+        let ci = *m.idx().cells.get(&id)?;
+        let slot = m.inner.tree().card_slot(ci);
+        Some(Cell {
+            model: slf.clone().unbind(),
+            slot,
+        })
     }
 
     /// Look up a material by number, or ``None``.
-    fn material(&self, id: i64) -> Option<Material> {
-        let ci = *self.idx().materials.get(&id)?;
-        core::parse_material(self.inner.tree(), ci).map(Material::from)
+    fn material(slf: Bound<'_, Self>, id: i64) -> Option<Material> {
+        let m = slf.borrow();
+        let ci = *m.idx().materials.get(&id)?;
+        let slot = m.inner.tree().card_slot(ci);
+        Some(Material {
+            model: slf.clone().unbind(),
+            slot,
+        })
     }
 
     /// Look up a transform by number, or ``None``.
-    fn transform(&self, id: i64) -> Option<Transform> {
-        let ci = *self.idx().transforms.get(&id)?;
-        core::parse_transform(self.inner.tree(), ci).map(Transform::from)
+    fn transform(slf: Bound<'_, Self>, id: i64) -> Option<Transform> {
+        let m = slf.borrow();
+        let ci = *m.idx().transforms.get(&id)?;
+        let slot = m.inner.tree().card_slot(ci);
+        Some(Transform {
+            model: slf.clone().unbind(),
+            slot,
+        })
     }
 
     /// Renumber every surface -- definitions **and** all references in cell
@@ -455,11 +661,6 @@ impl Model {
     ///   * a ``dict[int, int]`` (old number -> new number; unmapped numbers are
     ///     left unchanged), or
     ///   * a callable ``int -> int`` (invoked once per distinct surface number).
-    ///
-    /// Example::
-    ///
-    ///     model.renumber_surfaces(lambda n: n + 1000)
-    ///     model.renumber_surfaces({1: 100, 2: 200})
     fn renumber_surfaces(&mut self, mapping: Bound<'_, PyAny>) -> PyResult<()> {
         let mut mapper = Mapper::build(mapping)?;
         self.inner.renumber_surfaces(|id| mapper.map(id));

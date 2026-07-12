@@ -8,7 +8,7 @@
 use crunchy_syntax::{Diagnostic, GreenTree, Parsed};
 use rustc_hash::FxHashMap;
 
-use crate::cell::{cell_id, cells, Cell};
+use crate::cell::{cell_id, cells, parse_cell, Cell};
 use crate::datacard::{data_cards, DataCard};
 use crate::material::{materials, Material};
 use crate::renumber::{renumber_cells, renumber_surfaces};
@@ -89,7 +89,72 @@ impl Model {
     pub fn renumber_cells(&mut self, map: impl FnMut(i64) -> i64) {
         renumber_cells(&mut self.tree, map);
     }
+
+    /// Set the material number of the cell at `card_index`, in place.
+    ///
+    /// This is a *value* edit: it replaces the existing material token. It
+    /// cannot change a cell between void (material 0) and a real material,
+    /// because that adds or removes the density field — a structural edit that
+    /// the token-override overlay cannot express. Such requests return
+    /// [`EditError::VoidnessChange`].
+    pub fn set_cell_material(&mut self, card_index: usize, material: i64) -> Result<(), EditError> {
+        let cell = parse_cell(&self.tree, card_index).ok_or(EditError::NotACell)?;
+        let tok = cell.material_token.ok_or(EditError::NoMaterialField)?;
+        if (cell.material == Some(0)) != (material == 0) {
+            return Err(EditError::VoidnessChange);
+        }
+        self.tree.set_token_int(tok, material);
+        Ok(())
+    }
+
+    /// Set the density of the cell at `card_index`, in place (positive = atom
+    /// density, negative = mass density). Replaces the existing density token;
+    /// a void cell has no density field to set, which returns
+    /// [`EditError::NoDensityField`] (adding one is a structural edit).
+    pub fn set_cell_density(&mut self, card_index: usize, density: f64) -> Result<(), EditError> {
+        let cell = parse_cell(&self.tree, card_index).ok_or(EditError::NotACell)?;
+        let tok = cell.density_token.ok_or(EditError::NoDensityField)?;
+        self.tree.set_token_text(tok, format!("{density}"));
+        Ok(())
+    }
 }
+
+/// Why a value edit could not be applied. These all describe edits that would
+/// require inserting or removing tokens (a structural change), which the
+/// current overlay-based editing cannot express; they are not data errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditError {
+    /// The target card is not a (well-formed) cell.
+    NotACell,
+    /// The cell has no material field to set (e.g. a `LIKE n BUT` cell).
+    NoMaterialField,
+    /// The cell has no density field to set (a void cell); adding one would be
+    /// a structural edit.
+    NoDensityField,
+    /// The edit would change the cell between void and non-void, which adds or
+    /// removes the density field — a structural edit.
+    VoidnessChange,
+}
+
+impl std::fmt::Display for EditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            EditError::NotACell => "card is not a cell",
+            EditError::NoMaterialField => "cell has no material field to set (a LIKE n BUT cell?)",
+            EditError::NoDensityField => {
+                "cell has no density field to set; adding density to a void cell \
+                 is a structural edit (not yet supported)"
+            }
+            EditError::VoidnessChange => {
+                "changing a cell between void (material 0) and a real material adds \
+                 or removes the density field; this is a structural edit (not yet supported)"
+            }
+        };
+        f.write_str(msg)
+    }
+}
+
+impl std::error::Error for EditError {}
 
 /// Id → card-index lookup maps for a model. Build once, query O(1).
 #[derive(Debug, Default, Clone)]
@@ -176,5 +241,55 @@ sdef pos=0 0 0
         let out = d.to_source();
         assert!(out.contains("101 SO 5"));
         assert!(out.contains("-101 imp:n=1"));
+    }
+
+    /// Position of the first cell card whose id equals `id`.
+    fn cell_pos(m: &Model, id: i64) -> usize {
+        *m.index().cells.get(&id).unwrap()
+    }
+
+    #[test]
+    fn set_material_and_density_in_place() {
+        let mut m = Model::parse(MODEL);
+        let ci = cell_pos(&m, 1); // "1 1 -1.0 -1 imp:n=1"
+        m.set_cell_material(ci, 124).unwrap();
+        m.set_cell_density(ci, 7.93).unwrap();
+        let out = m.to_source();
+        assert!(out.contains("1 124 7.93 -1 imp:n=1"), "got: {out}");
+        // Everything else is byte-identical.
+        assert!(out.contains("2 0 1 imp:n=0"));
+        assert!(out.contains("1 SO 5"));
+    }
+
+    #[test]
+    fn density_on_void_cell_is_rejected() {
+        let mut m = Model::parse(MODEL);
+        let ci = cell_pos(&m, 2); // void cell "2 0 1"
+        assert_eq!(m.set_cell_density(ci, 1.0), Err(EditError::NoDensityField));
+    }
+
+    #[test]
+    fn voidness_change_is_rejected() {
+        let mut m = Model::parse(MODEL);
+        // void -> real material would need a density field inserted.
+        let void_ci = cell_pos(&m, 2);
+        assert_eq!(
+            m.set_cell_material(void_ci, 5),
+            Err(EditError::VoidnessChange)
+        );
+        // real material -> void would need the density field removed.
+        let mat_ci = cell_pos(&m, 1);
+        assert_eq!(
+            m.set_cell_material(mat_ci, 0),
+            Err(EditError::VoidnessChange)
+        );
+    }
+
+    #[test]
+    fn material_swap_between_real_materials_is_allowed() {
+        let mut m = Model::parse(MODEL);
+        let ci = cell_pos(&m, 1);
+        m.set_cell_material(ci, 7).unwrap();
+        assert!(m.to_source().contains("1 7 -1.0 -1 imp:n=1"));
     }
 }

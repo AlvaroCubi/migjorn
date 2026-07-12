@@ -92,6 +92,8 @@ pub struct Cell {
     pub material_token: Option<u32>,
     /// Density (positive = atom/b-cm, negative = mass g/cc). Absent for void.
     pub density: Option<f64>,
+    /// Token index of the density value, if the cell has one (for edits).
+    pub density_token: Option<u32>,
     /// For a `LIKE n BUT` card, the referenced base cell.
     pub like: Option<CellRef>,
     /// The geometry expression (absent for `LIKE n BUT`).
@@ -177,6 +179,7 @@ pub fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
             material: None,
             material_token: None,
             density: None,
+            density_token: None,
             like: Some(CellRef {
                 token: ref_tok,
                 id: ref_id,
@@ -197,9 +200,11 @@ pub fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
 
     // Density, only when not void.
     let mut density = None;
+    let mut density_token = None;
     if material != 0 {
         let d_tok = *toks.get(pos)?;
         density = parse_float(&tree.token_text(d_tok));
+        density_token = Some(d_tok);
         pos += 1;
     }
 
@@ -234,6 +239,7 @@ pub fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
         material: Some(material),
         material_token: Some(mat_tok),
         density,
+        density_token,
         like: None,
         geometry,
         params_start,

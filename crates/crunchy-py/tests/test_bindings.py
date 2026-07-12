@@ -87,10 +87,65 @@ def test_renumber_callable_error_propagates():
         raise AssertionError("expected an error from a bad mapping")
 
 
+def test_card_text_includes_inline_comment():
+    model = crunchy.parse(MODEL)
+    c = model.cell(1)
+    assert "$ fuel" in c.text  # inline comment is part of the card text
+    assert "1 1 -1.0" in c.text
+    # A surface card exposes its text too.
+    assert model.surface(1).text.strip().startswith("1 SO 5")
+
+
+def test_edit_material_and_density_in_place():
+    model = crunchy.parse(MODEL)
+    # The stated objective: explore per card, then edit material + density.
+    for cell in model.cells:
+        if "$ fuel" in cell.text:
+            cell.material = 124
+            cell.density = 7.93
+    out = str(model)
+    assert "1 124 7.93 -1 2 #3 imp:n=1 $ fuel" in out
+    # The edit is visible through a fresh lookup (handles are live).
+    assert model.cell(1).material == 124
+    assert model.cell(1).density == 7.93
+    # Everything else is byte-identical.
+    assert "2 0 1 imp:n=0" in out
+    assert "3 0 -2 imp:n=1" in out
+    assert "m1 1001.31c 0.667 8016.31c 0.333" in out
+
+
+def test_edit_requiring_structural_change_raises():
+    model = crunchy.parse(MODEL)
+    # Cell 2 is void: it has no density field to set.
+    try:
+        model.cell(2).density = 1.0
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError setting density on a void cell")
+    # Void -> real material would add a density field.
+    try:
+        model.cell(2).material = 5
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError on a void/non-void change")
+
+
+def test_num_materials_and_transforms():
+    model = crunchy.parse(MODEL)
+    assert model.num_materials == 1
+    assert model.num_transforms == 1
+
+
 if __name__ == "__main__":
     test_parse_and_lossless()
     test_typed_access()
     test_renumber_offset_lossless_elsewhere()
     test_renumber_with_dict_and_callable()
     test_renumber_callable_error_propagates()
+    test_card_text_includes_inline_comment()
+    test_edit_material_and_density_in_place()
+    test_edit_requiring_structural_change_raises()
+    test_num_materials_and_transforms()
     print("all crunchy binding smoke tests passed")

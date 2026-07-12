@@ -51,6 +51,16 @@ pub struct GreenTree {
     tok_start: Vec<u32>,
     /// Card nodes in source order; they tile the token stream.
     cards: Vec<Card>,
+    /// Stable identity for each card position: `card_slots[pos]` is a slot id
+    /// that is never reused for the life of the tree. Handles key on the slot,
+    /// so inserting/deleting/reordering cards never invalidates a handle that
+    /// still refers to a live card.
+    card_slots: Vec<u32>,
+    /// Reverse map `slot -> position`. Rebuilt whenever the card list changes
+    /// (structural edits); O(1) lookup for handle resolution.
+    slot_to_pos: FxHashMap<u32, usize>,
+    /// Next slot id to hand out (monotonic; never reused).
+    next_slot: u32,
     /// Sparse per-token overrides (empty until the first edit). A fast
     /// (non-DoS-resistant) hasher — keys are our own token indices, and bulk
     /// renumbering does tens of millions of inserts + lookups.
@@ -77,6 +87,27 @@ impl GreenTree {
     #[inline]
     pub fn cards(&self) -> &[Card] {
         &self.cards
+    }
+
+    /// The stable slot id of the card at position `pos`.
+    #[inline]
+    pub fn card_slot(&self, pos: usize) -> u32 {
+        self.card_slots[pos]
+    }
+
+    /// The current position of the card with stable slot `slot`, or `None` if
+    /// no live card has that slot (e.g. it was deleted).
+    #[inline]
+    pub fn card_by_slot(&self, slot: u32) -> Option<usize> {
+        self.slot_to_pos.get(&slot).copied()
+    }
+
+    /// The next slot id that would be assigned to a newly inserted card. Slots
+    /// are monotonic and never reused, so a value observed here is a lower
+    /// bound on the ids of any cards inserted afterward.
+    #[inline]
+    pub fn next_slot(&self) -> u32 {
+        self.next_slot
     }
 
     /// The original source.
@@ -149,21 +180,37 @@ impl GreenTree {
             out.push_str(&self.src);
             return out;
         }
-        for i in 0..n {
-            match self.overrides.get(&(i as u32)) {
-                Some(Override::Text(o)) => out.push_str(o),
-                Some(Override::Int(v)) => {
-                    // Write digits straight into `out`, no temporary allocation.
-                    let _ = write!(out, "{v}");
-                }
-                None => {
-                    let s = self.tok_start[i] as usize;
-                    let e = self.tok_start[i + 1] as usize;
-                    out.push_str(&self.src[s..e]);
-                }
-            }
+        for i in 0..n as u32 {
+            self.emit_token(i, &mut out);
         }
         out
+    }
+
+    /// The exact source text of the card at `card_index`, applying any
+    /// overrides. This is the card's whole token span, so it includes inline
+    /// `$` comments, absorbed comment lines, and `&`/indent continuations —
+    /// which is what "the text of this card" means for exploration
+    /// (`"$ vacuum vessel" in cell.text`). Reflects edits made so far.
+    pub fn card_source(&self, card_index: usize) -> String {
+        let card = self.cards[card_index];
+        let mut out = String::new();
+        for i in card.first_tok..card.tok_end {
+            self.emit_token(i, &mut out);
+        }
+        out
+    }
+
+    /// Append the effective text of token `i` (override if set, else source) to
+    /// `out`, without a temporary allocation for integer overrides.
+    #[inline]
+    fn emit_token(&self, i: u32, out: &mut String) {
+        match self.overrides.get(&i) {
+            Some(Override::Text(o)) => out.push_str(o),
+            Some(Override::Int(v)) => {
+                let _ = write!(out, "{v}");
+            }
+            None => out.push_str(self.token_src_text(i)),
+        }
     }
 }
 
@@ -201,11 +248,21 @@ pub fn parse(src: impl Into<String>) -> Parsed {
         &tok_start,
     );
 
+    // Stable card identity: at parse time slot == position. Structural edits
+    // (later milestones) hand out fresh slots from `next_slot` and rebuild the
+    // reverse map, so existing handles keep resolving.
+    let card_slots: Vec<u32> = (0..cards.len() as u32).collect();
+    let slot_to_pos: FxHashMap<u32, usize> = card_slots.iter().map(|&s| (s, s as usize)).collect();
+    let next_slot = cards.len() as u32;
+
     let tree = GreenTree {
         src,
         tok_kind,
         tok_start,
         cards,
+        card_slots,
+        slot_to_pos,
+        next_slot,
         overrides: FxHashMap::default(),
     };
     Parsed { tree, diagnostics }
@@ -546,6 +603,48 @@ mod tests {
             p.tree.to_source(),
             "title\n999 0 -1\n\n1 PX 0\n\nm1 1001 1\n"
         );
+    }
+
+    #[test]
+    fn card_source_includes_inline_comment() {
+        let src = "title\n1 0 -1 imp:n=1 $ vacuum vessel\n\n1 PX 0\n\nm1 1001 1\n";
+        let p = parse(src);
+        // Card 1 is the first cell card.
+        let cell_pos = p
+            .tree
+            .cards()
+            .iter()
+            .position(|c| c.kind == SyntaxKind::CELL_CARD)
+            .unwrap();
+        let text = p.tree.card_source(cell_pos);
+        assert!(text.contains("$ vacuum vessel"), "got: {text:?}");
+        assert!(text.contains("1 0 -1"));
+    }
+
+    #[test]
+    fn card_source_reflects_overrides() {
+        let src = "title\n1 0 -1\n\n1 PX 0\n\nm1 1001 1\n";
+        let mut p = parse(src);
+        let cell_pos = p
+            .tree
+            .cards()
+            .iter()
+            .position(|c| c.kind == SyntaxKind::CELL_CARD)
+            .unwrap();
+        let id_tok = p.tree.cards()[cell_pos].first_tok;
+        p.tree.set_token_int(id_tok, 42);
+        assert!(p.tree.card_source(cell_pos).contains("42 0 -1"));
+    }
+
+    #[test]
+    fn slots_resolve_positions() {
+        let src = "title\n1 0 -1\n2 0 1\n\n1 PX 0\n\nm1 1001 1\n";
+        let p = parse(src);
+        for pos in 0..p.tree.cards().len() {
+            let slot = p.tree.card_slot(pos);
+            assert_eq!(p.tree.card_by_slot(slot), Some(pos));
+        }
+        assert_eq!(p.tree.next_slot(), p.tree.cards().len() as u32);
     }
 
     #[test]

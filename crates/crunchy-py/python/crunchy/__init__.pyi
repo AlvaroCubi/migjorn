@@ -17,7 +17,7 @@ def parse(text: str) -> Model:
     ...
 
 class Surface:
-    """A surface card."""
+    """A surface card (a live handle onto its model)."""
 
     id: int
     """Surface number."""
@@ -33,17 +33,25 @@ class Surface:
     """White boundary (leading ``+``)."""
     well_formed: bool
     """``False`` if a coefficient could not be parsed."""
+    text: str
+    """The card's exact source text, reflecting any edits."""
     def __repr__(self) -> str: ...
 
 class Cell:
-    """A cell card."""
+    """A cell card (a live handle onto its model).
+
+    ``material`` and ``density`` are assignable in place; the edit writes
+    straight through the lossless engine (``cell.material = 124``). Changing a
+    cell between void (material 0) and a real material, or adding a density to a
+    void cell, needs a structural edit and raises ``ValueError``.
+    """
 
     id: int
     """Cell number."""
     material: int | None
-    """Material number (0 = void); ``None`` for ``LIKE n BUT`` cells."""
+    """Material number (0 = void); ``None`` for ``LIKE n BUT`` cells. Writable."""
     density: float | None
-    """Density (positive = atom, negative = mass), or ``None`` for void."""
+    """Density (positive = atom, negative = mass), or ``None`` for void. Writable."""
     is_void: bool
     """``True`` when the material number is 0."""
     like: int | None
@@ -56,10 +64,13 @@ class Cell:
     """Referenced cells (``#n`` complements, ``LIKE n`` base)."""
     well_formed: bool
     """``False`` if the geometry could not be fully parsed."""
+    text: str
+    """The card's exact source text, including inline ``$`` comments and
+    continuations, reflecting any edits."""
     def __repr__(self) -> str: ...
 
 class Material:
-    """A material (``Mn``) card."""
+    """A material (``Mn``) card (a live handle onto its model)."""
 
     id: int
     """Material number."""
@@ -67,10 +78,12 @@ class Material:
     """``(zaid, fraction)`` pairs; positive = atomic, negative = by weight."""
     well_formed: bool
     """``False`` if entries were not clean ZAID/fraction pairs."""
+    text: str
+    """The card's exact source text, reflecting any edits."""
     def __repr__(self) -> str: ...
 
 class Transform:
-    """A coordinate transformation (``TRn`` / ``*TRn``) card."""
+    """A coordinate transformation (``TRn`` / ``*TRn``) card (a live handle)."""
 
     id: int
     """Transformation number."""
@@ -80,6 +93,8 @@ class Transform:
     """Origin displacement."""
     rotation: list[float]
     """Rotation entries as written."""
+    text: str
+    """The card's exact source text, reflecting any edits."""
     def __repr__(self) -> str: ...
 
 class DataCard:
@@ -163,6 +178,16 @@ class Model:
     @property
     def num_surfaces(self) -> int:
         """Number of surfaces (cheap; does not build the surface list)."""
+        ...
+
+    @property
+    def num_materials(self) -> int:
+        """Number of materials (cheap; does not build the material list)."""
+        ...
+
+    @property
+    def num_transforms(self) -> int:
+        """Number of transforms (cheap; does not build the transform list)."""
         ...
 
     def surface(self, id: int) -> Surface | None:

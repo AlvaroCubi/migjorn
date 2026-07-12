@@ -75,6 +75,182 @@ impl GeomExpr {
             }
         }
     }
+
+    /// True if this is the [`GeomExpr::Error`] placeholder (an empty/invalid
+    /// region), used to detect an edit that would leave a cell with no geometry.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, GeomExpr::Error)
+    }
+
+    /// Intersect the whole region with a signed surface (`id` is the magnitude;
+    /// `negative` selects the negative sense). This is the usual meaning of
+    /// "add a surface to a cell": the new sense is ANDed with everything.
+    pub fn intersect_surface(&mut self, id: i64, negative: bool) {
+        self.intersect_with(GeomExpr::Surface(SurfaceRef {
+            token: NEW_TOKEN,
+            id,
+            negative,
+        }));
+    }
+
+    /// Intersect the whole region with a `#n` cell complement.
+    pub fn intersect_cell_complement(&mut self, id: i64) {
+        self.intersect_with(GeomExpr::CellComplement(CellRef {
+            token: NEW_TOKEN,
+            id,
+        }));
+    }
+
+    fn intersect_with(&mut self, other: GeomExpr) {
+        match self {
+            GeomExpr::Intersection(parts) => parts.push(other),
+            _ => {
+                let old = std::mem::replace(self, GeomExpr::Error);
+                *self = GeomExpr::Intersection(vec![old, other]);
+            }
+        }
+    }
+
+    /// Remove every surface leaf whose magnitude is `id` (either sense),
+    /// simplifying the tree. Returns `true` if anything was removed. If the
+    /// whole region collapses to nothing, `self` becomes [`GeomExpr::Error`]
+    /// (callers should treat that as "would empty the geometry").
+    pub fn remove_surface(&mut self, id: i64) -> bool {
+        self.remove_matching(&|e| matches!(e, GeomExpr::Surface(s) if s.id == id))
+    }
+
+    /// Remove every `#n` cell complement referencing cell `id`. Returns `true`
+    /// if anything was removed; may collapse to [`GeomExpr::Error`].
+    pub fn remove_cell_complement(&mut self, id: i64) -> bool {
+        self.remove_matching(&|e| matches!(e, GeomExpr::CellComplement(c) if c.id == id))
+    }
+
+    fn remove_matching(&mut self, pred: &impl Fn(&GeomExpr) -> bool) -> bool {
+        let old = std::mem::replace(self, GeomExpr::Error);
+        let (new, removed) = prune(old, pred);
+        *self = new.unwrap_or(GeomExpr::Error);
+        removed
+    }
+}
+
+/// Token sentinel for a reference created programmatically (no source token).
+/// Such refs live only in an owned/edited cell, which is re-emitted from its
+/// ids rather than by rewriting tokens, so the value is never dereferenced.
+const NEW_TOKEN: u32 = u32::MAX;
+
+/// Remove every sub-expression matching `pred`, returning the pruned region
+/// (`None` if it became empty) and whether anything was removed. Empty
+/// intersections/unions collapse; a single survivor is unwrapped.
+fn prune(e: GeomExpr, pred: &impl Fn(&GeomExpr) -> bool) -> (Option<GeomExpr>, bool) {
+    if pred(&e) {
+        return (None, true);
+    }
+    match e {
+        GeomExpr::Surface(_) | GeomExpr::CellComplement(_) | GeomExpr::Error => (Some(e), false),
+        GeomExpr::Complement(inner) => match prune(*inner, pred) {
+            (Some(i), removed) => (Some(GeomExpr::Complement(Box::new(i))), removed),
+            (None, removed) => (None, removed),
+        },
+        GeomExpr::Intersection(parts) => {
+            let (survivors, removed) = prune_parts(parts, pred);
+            (collapse(survivors, GeomExpr::Intersection), removed)
+        }
+        GeomExpr::Union(parts) => {
+            let (survivors, removed) = prune_parts(parts, pred);
+            (collapse(survivors, GeomExpr::Union), removed)
+        }
+    }
+}
+
+fn prune_parts(parts: Vec<GeomExpr>, pred: &impl Fn(&GeomExpr) -> bool) -> (Vec<GeomExpr>, bool) {
+    let mut survivors = Vec::with_capacity(parts.len());
+    let mut removed = false;
+    for p in parts {
+        let (kept, r) = prune(p, pred);
+        removed |= r;
+        if let Some(k) = kept {
+            survivors.push(k);
+        }
+    }
+    (survivors, removed)
+}
+
+fn collapse(mut parts: Vec<GeomExpr>, build: fn(Vec<GeomExpr>) -> GeomExpr) -> Option<GeomExpr> {
+    match parts.len() {
+        0 => None,
+        1 => parts.pop(),
+        _ => Some(build(parts)),
+    }
+}
+
+/// A promoted, owned cell: geometry is typed and editable, while the parameter
+/// tail (`imp`, `u`, `fill`, inline `$` comments, ...) is kept verbatim so
+/// editing the geometry never drops it. Emitted back to MCNP text via
+/// [`crate::emit::emit_cell`].
+#[derive(Debug, Clone)]
+pub struct OwnedCell {
+    /// Cell number.
+    pub id: i64,
+    /// Material number (0 = void).
+    pub material: Option<i64>,
+    /// Density (absent for void).
+    pub density: Option<f64>,
+    /// The editable geometry region.
+    pub geometry: GeomExpr,
+    /// The verbatim parameter tail after the geometry (may be empty).
+    pub params_text: String,
+}
+
+impl OwnedCell {
+    /// Surface reference magnitudes in the geometry, in order.
+    pub fn surface_ids(&self) -> Vec<i64> {
+        let mut out = Vec::new();
+        self.geometry.for_each_surface_ref(&mut |s| out.push(s.id));
+        out
+    }
+
+    /// Signed surface references in the geometry, in order.
+    pub fn signed_surfaces(&self) -> Vec<i64> {
+        let mut out = Vec::new();
+        self.geometry
+            .for_each_surface_ref(&mut |s| out.push(if s.negative { -s.id } else { s.id }));
+        out
+    }
+
+    /// Cell references (`#n` complements) in the geometry, in order.
+    pub fn cell_refs(&self) -> Vec<i64> {
+        let mut out = Vec::new();
+        self.geometry.for_each_cell_ref(&mut |c| out.push(c.id));
+        out
+    }
+}
+
+/// Promote the cell at `card_index` into an editable [`OwnedCell`], or `None`
+/// if it has no editable geometry (a `LIKE n BUT` cell) or its geometry did not
+/// parse cleanly. The parameter tail is captured verbatim from the source.
+pub fn promote_cell(tree: &GreenTree, card_index: usize) -> Option<OwnedCell> {
+    let cell = parse_cell(tree, card_index)?;
+    let geometry = cell.geometry.clone()?;
+    if !cell.well_formed {
+        return None;
+    }
+    let params_text = match cell.params_start {
+        Some(ps) => {
+            let card = tree.cards()[card_index];
+            let last = tree.card_content_tokens(&card).last()?;
+            let start = tree.token_span(ps).start as usize;
+            let end = tree.token_span(last).end as usize;
+            tree.src()[start..end].to_string()
+        }
+        None => String::new(),
+    };
+    Some(OwnedCell {
+        id: cell.id,
+        material: cell.material,
+        density: cell.density,
+        geometry,
+        params_text,
+    })
 }
 
 /// A parsed cell card.
@@ -586,5 +762,62 @@ mod tests {
         assert_eq!(c.like.unwrap().id, 3);
         assert!(c.geometry.is_none());
         assert_eq!(c.cell_refs()[0].id, 3);
+    }
+
+    fn owned(cell_line: &str) -> OwnedCell {
+        let t = model(cell_line);
+        let ci = first_cell(&t).card_index;
+        promote_cell(&t, ci).expect("promotable")
+    }
+
+    #[test]
+    fn promote_captures_params_verbatim() {
+        let oc = owned("1 1 -1.0 -1 2 imp:n=1 vol=3");
+        assert_eq!(oc.id, 1);
+        assert_eq!(oc.material, Some(1));
+        assert_eq!(oc.density, Some(-1.0));
+        assert_eq!(oc.signed_surfaces(), vec![-1, 2]);
+        assert_eq!(oc.params_text, "imp:n=1 vol=3");
+    }
+
+    #[test]
+    fn promote_refuses_like_and_malformed() {
+        let t = model("9 LIKE 3 BUT imp:n=1");
+        let ci = first_cell(&t).card_index;
+        assert!(promote_cell(&t, ci).is_none());
+    }
+
+    #[test]
+    fn intersect_surface_ands_with_region() {
+        let mut oc = owned("1 0 -1 : 2");
+        oc.geometry.intersect_surface(3, true); // add -3 to the whole region
+                                                // The union is now intersected with -3: (-1 : 2) -3.
+        assert_eq!(oc.signed_surfaces(), vec![-1, 2, -3]);
+    }
+
+    #[test]
+    fn remove_surface_simplifies() {
+        let mut oc = owned("1 0 -1 2 -3");
+        assert!(oc.geometry.remove_surface(2));
+        assert_eq!(oc.signed_surfaces(), vec![-1, -3]);
+        // Removing a non-present surface reports false and changes nothing.
+        assert!(!oc.geometry.remove_surface(99));
+        assert_eq!(oc.signed_surfaces(), vec![-1, -3]);
+    }
+
+    #[test]
+    fn remove_last_surface_empties_geometry() {
+        let mut oc = owned("1 0 -1");
+        assert!(oc.geometry.remove_surface(1));
+        assert!(oc.geometry.is_empty());
+    }
+
+    #[test]
+    fn add_and_remove_cell_complement() {
+        let mut oc = owned("1 0 -1 2");
+        oc.geometry.intersect_cell_complement(7);
+        assert_eq!(oc.cell_refs(), vec![7]);
+        assert!(oc.geometry.remove_cell_complement(7));
+        assert_eq!(oc.cell_refs(), Vec::<i64>::new());
     }
 }

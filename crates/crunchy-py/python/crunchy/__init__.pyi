@@ -67,6 +67,26 @@ class Cell:
     text: str
     """The card's exact source text, including inline ``$`` comments and
     continuations, reflecting any edits."""
+
+    def add_surface(self, surface: int) -> None:
+        """Intersect the geometry with a signed surface (negative int = negative
+        sense). Restructures the card; other cards stay byte-for-byte."""
+        ...
+
+    def remove_surface(self, id: int) -> bool:
+        """Remove every reference to surface ``id`` (either sense). Returns
+        whether anything was removed; raises ``ValueError`` if it would empty
+        the cell's geometry."""
+        ...
+
+    def add_complement(self, id: int) -> None:
+        """Intersect the geometry with a ``#n`` complement of cell ``id``."""
+        ...
+
+    def remove_complement(self, id: int) -> bool:
+        """Remove every ``#n`` complement of cell ``id`` from the geometry."""
+        ...
+
     def __repr__(self) -> str: ...
 
 class Material:

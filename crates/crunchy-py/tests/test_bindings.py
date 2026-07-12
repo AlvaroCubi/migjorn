@@ -138,6 +138,45 @@ def test_num_materials_and_transforms():
     assert model.num_transforms == 1
 
 
+def test_add_and_remove_surface_in_geometry():
+    model = crunchy.parse(MODEL)
+    c = model.cell(1)  # "1 1 -1.0 -1 2 #3 imp:n=1 $ fuel"
+    c.add_surface(-7)  # intersect with surface 7 (negative sense)
+    assert -7 in c.signed_surfaces
+    out = str(model)
+    assert "-7" in out
+    # The parameter tail (incl. inline comment) survives the restructure.
+    assert "imp:n=1" in out
+    # Other cards untouched, and the model still re-parses cleanly.
+    assert "2 0 1 imp:n=0" in out
+    assert crunchy.parse(out).diagnostics == []
+
+    # Remove it again.
+    assert c.remove_surface(7) is True
+    assert -7 not in c.signed_surfaces
+
+
+def test_add_and_remove_complement():
+    model = crunchy.parse(MODEL)
+    c = model.cell(2)  # "2 0 1 imp:n=0" (void)
+    c.add_complement(1)
+    assert 1 in c.cell_refs
+    assert "#1" in str(model)
+    assert c.remove_complement(1) is True
+    assert 1 not in c.cell_refs
+
+
+def test_geometry_edit_refused_when_it_would_empty():
+    model = crunchy.parse(MODEL)
+    c = model.cell(3)  # "3 0 -2 imp:n=1" — single surface
+    try:
+        c.remove_surface(2)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError removing the last surface")
+
+
 if __name__ == "__main__":
     test_parse_and_lossless()
     test_typed_access()
@@ -148,4 +187,7 @@ if __name__ == "__main__":
     test_edit_material_and_density_in_place()
     test_edit_requiring_structural_change_raises()
     test_num_materials_and_transforms()
+    test_add_and_remove_surface_in_geometry()
+    test_add_and_remove_complement()
+    test_geometry_edit_refused_when_it_would_empty()
     print("all crunchy binding smoke tests passed")

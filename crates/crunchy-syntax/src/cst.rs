@@ -65,6 +65,10 @@ pub struct GreenTree {
     /// (non-DoS-resistant) hasher — keys are our own token indices, and bulk
     /// renumbering does tens of millions of inserts + lookups.
     overrides: FxHashMap<u32, Override>,
+    /// Structurally-edited cards: `slot -> replacement content text`. On
+    /// re-emission the card's meaningful token span is replaced by this text,
+    /// while surrounding trivia is preserved (see `replace_card_content`).
+    card_replacements: FxHashMap<u32, Box<str>>,
 }
 
 /// A replacement value for a token. `Int` avoids allocating a string per edit,
@@ -169,35 +173,91 @@ impl GreenTree {
         (card.first_tok..card.tok_end).filter(move |&i| !self.token_kind(i).is_trivia())
     }
 
-    /// Re-emit the tree as source text, applying any overrides. Byte-for-byte
-    /// identical to the input when unedited.
+    /// Re-emit the tree as source text, applying any overrides and card
+    /// replacements. Byte-for-byte identical to the input when unedited.
     pub fn to_source(&self) -> String {
         // Capacity: source length is exact when unedited and a good estimate
         // otherwise.
         let mut out = String::with_capacity(self.src.len());
-        let n = self.tok_kind.len();
-        if self.overrides.is_empty() {
+        if self.overrides.is_empty() && self.card_replacements.is_empty() {
             out.push_str(&self.src);
             return out;
         }
-        for i in 0..n as u32 {
-            self.emit_token(i, &mut out);
-        }
+        let ranges = self.replaced_ranges();
+        self.emit_range(0, self.tok_kind.len() as u32, &ranges, &mut out);
         out
     }
 
-    /// The exact source text of the card at `card_index`, applying any
-    /// overrides. This is the card's whole token span, so it includes inline
-    /// `$` comments, absorbed comment lines, and `&`/indent continuations —
-    /// which is what "the text of this card" means for exploration
+    /// The exact source text of the card at `card_index`, applying any overrides
+    /// and card replacement. This is the card's whole token span, so it includes
+    /// inline `$` comments, absorbed comment lines, and `&`/indent continuations
+    /// — which is what "the text of this card" means for exploration
     /// (`"$ vacuum vessel" in cell.text`). Reflects edits made so far.
     pub fn card_source(&self, card_index: usize) -> String {
         let card = self.cards[card_index];
+        let ranges = self.replaced_ranges();
         let mut out = String::new();
-        for i in card.first_tok..card.tok_end {
-            self.emit_token(i, &mut out);
-        }
+        self.emit_range(card.first_tok, card.tok_end, &ranges, &mut out);
         out
+    }
+
+    /// Replace the *content* of the card at `card_index` with `text` on
+    /// re-emission. Only the card's meaningful (non-trivia) token span is
+    /// replaced; leading indentation and trailing trivia — newlines, the block's
+    /// blank delimiter, inline `$` comments, absorbed comment lines — are
+    /// preserved, so the structure around the card stays intact. Keyed by the
+    /// card's stable slot, so it survives later structural edits.
+    pub fn replace_card_content(&mut self, card_index: usize, text: impl Into<Box<str>>) {
+        let slot = self.card_slots[card_index];
+        self.card_replacements.insert(slot, text.into());
+    }
+
+    /// First and last meaningful (non-trivia) token indices of a card, if any.
+    fn content_bounds(&self, card: &Card) -> Option<(u32, u32)> {
+        let mut first = None;
+        let mut last = None;
+        for i in self.card_content_tokens(card) {
+            if first.is_none() {
+                first = Some(i);
+            }
+            last = Some(i);
+        }
+        Some((first?, last?))
+    }
+
+    /// Sorted, non-overlapping `(content_first, content_last, replacement)` for
+    /// every live replaced card. Cheap: there are as many entries as cards that
+    /// have actually been restructured.
+    fn replaced_ranges(&self) -> Vec<(u32, u32, &str)> {
+        let mut v: Vec<(u32, u32, &str)> = self
+            .card_replacements
+            .iter()
+            .filter_map(|(&slot, text)| {
+                let pos = self.card_by_slot(slot)?;
+                let (f, l) = self.content_bounds(&self.cards[pos])?;
+                Some((f, l, text.as_ref()))
+            })
+            .collect();
+        v.sort_by_key(|r| r.0);
+        v
+    }
+
+    /// Emit tokens `[from, to)`, applying overrides and substituting the emitted
+    /// text for any replaced card whose content range begins within. `ranges`
+    /// must be sorted by start and non-overlapping (see `replaced_ranges`).
+    fn emit_range(&self, from: u32, to: u32, ranges: &[(u32, u32, &str)], out: &mut String) {
+        let mut ri = ranges.partition_point(|r| r.0 < from);
+        let mut i = from;
+        while i < to {
+            if ri < ranges.len() && ranges[ri].0 == i {
+                out.push_str(ranges[ri].2);
+                i = ranges[ri].1 + 1;
+                ri += 1;
+            } else {
+                self.emit_token(i, out);
+                i += 1;
+            }
+        }
     }
 
     /// Append the effective text of token `i` (override if set, else source) to
@@ -264,6 +324,7 @@ pub fn parse(src: impl Into<String>) -> Parsed {
         slot_to_pos,
         next_slot,
         overrides: FxHashMap::default(),
+        card_replacements: FxHashMap::default(),
     };
     Parsed { tree, diagnostics }
 }
@@ -634,6 +695,59 @@ mod tests {
         let id_tok = p.tree.cards()[cell_pos].first_tok;
         p.tree.set_token_int(id_tok, 42);
         assert!(p.tree.card_source(cell_pos).contains("42 0 -1"));
+    }
+
+    #[test]
+    fn replace_card_content_preserves_surrounding_structure() {
+        let src = "title\n1 0 -1 imp:n=1 $ fuel\n2 0 1\n\n1 PX 0\n\nm1 1001 1\n";
+        let mut p = parse(src);
+        let cell1 = p
+            .tree
+            .cards()
+            .iter()
+            .position(|c| c.kind == SyntaxKind::CELL_CARD)
+            .unwrap();
+        p.tree.replace_card_content(cell1, "1 5 -2.0 -1");
+        let out = p.tree.to_source();
+        // Content replaced; trailing inline comment and the rest are preserved.
+        assert!(out.contains("1 5 -2.0 -1 $ fuel"), "got: {out}");
+        assert!(out.contains("2 0 1"));
+        assert!(out.contains("\n\n1 PX 0"), "block delimiter lost: {out}");
+    }
+
+    #[test]
+    fn replace_last_card_in_block_keeps_delimiter() {
+        // The last cell before the blank line absorbs the delimiter; replacing
+        // its content must not swallow that blank line.
+        let src = "title\n1 0 -1\n2 0 1\n\n1 PX 0\n\nm1 1001 1\n";
+        let mut p = parse(src);
+        let last_cell = p
+            .tree
+            .cards()
+            .iter()
+            .enumerate()
+            .rfind(|(_, c)| c.kind == SyntaxKind::CELL_CARD)
+            .unwrap()
+            .0;
+        p.tree.replace_card_content(last_cell, "2 0 1 -3");
+        let out = p.tree.to_source();
+        assert!(out.contains("2 0 1 -3\n\n1 PX 0"), "delimiter lost: {out}");
+        // Re-parse stays well-formed (three cell/surface blocks intact).
+        assert!(parse(&out).diagnostics.is_empty());
+    }
+
+    #[test]
+    fn card_source_reflects_replacement() {
+        let src = "title\n1 0 -1 imp:n=1\n\n1 PX 0\n\nm1 1001 1\n";
+        let mut p = parse(src);
+        let cell1 = p
+            .tree
+            .cards()
+            .iter()
+            .position(|c| c.kind == SyntaxKind::CELL_CARD)
+            .unwrap();
+        p.tree.replace_card_content(cell1, "1 0 -1 5");
+        assert!(p.tree.card_source(cell1).contains("1 0 -1 5"));
     }
 
     #[test]

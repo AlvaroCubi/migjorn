@@ -54,15 +54,39 @@ struct Cell {
 }
 
 impl Cell {
-    /// Resolve this handle's current card and parse it, running `f` on the
-    /// typed view. Raises if the card no longer exists or is no longer a cell.
-    fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Cell) -> R) -> PyResult<R> {
+    /// Resolve this handle's current card and read it (preferring an edited
+    /// view), running `f` on it. Raises if the card no longer exists or is no
+    /// longer a cell.
+    fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::CellRead) -> R) -> PyResult<R> {
         let m = self.model.bind(py).borrow();
-        let tree = m.inner.tree();
-        let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
-        let cell = core::parse_cell(tree, ci)
+        let ci = m
+            .inner
+            .tree()
+            .card_by_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        let view = m
+            .inner
+            .read_cell(ci)
             .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid cell"))?;
-        Ok(f(&cell))
+        Ok(f(&view))
+    }
+
+    /// Run a mutation `f` on the model for this handle's card, then invalidate
+    /// the id index.
+    fn edit<R>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&mut core::Model, usize) -> Result<R, core::EditError>,
+    ) -> PyResult<R> {
+        let mut m = self.model.bind(py).borrow_mut();
+        let ci = m
+            .inner
+            .tree()
+            .card_by_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        let r = f(&mut m.inner, ci).map_err(edit_error)?;
+        m.invalidate();
+        Ok(r)
     }
 }
 
@@ -70,68 +94,47 @@ impl Cell {
 impl Cell {
     #[getter]
     fn id(&self, py: Python<'_>) -> PyResult<i64> {
-        self.read(py, |c| c.id)
+        self.read(py, |c| c.id())
     }
     #[getter]
     fn material(&self, py: Python<'_>) -> PyResult<Option<i64>> {
-        self.read(py, |c| c.material)
+        self.read(py, |c| c.material())
     }
     #[setter]
     fn set_material(&self, py: Python<'_>, value: i64) -> PyResult<()> {
-        let mut m = self.model.bind(py).borrow_mut();
-        let ci = m
-            .inner
-            .tree()
-            .card_by_slot(self.slot)
-            .ok_or_else(stale_handle)?;
-        m.inner.set_cell_material(ci, value).map_err(edit_error)?;
-        m.invalidate();
-        Ok(())
+        self.edit(py, |m, ci| m.set_cell_material(ci, value))
     }
     #[getter]
     fn density(&self, py: Python<'_>) -> PyResult<Option<f64>> {
-        self.read(py, |c| c.density)
+        self.read(py, |c| c.density())
     }
     #[setter]
     fn set_density(&self, py: Python<'_>, value: f64) -> PyResult<()> {
-        let mut m = self.model.bind(py).borrow_mut();
-        let ci = m
-            .inner
-            .tree()
-            .card_by_slot(self.slot)
-            .ok_or_else(stale_handle)?;
-        m.inner.set_cell_density(ci, value).map_err(edit_error)?;
-        m.invalidate();
-        Ok(())
+        self.edit(py, |m, ci| m.set_cell_density(ci, value))
     }
     #[getter]
     fn is_void(&self, py: Python<'_>) -> PyResult<bool> {
-        self.read(py, |c| c.material == Some(0))
+        self.read(py, |c| c.is_void())
     }
     #[getter]
     fn like(&self, py: Python<'_>) -> PyResult<Option<i64>> {
-        self.read(py, |c| c.like.map(|r| r.id))
+        self.read(py, |c| c.like())
     }
     #[getter]
     fn surface_ids(&self, py: Python<'_>) -> PyResult<Vec<i64>> {
-        self.read(py, |c| c.surface_refs().iter().map(|r| r.id).collect())
+        self.read(py, |c| c.surface_ids())
     }
     #[getter]
     fn signed_surfaces(&self, py: Python<'_>) -> PyResult<Vec<i64>> {
-        self.read(py, |c| {
-            c.surface_refs()
-                .iter()
-                .map(|r| if r.negative { -r.id } else { r.id })
-                .collect()
-        })
+        self.read(py, |c| c.signed_surfaces())
     }
     #[getter]
     fn cell_refs(&self, py: Python<'_>) -> PyResult<Vec<i64>> {
-        self.read(py, |c| c.cell_refs().iter().map(|r| r.id).collect())
+        self.read(py, |c| c.cell_refs())
     }
     #[getter]
     fn well_formed(&self, py: Python<'_>) -> PyResult<bool> {
-        self.read(py, |c| c.well_formed)
+        self.read(py, |c| c.well_formed())
     }
     #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
@@ -140,11 +143,38 @@ impl Cell {
         let ci = tree.card_by_slot(self.slot).ok_or_else(stale_handle)?;
         Ok(tree.card_source(ci))
     }
+
+    /// Intersect the geometry with a signed surface (negative int = negative
+    /// sense). Restructures the card in place.
+    fn add_surface(&self, py: Python<'_>, surface: i64) -> PyResult<()> {
+        self.edit(py, |m, ci| {
+            m.add_cell_surface(ci, surface.abs(), surface < 0)
+        })
+    }
+
+    /// Remove every reference to surface `id` (either sense) from the geometry.
+    /// Returns whether anything was removed; raises if it would empty the cell.
+    fn remove_surface(&self, py: Python<'_>, id: i64) -> PyResult<bool> {
+        self.edit(py, |m, ci| m.remove_cell_surface(ci, id.abs()))
+    }
+
+    /// Intersect the geometry with a `#n` complement of cell `id`.
+    fn add_complement(&self, py: Python<'_>, id: i64) -> PyResult<()> {
+        self.edit(py, |m, ci| m.add_cell_complement(ci, id))
+    }
+
+    /// Remove every `#n` complement of cell `id` from the geometry.
+    fn remove_complement(&self, py: Python<'_>, id: i64) -> PyResult<bool> {
+        self.edit(py, |m, ci| m.remove_cell_complement(ci, id))
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         self.read(py, |c| {
             format!(
                 "Cell(id={}, material={:?}, density={:?})",
-                c.id, c.material, c.density
+                c.id(),
+                c.material(),
+                c.density()
             )
         })
     }

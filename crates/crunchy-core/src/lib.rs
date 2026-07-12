@@ -7,6 +7,7 @@
 
 mod cell;
 mod datacard;
+mod emit;
 mod material;
 mod model;
 mod num;
@@ -15,11 +16,13 @@ mod surface;
 mod transform;
 
 pub use cell::{
-    cell_id, cells, parse_cell, scan_cell_refs, Cell, CellRef, GeomExpr, RefKind, SurfaceRef,
+    cell_id, cells, parse_cell, promote_cell, scan_cell_refs, Cell, CellRef, GeomExpr, OwnedCell,
+    RefKind, SurfaceRef,
 };
 pub use datacard::{data_cards, parse_data_card, DataCard};
+pub use emit::{emit_cell, emit_geometry};
 pub use material::{materials, parse_material, Material, MaterialEntry};
-pub use model::{EditError, Model, ModelIndex};
+pub use model::{CellRead, EditError, Model, ModelIndex};
 pub use num::{parse_float, parse_int};
 pub use renumber::{renumber_cells, renumber_surfaces};
 pub use surface::{parse_surface, surface_id, surfaces, Surface, SurfaceKind};

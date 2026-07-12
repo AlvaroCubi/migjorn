@@ -8,8 +8,9 @@
 use crunchy_syntax::{Diagnostic, GreenTree, Parsed};
 use rustc_hash::FxHashMap;
 
-use crate::cell::{cell_id, cells, parse_cell, Cell};
+use crate::cell::{cell_id, cells, parse_cell, promote_cell, Cell, GeomExpr, OwnedCell};
 use crate::datacard::{data_cards, DataCard};
+use crate::emit::emit_cell;
 use crate::material::{materials, Material};
 use crate::renumber::{renumber_cells, renumber_surfaces};
 use crate::surface::{surface_id, surfaces, Surface};
@@ -19,6 +20,10 @@ use crate::transform::{transforms, Transform};
 pub struct Model {
     tree: GreenTree,
     diagnostics: Vec<Diagnostic>,
+    /// Cards that have been structurally edited, keyed by stable slot. Once a
+    /// cell is here it is the source of truth for reads (`read_cell`) and is
+    /// re-emitted from this typed node; the CST holds the emitted text.
+    owned_cells: FxHashMap<u32, OwnedCell>,
 }
 
 impl Model {
@@ -26,7 +31,11 @@ impl Model {
     /// diagnostics and a best-effort model.
     pub fn parse(src: impl Into<String>) -> Model {
         let Parsed { tree, diagnostics } = crunchy_syntax::parse(src);
-        Model { tree, diagnostics }
+        Model {
+            tree,
+            diagnostics,
+            owned_cells: FxHashMap::default(),
+        }
     }
 
     /// The underlying lossless tree.
@@ -90,14 +99,35 @@ impl Model {
         renumber_cells(&mut self.tree, map);
     }
 
+    /// Read the cell at `card_index`, preferring a structurally-edited (owned)
+    /// view when one exists, else the freshly-parsed CST view. This is the
+    /// single read path so that reads and re-emission agree after an edit.
+    pub fn read_cell(&self, card_index: usize) -> Option<CellRead<'_>> {
+        let slot = self.tree.card_slot(card_index);
+        if let Some(oc) = self.owned_cells.get(&slot) {
+            return Some(CellRead::Owned(oc));
+        }
+        Some(CellRead::Parsed(parse_cell(&self.tree, card_index)?))
+    }
+
     /// Set the material number of the cell at `card_index`, in place.
     ///
-    /// This is a *value* edit: it replaces the existing material token. It
-    /// cannot change a cell between void (material 0) and a real material,
-    /// because that adds or removes the density field — a structural edit that
-    /// the token-override overlay cannot express. Such requests return
-    /// [`EditError::VoidnessChange`].
+    /// This is a *value* edit: it replaces the existing material. It cannot
+    /// change a cell between void (material 0) and a real material, because that
+    /// adds or removes the density field — a structural edit — so such requests
+    /// return [`EditError::VoidnessChange`].
     pub fn set_cell_material(&mut self, card_index: usize, material: i64) -> Result<(), EditError> {
+        let slot = self.tree.card_slot(card_index);
+        if self.owned_cells.contains_key(&slot) {
+            let oc = self.owned_cells.get_mut(&slot).unwrap();
+            if (oc.material == Some(0)) != (material == 0) {
+                return Err(EditError::VoidnessChange);
+            }
+            oc.material = Some(material);
+            let text = emit_cell(oc);
+            self.tree.replace_card_content(card_index, text);
+            return Ok(());
+        }
         let cell = parse_cell(&self.tree, card_index).ok_or(EditError::NotACell)?;
         let tok = cell.material_token.ok_or(EditError::NoMaterialField)?;
         if (cell.material == Some(0)) != (material == 0) {
@@ -108,14 +138,194 @@ impl Model {
     }
 
     /// Set the density of the cell at `card_index`, in place (positive = atom
-    /// density, negative = mass density). Replaces the existing density token;
-    /// a void cell has no density field to set, which returns
-    /// [`EditError::NoDensityField`] (adding one is a structural edit).
+    /// density, negative = mass density). A void cell has no density field to
+    /// set, which returns [`EditError::NoDensityField`] (adding one is a
+    /// structural edit).
     pub fn set_cell_density(&mut self, card_index: usize, density: f64) -> Result<(), EditError> {
+        let slot = self.tree.card_slot(card_index);
+        if self.owned_cells.contains_key(&slot) {
+            let oc = self.owned_cells.get_mut(&slot).unwrap();
+            if oc.material == Some(0) || oc.density.is_none() {
+                return Err(EditError::NoDensityField);
+            }
+            oc.density = Some(density);
+            let text = emit_cell(oc);
+            self.tree.replace_card_content(card_index, text);
+            return Ok(());
+        }
         let cell = parse_cell(&self.tree, card_index).ok_or(EditError::NotACell)?;
         let tok = cell.density_token.ok_or(EditError::NoDensityField)?;
         self.tree.set_token_text(tok, format!("{density}"));
         Ok(())
+    }
+
+    /// Intersect the cell's geometry with a signed surface (`id` magnitude,
+    /// `negative` sense). Promotes the cell to an editable node on first use and
+    /// re-emits it; every other card stays byte-for-byte.
+    pub fn add_cell_surface(
+        &mut self,
+        card_index: usize,
+        id: i64,
+        negative: bool,
+    ) -> Result<(), EditError> {
+        self.edit_geometry(card_index, |g| g.intersect_surface(id, negative))
+    }
+
+    /// Intersect the cell's geometry with a `#n` cell complement.
+    pub fn add_cell_complement(&mut self, card_index: usize, id: i64) -> Result<(), EditError> {
+        self.edit_geometry(card_index, |g| g.intersect_cell_complement(id))
+    }
+
+    /// Remove every surface reference of magnitude `id` from the cell's
+    /// geometry. Returns whether anything was removed. Refuses (with
+    /// [`EditError::WouldEmptyGeometry`]) an edit that would leave the cell with
+    /// no geometry.
+    pub fn remove_cell_surface(&mut self, card_index: usize, id: i64) -> Result<bool, EditError> {
+        self.remove_geometry(card_index, &move |g| g.remove_surface(id))
+    }
+
+    /// Remove every `#n` complement of cell `id` from the geometry.
+    pub fn remove_cell_complement(
+        &mut self,
+        card_index: usize,
+        id: i64,
+    ) -> Result<bool, EditError> {
+        self.remove_geometry(card_index, &move |g| g.remove_cell_complement(id))
+    }
+
+    /// Ensure the cell is promoted, apply `f` to its geometry, and re-emit.
+    fn edit_geometry<R>(
+        &mut self,
+        card_index: usize,
+        f: impl FnOnce(&mut GeomExpr) -> R,
+    ) -> Result<R, EditError> {
+        let slot = self.tree.card_slot(card_index);
+        if !self.owned_cells.contains_key(&slot) {
+            let oc = promote_cell(&self.tree, card_index).ok_or(EditError::NotEditableGeometry)?;
+            self.owned_cells.insert(slot, oc);
+        }
+        let oc = self.owned_cells.get_mut(&slot).unwrap();
+        let r = f(&mut oc.geometry);
+        let text = emit_cell(oc);
+        self.tree.replace_card_content(card_index, text);
+        Ok(r)
+    }
+
+    /// Apply a removal `op` to the cell's geometry, guarding against emptying it
+    /// and avoiding promotion when nothing is removed.
+    fn remove_geometry(
+        &mut self,
+        card_index: usize,
+        op: &dyn Fn(&mut GeomExpr) -> bool,
+    ) -> Result<bool, EditError> {
+        let slot = self.tree.card_slot(card_index);
+        // Work on a copy of the current effective geometry.
+        let mut trial = match self.owned_cells.get(&slot) {
+            Some(oc) => oc.geometry.clone(),
+            None => {
+                let cell =
+                    parse_cell(&self.tree, card_index).ok_or(EditError::NotEditableGeometry)?;
+                if !cell.well_formed {
+                    return Err(EditError::NotEditableGeometry);
+                }
+                cell.geometry
+                    .clone()
+                    .ok_or(EditError::NotEditableGeometry)?
+            }
+        };
+        let removed = op(&mut trial);
+        if !removed {
+            return Ok(false);
+        }
+        if trial.is_empty() {
+            return Err(EditError::WouldEmptyGeometry);
+        }
+        if !self.owned_cells.contains_key(&slot) {
+            let oc = promote_cell(&self.tree, card_index).ok_or(EditError::NotEditableGeometry)?;
+            self.owned_cells.insert(slot, oc);
+        }
+        let oc = self.owned_cells.get_mut(&slot).unwrap();
+        oc.geometry = trial;
+        let text = emit_cell(oc);
+        self.tree.replace_card_content(card_index, text);
+        Ok(true)
+    }
+}
+
+/// A read view of a cell: either a structurally-edited owned node or a freshly
+/// parsed CST view. Exposes the same fields either way so callers need not
+/// branch. Returned by [`Model::read_cell`].
+pub enum CellRead<'a> {
+    /// A structurally-edited cell (source of truth is the owned node).
+    Owned(&'a OwnedCell),
+    /// An unedited cell, parsed from the CST.
+    Parsed(Cell),
+}
+
+impl CellRead<'_> {
+    /// Cell number.
+    pub fn id(&self) -> i64 {
+        match self {
+            CellRead::Owned(o) => o.id,
+            CellRead::Parsed(c) => c.id,
+        }
+    }
+    /// Material number (0 = void; `None` for `LIKE n BUT`).
+    pub fn material(&self) -> Option<i64> {
+        match self {
+            CellRead::Owned(o) => o.material,
+            CellRead::Parsed(c) => c.material,
+        }
+    }
+    /// Density (positive = atom, negative = mass; `None` for void).
+    pub fn density(&self) -> Option<f64> {
+        match self {
+            CellRead::Owned(o) => o.density,
+            CellRead::Parsed(c) => c.density,
+        }
+    }
+    /// True when the material number is 0.
+    pub fn is_void(&self) -> bool {
+        self.material() == Some(0)
+    }
+    /// Base cell for a `LIKE n BUT` card (never for an owned cell).
+    pub fn like(&self) -> Option<i64> {
+        match self {
+            CellRead::Owned(_) => None,
+            CellRead::Parsed(c) => c.like.map(|r| r.id),
+        }
+    }
+    /// Referenced surface numbers (magnitudes), in order.
+    pub fn surface_ids(&self) -> Vec<i64> {
+        match self {
+            CellRead::Owned(o) => o.surface_ids(),
+            CellRead::Parsed(c) => c.surface_refs().iter().map(|r| r.id).collect(),
+        }
+    }
+    /// Referenced surfaces with sense, in order.
+    pub fn signed_surfaces(&self) -> Vec<i64> {
+        match self {
+            CellRead::Owned(o) => o.signed_surfaces(),
+            CellRead::Parsed(c) => c
+                .surface_refs()
+                .iter()
+                .map(|r| if r.negative { -r.id } else { r.id })
+                .collect(),
+        }
+    }
+    /// Referenced cells (`#n` complements, `LIKE n` base), in order.
+    pub fn cell_refs(&self) -> Vec<i64> {
+        match self {
+            CellRead::Owned(o) => o.cell_refs(),
+            CellRead::Parsed(c) => c.cell_refs().iter().map(|r| r.id).collect(),
+        }
+    }
+    /// Whether the geometry parsed cleanly (owned cells are always well-formed).
+    pub fn well_formed(&self) -> bool {
+        match self {
+            CellRead::Owned(_) => true,
+            CellRead::Parsed(c) => c.well_formed,
+        }
     }
 }
 
@@ -134,6 +344,11 @@ pub enum EditError {
     /// The edit would change the cell between void and non-void, which adds or
     /// removes the density field — a structural edit.
     VoidnessChange,
+    /// The cell has no editable geometry (a `LIKE n BUT` cell, or geometry that
+    /// did not parse cleanly).
+    NotEditableGeometry,
+    /// The edit would leave the cell with no geometry at all.
+    WouldEmptyGeometry,
 }
 
 impl std::fmt::Display for EditError {
@@ -149,6 +364,10 @@ impl std::fmt::Display for EditError {
                 "changing a cell between void (material 0) and a real material adds \
                  or removes the density field; this is a structural edit (not yet supported)"
             }
+            EditError::NotEditableGeometry => {
+                "cell has no editable geometry (a LIKE n BUT cell, or malformed geometry)"
+            }
+            EditError::WouldEmptyGeometry => "edit would leave the cell with no geometry",
         };
         f.write_str(msg)
     }
@@ -291,5 +510,55 @@ sdef pos=0 0 0
         let ci = cell_pos(&m, 1);
         m.set_cell_material(ci, 7).unwrap();
         assert!(m.to_source().contains("1 7 -1.0 -1 imp:n=1"));
+    }
+
+    #[test]
+    fn add_surface_to_cell_reemits_and_is_lossless_elsewhere() {
+        let mut m = Model::parse(MODEL);
+        let ci = cell_pos(&m, 1); // "1 1 -1.0 -1 imp:n=1"
+        m.add_cell_surface(ci, 5, true).unwrap(); // add -5
+                                                  // Read view reflects the edit immediately.
+        assert_eq!(m.read_cell(ci).unwrap().signed_surfaces(), vec![-1, -5]);
+        let out = m.to_source();
+        assert!(out.contains("1 1 -1 -1 -5 imp:n=1"), "got: {out}");
+        // Other cards untouched.
+        assert!(out.contains("2 0 1 imp:n=0"));
+        assert!(out.contains("1 SO 5"));
+        // Re-parse is clean.
+        assert!(Model::parse(&out).diagnostics().is_empty());
+    }
+
+    #[test]
+    fn remove_surface_and_guard_against_emptying() {
+        let mut m = Model::parse("t\n1 0 -1 2 imp:n=1\n\n1 SO 5\n2 PX 0\n\nm1 1001 1\n");
+        let ci = *m.index().cells.get(&1).unwrap();
+        assert!(m.remove_cell_surface(ci, 2).unwrap());
+        assert!(m.to_source().contains("1 0 -1 imp:n=1"));
+        // Removing the last surface is refused.
+        assert_eq!(
+            m.remove_cell_surface(ci, 1),
+            Err(EditError::WouldEmptyGeometry)
+        );
+    }
+
+    #[test]
+    fn material_edit_after_geometry_edit_is_consistent() {
+        let mut m = Model::parse(MODEL);
+        let ci = cell_pos(&m, 1);
+        m.add_cell_surface(ci, 9, false).unwrap(); // promotes the cell
+        m.set_cell_material(ci, 3).unwrap(); // must route through the owned node
+        let out = m.to_source();
+        assert!(out.contains("1 3 -1 -1 9 imp:n=1"), "got: {out}");
+        assert_eq!(m.read_cell(ci).unwrap().material(), Some(3));
+    }
+
+    #[test]
+    fn geometry_edit_refused_on_like_cell() {
+        let mut m = Model::parse("t\n1 0 -1\n9 LIKE 1 BUT imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let ci = *m.index().cells.get(&9).unwrap();
+        assert_eq!(
+            m.add_cell_surface(ci, 2, false),
+            Err(EditError::NotEditableGeometry)
+        );
     }
 }

@@ -8,7 +8,7 @@ path and is dropped in favour of the custom design the plan named as the fallbac
 
 ## Method
 
-Measured on the real deck `resources/untracked/big.mcnp` (360 MB, 6.47M lines)
+Measured on the real model `resources/untracked/big.mcnp` (360 MB, 6.47M lines)
 and its isolated surface block (1,204,952 lines ≈ 1.2M surfaces), release build,
 `opt-level=3 / lto=thin / codegen-units=1`.
 

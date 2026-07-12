@@ -12,8 +12,8 @@ __version__: str
 # explicit dict (unmapped ids are unchanged) or a callable applied per id.
 Mapping = dict[int, int] | Callable[[int], int]
 
-def parse(text: str) -> Deck:
-    """Parse MCNP ``text`` into a :class:`Deck`."""
+def parse(text: str) -> Model:
+    """Parse MCNP ``text`` into a :class:`Model`."""
     ...
 
 class Surface:
@@ -106,21 +106,21 @@ class Diagnostic:
     """Byte offset where the span ends."""
     def __repr__(self) -> str: ...
 
-class Deck:
-    """A parsed MCNP deck: lossless tree, diagnostics, typed access, editing."""
+class Model:
+    """A parsed MCNP model: lossless tree, diagnostics, typed access, editing."""
 
     def __init__(self, text: str) -> None: ...
     @staticmethod
-    def from_file(path: str) -> Deck:
-        """Parse the MCNP deck at ``path``."""
+    def from_file(path: str) -> Model:
+        """Parse the MCNP model at ``path``."""
         ...
 
     def to_source(self) -> str:
-        """Re-emit the deck as MCNP text (lossless when unedited)."""
+        """Re-emit the model as MCNP text (lossless when unedited)."""
         ...
 
     def save(self, path: str) -> None:
-        """Write the deck to ``path``."""
+        """Write the model to ``path``."""
         ...
 
     def __str__(self) -> str: ...

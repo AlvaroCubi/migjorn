@@ -90,7 +90,7 @@ pub fn parse_transform(tree: &GreenTree, card_index: usize) -> Option<Transform>
     })
 }
 
-/// Iterate all `TRn` transforms in the deck, in source order.
+/// Iterate all `TRn` transforms in the model, in source order.
 pub fn transforms(tree: &GreenTree) -> impl Iterator<Item = Transform> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_transform(tree, i))
 }
@@ -100,14 +100,14 @@ mod tests {
     use super::*;
     use crunchy_syntax::parse;
 
-    fn deck(data_line: &str) -> GreenTree {
+    fn model(data_line: &str) -> GreenTree {
         let src = format!("title\n1 0 -1\n\n1 PX 0\n\n{data_line}\n");
         parse(src).tree
     }
 
     #[test]
     fn displacement_only() {
-        let t = deck("tr1 1.0 2.0 3.0");
+        let t = model("tr1 1.0 2.0 3.0");
         let tr = transforms(&t).next().unwrap();
         assert_eq!(tr.id, 1);
         assert!(!tr.degrees);
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn full_rotation_in_degrees() {
-        let t = deck("*TR5 0 0 0 90 90 0 90 0 90 0 90 90");
+        let t = model("*TR5 0 0 0 90 90 0 90 0 90 0 90 90");
         let tr = transforms(&t).next().unwrap();
         assert_eq!(tr.id, 5);
         assert!(tr.degrees);
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn not_a_transform() {
-        let t = deck("m1 1001 1");
+        let t = model("m1 1001 1");
         assert!(transforms(&t).next().is_none());
     }
 }

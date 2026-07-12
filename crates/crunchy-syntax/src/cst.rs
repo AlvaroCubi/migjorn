@@ -330,7 +330,7 @@ fn build_cards(
     }
 
     // Title is line 0 (message blocks are not yet handled; see M1 notes). It is
-    // always the title even if it lexes as a comment (e.g. a deck whose title
+    // always the title even if it lexes as a comment (e.g. a model whose title
     // is literally "C").
     let title_line = 0usize;
 
@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrips_full_deck() {
+    fn roundtrips_full_model() {
         let src =
             "\u{feff}Test title\n1 0 -1 imp:n=1 $ void\n2 0 1\n\n1 PX 0.0\n2 SO 5\n\nm1 1001 1\n";
         let p = parse(src);

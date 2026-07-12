@@ -3,15 +3,15 @@
 //! Run with:
 //!     cargo run -p crunchy-core --example showcase
 //!
-//! It parses a small self-contained MCNP deck, reads the typed model, proves the
+//! It parses a small self-contained MCNP model, reads the typed data, proves the
 //! parse is byte-for-byte lossless, and renumbers the whole geometry.
 
-use crunchy_core::Deck;
+use crunchy_core::Model;
 
-/// A small but representative deck: comments, an inline `$` comment, a `&`
+/// A small but representative model: comments, an inline `$` comment, a `&`
 /// continuation, unions (`:`), a cell complement (`#4`), a region complement,
 /// a `LIKE n BUT` cell, an `RPP` macrobody, and a transformed surface.
-const DECK: &str = "\
+const MODEL: &str = "\
 Crunchy demo: a small pin-cell-ish model
 c --- cells ---
 1 1 -10.5 -1 imp:n=1                  $ fuel pin
@@ -47,10 +47,10 @@ fn rule(title: &str) {
 }
 
 /// Reconstruct a cell's on-disk text from the CST (to show edits visually).
-fn cell_source(deck: &Deck, id: i64) -> Option<String> {
-    let idx = deck.index();
+fn cell_source(model: &Model, id: i64) -> Option<String> {
+    let idx = model.index();
     let &ci = idx.cells.get(&id)?;
-    let tree = deck.tree();
+    let tree = model.tree();
     let card = tree.cards()[ci];
     let text: String = (card.first_tok..card.tok_end)
         .map(|i| tree.token_text(i))
@@ -59,11 +59,11 @@ fn cell_source(deck: &Deck, id: i64) -> Option<String> {
 }
 
 fn main() {
-    let mut deck = Deck::parse(DECK);
+    let mut model = Model::parse(MODEL);
 
     rule("parse");
-    println!("diagnostics: {}", deck.diagnostics().len());
-    let idx = deck.index();
+    println!("diagnostics: {}", model.diagnostics().len());
+    let idx = model.index();
     println!(
         "cells={}  surfaces={}  materials={}  transforms={}",
         idx.cells.len(),
@@ -73,7 +73,7 @@ fn main() {
     );
 
     rule("surfaces");
-    for s in deck.surfaces() {
+    for s in model.surfaces() {
         let tr = s.transform.map(|t| format!(" (TR{t})")).unwrap_or_default();
         println!(
             "  {:>3}  {:<4} {:?}{}",
@@ -85,7 +85,7 @@ fn main() {
     }
 
     rule("cells");
-    for c in deck.cells() {
+    for c in model.cells() {
         if let Some(base) = c.like {
             println!("  {:>3}  LIKE {} BUT ...", c.id, base.id);
             continue;
@@ -109,7 +109,7 @@ fn main() {
     }
 
     rule("materials");
-    for m in deck.materials() {
+    for m in model.materials() {
         let comp: Vec<String> = m
             .entries
             .iter()
@@ -119,26 +119,26 @@ fn main() {
     }
 
     rule("transforms");
-    for t in deck.transforms() {
+    for t in model.transforms() {
         println!("  tr{}  displacement {:?}", t.id, t.displacement);
     }
 
     rule("lossless round-trip");
-    let roundtrips = deck.to_source() == DECK;
+    let roundtrips = model.to_source() == MODEL;
     println!("parse -> to_source() reproduces the input byte-for-byte: {roundtrips}");
     assert!(roundtrips);
 
     rule("whole-geometry renumbering");
-    println!("cell 3 before:  {}", cell_source(&deck, 3).unwrap());
+    println!("cell 3 before:  {}", cell_source(&model, 3).unwrap());
     // Offset every surface by +1000 (definitions AND references), and shift
     // cells into the 900-series via a dict for the ones we care about.
-    deck.renumber_surfaces(|id| id + 1000);
-    deck.renumber_cells(|id| id + 900);
-    println!("cell 3 after:   {}", cell_source(&deck, 903).unwrap());
+    model.renumber_surfaces(|id| id + 1000);
+    model.renumber_cells(|id| id + 900);
+    println!("cell 3 after:   {}", cell_source(&model, 903).unwrap());
     println!("  (surfaces 2,3 -> 1002,1003; complement #4 -> #904; cell id 3 -> 903)");
 
     rule("edit is lossless everywhere else");
-    let edited = deck.to_source();
+    let edited = model.to_source();
     println!(
         "comments preserved:      {}",
         edited.contains("$ moderator minus the insert")
@@ -153,6 +153,6 @@ fn main() {
         edited.contains("910 like 901 but")
     );
 
-    println!("\nDone. Full edited deck:\n");
+    println!("\nDone. Full edited model:\n");
     println!("{edited}");
 }

@@ -1,7 +1,7 @@
 //! Prototype of a custom, lossless *flat arena* syntax tree.
 //!
 //! Rationale (M0 finding): rowan's `GreenNodeBuilder` interns every token
-//! through a hashmap, which costs ~10x the lexer on large MCNP decks. Because
+//! through a hashmap, which costs ~10x the lexer on large MCNP models. Because
 //! MCNP tokens tile the source exactly, we don't need to copy or intern token
 //! text at all — we store each token as `(kind, len)` and recover its text as a
 //! span into the original source. Node structure is a flat list of boundaries.

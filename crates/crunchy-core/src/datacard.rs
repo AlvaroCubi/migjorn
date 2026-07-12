@@ -78,14 +78,14 @@ mod tests {
     use super::*;
     use crunchy_syntax::parse;
 
-    fn deck(data_line: &str) -> GreenTree {
+    fn model(data_line: &str) -> GreenTree {
         let src = format!("title\n1 0 -1\n\n1 PX 0\n\n{data_line}\n");
         parse(src).tree
     }
 
     #[test]
     fn plain_mnemonic() {
-        let t = deck("sdef pos=0 0 0 erg=14");
+        let t = model("sdef pos=0 0 0 erg=14");
         let d = data_cards(&t).next().unwrap();
         assert_eq!(d.name, "SDEF");
         assert!(d.particle.is_none());
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn tally_with_particle() {
-        let t = deck("f4:n 1 2 3");
+        let t = model("f4:n 1 2 3");
         let d = data_cards(&t).next().unwrap();
         assert_eq!(d.name, "F4");
         assert_eq!(d.particle.as_deref(), Some("n"));
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn starred_tally() {
-        let t = deck("*f1:p 5");
+        let t = model("*f1:p 5");
         let d = data_cards(&t).next().unwrap();
         assert!(d.starred);
         assert_eq!(d.name, "F1");

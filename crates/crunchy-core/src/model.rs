@@ -1,6 +1,6 @@
-//! The high-level `Deck` facade.
+//! The high-level `Model` facade.
 //!
-//! `Deck` wraps a parsed tree plus diagnostics and exposes typed iterators, an
+//! `Model` wraps a parsed tree plus diagnostics and exposes typed iterators, an
 //! id-lookup index, editing (renumbering), and lossless re-emission. It is the
 //! surface downstream crates and the Python bindings consume — owned types, no
 //! leaked lifetimes.
@@ -15,18 +15,18 @@ use crate::renumber::{renumber_cells, renumber_surfaces};
 use crate::surface::{surface_id, surfaces, Surface};
 use crate::transform::{transforms, Transform};
 
-/// A parsed MCNP deck: the lossless tree, diagnostics, and typed access.
-pub struct Deck {
+/// A parsed MCNP model: the lossless tree, diagnostics, and typed access.
+pub struct Model {
     tree: GreenTree,
     diagnostics: Vec<Diagnostic>,
 }
 
-impl Deck {
-    /// Parse MCNP source into a `Deck`. Never panics; malformed input yields
+impl Model {
+    /// Parse MCNP source into a `Model`. Never panics; malformed input yields
     /// diagnostics and a best-effort model.
-    pub fn parse(src: impl Into<String>) -> Deck {
+    pub fn parse(src: impl Into<String>) -> Model {
         let Parsed { tree, diagnostics } = crunchy_syntax::parse(src);
-        Deck { tree, diagnostics }
+        Model { tree, diagnostics }
     }
 
     /// The underlying lossless tree.
@@ -44,7 +44,7 @@ impl Deck {
         &self.diagnostics
     }
 
-    /// Re-emit the deck, applying any edits. Byte-for-byte identical to the
+    /// Re-emit the model, applying any edits. Byte-for-byte identical to the
     /// input when unedited.
     pub fn to_source(&self) -> String {
         self.tree.to_source()
@@ -75,9 +75,9 @@ impl Deck {
         data_cards(&self.tree)
     }
 
-    /// Build an id-lookup index over the deck.
-    pub fn index(&self) -> DeckIndex {
-        DeckIndex::build(&self.tree)
+    /// Build an id-lookup index over the model.
+    pub fn index(&self) -> ModelIndex {
+        ModelIndex::build(&self.tree)
     }
 
     /// Renumber every surface (definitions + references) via `map`.
@@ -91,9 +91,9 @@ impl Deck {
     }
 }
 
-/// Id → card-index lookup maps for a deck. Build once, query O(1).
+/// Id → card-index lookup maps for a model. Build once, query O(1).
 #[derive(Debug, Default, Clone)]
-pub struct DeckIndex {
+pub struct ModelIndex {
     /// Cell number → `tree.cards()` index.
     pub cells: FxHashMap<i64, usize>,
     /// Surface number → `tree.cards()` index.
@@ -104,11 +104,11 @@ pub struct DeckIndex {
     pub transforms: FxHashMap<i64, usize>,
 }
 
-impl DeckIndex {
+impl ModelIndex {
     /// Build all id maps in a single pass over the cards, using the light
     /// header readers (no coefficient/geometry parsing).
-    pub fn build(tree: &GreenTree) -> DeckIndex {
-        let mut idx = DeckIndex::default();
+    pub fn build(tree: &GreenTree) -> ModelIndex {
+        let mut idx = ModelIndex::default();
         for i in 0..tree.cards().len() {
             if let Some((_, id)) = cell_id(tree, i) {
                 idx.cells.insert(id, i);
@@ -132,7 +132,7 @@ impl DeckIndex {
 mod tests {
     use super::*;
 
-    const DECK: &str = "\
+    const MODEL: &str = "\
 title
 1 1 -1.0 -1 imp:n=1
 2 0 1 imp:n=0
@@ -146,7 +146,7 @@ sdef pos=0 0 0
 
     #[test]
     fn facade_iterators_and_roundtrip() {
-        let d = Deck::parse(DECK);
+        let d = Model::parse(MODEL);
         assert_eq!(d.cells().count(), 2);
         assert_eq!(d.surfaces().count(), 1);
         assert_eq!(d.materials().count(), 1);
@@ -154,12 +154,12 @@ sdef pos=0 0 0
         // sdef + m1 + tr1 are all data cards.
         assert_eq!(d.data_cards().count(), 3);
         assert!(d.diagnostics().is_empty());
-        assert_eq!(d.to_source(), DECK);
+        assert_eq!(d.to_source(), MODEL);
     }
 
     #[test]
     fn index_lookups() {
-        let d = Deck::parse(DECK);
+        let d = Model::parse(MODEL);
         let idx = d.index();
         assert_eq!(idx.cells.len(), 2);
         assert!(idx.cells.contains_key(&1));
@@ -171,7 +171,7 @@ sdef pos=0 0 0
 
     #[test]
     fn facade_renumber() {
-        let mut d = Deck::parse(DECK);
+        let mut d = Model::parse(MODEL);
         d.renumber_surfaces(|id| id + 100);
         let out = d.to_source();
         assert!(out.contains("101 SO 5"));

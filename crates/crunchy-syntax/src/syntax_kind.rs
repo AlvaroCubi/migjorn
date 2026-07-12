@@ -42,7 +42,7 @@ pub enum SyntaxKind {
     // ---- nodes (interior) ----
     /// A message block card (precedes the title, optional).
     MESSAGE_CARD,
-    /// The title card (first logical line of the deck).
+    /// The title card (first logical line of the model).
     TITLE_CARD,
     /// A cell card (a logical line in the cell block).
     CELL_CARD,

@@ -109,7 +109,7 @@ pub fn parse_material(tree: &GreenTree, card_index: usize) -> Option<Material> {
     })
 }
 
-/// Iterate all `Mn` materials in the deck, in source order.
+/// Iterate all `Mn` materials in the model, in source order.
 pub fn materials(tree: &GreenTree) -> impl Iterator<Item = Material> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_material(tree, i))
 }
@@ -119,14 +119,14 @@ mod tests {
     use super::*;
     use crunchy_syntax::parse;
 
-    fn deck(data_line: &str) -> GreenTree {
+    fn model(data_line: &str) -> GreenTree {
         let src = format!("title\n1 0 -1\n\n1 PX 0\n\n{data_line}\n");
         parse(src).tree
     }
 
     #[test]
     fn simple_material() {
-        let t = deck("m1 1001.31c 0.667 8016.31c 0.333");
+        let t = model("m1 1001.31c 0.667 8016.31c 0.333");
         let m = materials(&t).next().unwrap();
         assert_eq!(m.id, 1);
         assert_eq!(m.entries.len(), 2);
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn weight_fractions_and_bare_zaid() {
-        let t = deck("m5 6000 -0.5 26000 -0.5");
+        let t = model("m5 6000 -0.5 26000 -0.5");
         let m = materials(&t).next().unwrap();
         assert_eq!(m.entries[0].fraction, -0.5);
         assert_eq!(m.entries[1].za(), Some(26000));
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn options_end_the_entry_list() {
-        let t = deck("m2 1001 1 gas=1");
+        let t = model("m2 1001 1 gas=1");
         let m = materials(&t).next().unwrap();
         assert_eq!(m.entries.len(), 1);
         assert!(m.well_formed);
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn mt_card_is_not_a_material() {
-        let t = deck("mt1 lwtr.10t");
+        let t = model("mt1 lwtr.10t");
         assert!(materials(&t).next().is_none());
     }
 }

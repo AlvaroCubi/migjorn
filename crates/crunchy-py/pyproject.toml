@@ -25,6 +25,11 @@ notebook = ["jupyterlab", "ipykernel", "nbconvert"]
 [project.urls]
 Repository = "https://github.com/AlvaroCubi/crunchy"
 
+[dependency-groups]
+# Installed by `uv sync` / `uv run` by default (alongside the crunchy-mcnp
+# build itself), so a plain `uv run pytest` works out of the box.
+dev = ["pytest"]
+
 [tool.maturin]
 # The compiled extension is the private `crunchy._crunchy` submodule; the public
 # `crunchy` package lives in python/crunchy and carries the type stubs. Build

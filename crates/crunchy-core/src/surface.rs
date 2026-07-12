@@ -259,7 +259,7 @@ pub fn parse_surface(tree: &GreenTree, card_index: usize) -> Option<Surface> {
     })
 }
 
-/// Iterate all parseable surfaces in the deck, in source order.
+/// Iterate all parseable surfaces in the model, in source order.
 pub fn surfaces(tree: &GreenTree) -> impl Iterator<Item = Surface> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_surface(tree, i))
 }
@@ -290,15 +290,15 @@ mod tests {
     use super::*;
     use crunchy_syntax::parse;
 
-    fn deck(surface_line: &str) -> GreenTree {
-        // Minimal well-formed deck with one surface.
+    fn model(surface_line: &str) -> GreenTree {
+        // Minimal well-formed model with one surface.
         let src = format!("title\n1 0 -1\n\n{surface_line}\n\nm1 1001 1\n");
         parse(src).tree
     }
 
     #[test]
     fn simple_plane() {
-        let t = deck("113 PX -10");
+        let t = model("113 PX -10");
         let s = surfaces(&t).next().unwrap();
         assert_eq!(s.id, 113);
         assert_eq!(s.kind, SurfaceKind::Px);
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn with_transform() {
-        let t = deck("5 3 CZ 2.5");
+        let t = model("5 3 CZ 2.5");
         let s = surfaces(&t).next().unwrap();
         assert_eq!(s.id, 5);
         assert_eq!(s.transform, Some(3));
@@ -319,12 +319,12 @@ mod tests {
 
     #[test]
     fn reflective_and_white() {
-        let t = deck("*7 PX 0");
+        let t = model("*7 PX 0");
         let s = surfaces(&t).next().unwrap();
         assert!(s.reflective);
         assert_eq!(s.id, 7);
 
-        let t = deck("+8 PY 0");
+        let t = model("+8 PY 0");
         let s = surfaces(&t).next().unwrap();
         assert!(s.white);
         assert_eq!(s.id, 8);
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn parenthesized_cylinder_mnemonic() {
-        let t = deck("9 C/X 0 0 3");
+        let t = model("9 C/X 0 0 3");
         let s = surfaces(&t).next().unwrap();
         assert_eq!(s.kind, SurfaceKind::CParX);
         assert_eq!(s.coeffs, vec![0.0, 0.0, 3.0]);
@@ -340,14 +340,14 @@ mod tests {
 
     #[test]
     fn mcnp_exponent_coefficient() {
-        let t = deck("10 SO 1.0-5");
+        let t = model("10 SO 1.0-5");
         let s = surfaces(&t).next().unwrap();
         assert_eq!(s.coeffs, vec![1.0e-5]);
     }
 
     #[test]
     fn gq_ten_coefficients() {
-        let t = deck("20 GQ 1 1 1 0 0 0 0 0 0 -25");
+        let t = model("20 GQ 1 1 1 0 0 0 0 0 0 -25");
         let s = surfaces(&t).next().unwrap();
         assert_eq!(s.kind, SurfaceKind::Gq);
         assert_eq!(s.coeffs.len(), 10);
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn ampersand_continuation_is_not_a_coefficient() {
-        // An RPP split across lines with `&` (as seen in real decks).
+        // An RPP split across lines with `&` (as seen in real models).
         let src = "title\n1 0 -1\n\n7 RPP 1 2 &\n     3 4 &\n     5 6\n\nm1 1001 1\n";
         let t = parse(src).tree;
         let s = surfaces(&t).next().unwrap();
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn unknown_mnemonic_preserved() {
-        let t = deck("30 ZZZ 1 2 3");
+        let t = model("30 ZZZ 1 2 3");
         let s = surfaces(&t).next().unwrap();
         assert_eq!(s.kind, SurfaceKind::Other("ZZZ".into()));
     }

@@ -3,7 +3,7 @@
 //! The geometry is parsed into a [`GeomExpr`] tree with MCNP precedence
 //! (`#` complement tightest, then intersection by juxtaposition, then union
 //! `:`). Every leaf keeps the CST token it came from, so renumbering can
-//! rewrite surface and cell references in place while the rest of the deck
+//! rewrite surface and cell references in place while the rest of the model
 //! stays byte-for-byte intact.
 
 use crunchy_syntax::{GreenTree, SyntaxKind};
@@ -241,7 +241,7 @@ pub fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
     })
 }
 
-/// Iterate all parseable cells in the deck, in source order.
+/// Iterate all parseable cells in the model, in source order.
 pub fn cells(tree: &GreenTree) -> impl Iterator<Item = Cell> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_cell(tree, i))
 }
@@ -466,7 +466,7 @@ mod tests {
     use super::*;
     use crunchy_syntax::parse;
 
-    fn deck(cell_line: &str) -> GreenTree {
+    fn model(cell_line: &str) -> GreenTree {
         let src = format!("title\n{cell_line}\n\n1 PX 0\n\nm1 1001 1\n");
         parse(src).tree
     }
@@ -477,14 +477,14 @@ mod tests {
 
     #[test]
     fn void_and_material_cells() {
-        let t = deck("1 1 -1.0 -1 imp:n=1");
+        let t = model("1 1 -1.0 -1 imp:n=1");
         let c = first_cell(&t);
         assert_eq!(c.id, 1);
         assert_eq!(c.material, Some(1));
         assert_eq!(c.density, Some(-1.0));
         assert!(c.well_formed);
 
-        let t = deck("2 0 1 imp:n=0");
+        let t = model("2 0 1 imp:n=0");
         let c = first_cell(&t);
         assert_eq!(c.material, Some(0));
         assert_eq!(c.density, None);
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn surface_refs_with_sense() {
-        let t = deck("1 0 -1 2 -3");
+        let t = model("1 0 -1 2 -3");
         let refs = first_cell(&t).surface_refs();
         assert_eq!(
             refs,
@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn union_and_intersection() {
-        let t = deck("1 0 1 -2 : 3");
+        let t = model("1 0 1 -2 : 3");
         let g = first_cell(&t).geometry.unwrap();
         match g {
             GeomExpr::Union(parts) => assert_eq!(parts.len(), 2),
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn cell_complement_and_region_complement() {
-        let t = deck("5 0 #3 #(1 -2) imp:n=1");
+        let t = model("5 0 #3 #(1 -2) imp:n=1");
         let c = first_cell(&t);
         let cell_refs = c.cell_refs();
         assert_eq!(cell_refs.len(), 1);
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn nested_parentheses() {
-        let t = deck("1 0 (1 : (2 3)) -4");
+        let t = model("1 0 (1 : (2 3)) -4");
         let c = first_cell(&t);
         assert!(c.well_formed, "nested parens must parse");
         let ids: Vec<_> = c.surface_refs().iter().map(|r| r.id).collect();
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn scan_matches_tree_walk() {
         // The fast scan must report the same refs as the GeomExpr tree walk.
-        let t = deck("5 1 -2.0 (-1 : -2) 3 #4 #(5 -6) imp:n=1");
+        let t = model("5 1 -2.0 (-1 : -2) 3 #4 #(5 -6) imp:n=1");
         let c = first_cell(&t);
         let tree_surface: Vec<_> = c
             .surface_refs()
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn like_but_form() {
-        let t = deck("9 LIKE 3 BUT mat=2 rho=-1.0");
+        let t = model("9 LIKE 3 BUT mat=2 rho=-1.0");
         let c = first_cell(&t);
         assert_eq!(c.id, 9);
         assert_eq!(c.like.unwrap().id, 3);

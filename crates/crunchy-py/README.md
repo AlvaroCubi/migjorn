@@ -72,33 +72,33 @@ on CPython 3.9+).
 ```python
 import crunchy
 
-deck = crunchy.parse(open("model.mcnp").read())
-# or: deck = crunchy.Deck.from_file("model.mcnp")
+model = crunchy.parse(open("model.mcnp").read())
+# or: model = crunchy.Model.from_file("model.mcnp")
 
-print(deck)                      # Deck(cells=..., surfaces=..., ...)
-print(deck.num_cells, deck.num_surfaces)
+print(model)                      # Model(cells=..., surfaces=..., ...)
+print(model.num_cells, model.num_surfaces)
 
 # Look up by number (fast; uses an id index).
-s = deck.surface(113)
+s = model.surface(113)
 print(s.id, s.kind, s.coeffs)    # 113 'PX' [-10.0]
 
-c = deck.cell(800)
+c = model.cell(800)
 print(c.material, c.density, c.signed_surfaces)
 
 # Diagnostics (empty on a clean parse).
-for d in deck.diagnostics:
+for d in model.diagnostics:
     print(d.severity, d.message)
 
 # --- Whole-geometry renumbering -------------------------------------------
 # Definitions AND every reference are updated consistently.
 
-deck.offset_surfaces(1_000_000)          # fast: shift all surface numbers
-deck.renumber_cells(lambda n: n + 500)   # callable: once per distinct cell id
-deck.renumber_surfaces({1: 100, 2: 200}) # or an explicit dict
+model.offset_surfaces(1_000_000)          # fast: shift all surface numbers
+model.renumber_cells(lambda n: n + 500)   # callable: once per distinct cell id
+model.renumber_surfaces({1: 100, 2: 200}) # or an explicit dict
 
 # Lossless re-emission: only edited numbers change; comments/spacing preserved.
-deck.save("model_renumbered.mcnp")
-text = str(deck)                         # or deck.to_source()
+model.save("model_renumbered.mcnp")
+text = str(model)                         # or model.to_source()
 ```
 
 ## Type checking / IDE support
@@ -112,7 +112,7 @@ and mypy pick these up automatically once the wheel is installed — no more
 
 ## Notes
 
-- `deck.cells` / `deck.surfaces` / `deck.materials` / `deck.transforms` /
-  `deck.data_cards` return full lists. For very large decks prefer the id
-  lookups (`deck.cell(id)`, `deck.surface(id)`) and the `num_*` counts.
-- Everything is documented inline: `help(crunchy.Deck)`, `help(crunchy.Surface)`.
+- `model.cells` / `model.surfaces` / `model.materials` / `model.transforms` /
+  `model.data_cards` return full lists. For very large models prefer the id
+  lookups (`model.cell(id)`, `model.surface(id)`) and the `num_*` counts.
+- Everything is documented inline: `help(crunchy.Model)`, `help(crunchy.Surface)`.

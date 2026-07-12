@@ -6,7 +6,7 @@
 //!
 //! ## Adding a bug repro
 //!
-//! Drop the offending deck (or a one-card snippet) into `tests/corpus/`
+//! Drop the offending model (or a one-card snippet) into `tests/corpus/`
 //! (feel free to use sub-folders like `cells/`, `surfaces/`, `continuations/`),
 //! then run `cargo insta review` (or `cargo test`) to accept the new snapshot.
 //! No test code required.

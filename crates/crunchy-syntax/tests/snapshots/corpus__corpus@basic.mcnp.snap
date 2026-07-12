@@ -3,7 +3,7 @@ source: crates/crunchy-syntax/tests/corpus.rs
 expression: summary(&src)
 input_file: crates/crunchy-syntax/tests/corpus/basic.mcnp
 ---
-TITLE_CARD   | Basic test deck
+TITLE_CARD   | Basic test model
 CELL_CARD    | 1 1 -1.0 -1 imp : n = 1
 CELL_CARD    | 2 0 1 imp : n = 0
 SURFACE_CARD | 1 SO 5

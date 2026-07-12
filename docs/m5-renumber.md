@@ -22,7 +22,7 @@ structure).
 ## Validation on `resources/untracked/big.mcnp`
 
 Renumber the whole geometry by `+1_000_000` (surfaces and cells), then re-parse
-the emitted deck:
+the emitted model:
 
 | Check | Result |
 |---|---|

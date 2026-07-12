@@ -7,7 +7,7 @@ bindings.
   except where you changed it (comments, spacing, and continuations are all
   preserved).
 - **Fast** — a custom flat-arena syntax tree; the full 360 MB / 6.47 M-line
-  reference deck parses in ~0.8 s, and 1 M+ surfaces read well under a second.
+  reference model parses in ~0.8 s, and 1 M+ surfaces read well under a second.
 - **General-purpose** — typed views of cells (with geometry expressions),
   surfaces, transforms, materials, and a generic view of every other data card.
 - **Editable** — whole-geometry renumbering updates definitions *and* every
@@ -19,31 +19,31 @@ bindings.
 | Crate | Purpose |
 |---|---|
 | `crunchy-syntax` | Lexer + lossless concrete syntax tree (CST) + edit overlay |
-| `crunchy-core` | Typed AST (`Deck`, `Cell`, `Surface`, …) + renumbering |
-| `crunchy-cli` | `crunchy` dev CLI (`parse`, `surfaces`, `cells`, `deck`, `renumber`) |
+| `crunchy-core` | Typed AST (`Model`, `Cell`, `Surface`, …) + renumbering |
+| `crunchy-cli` | `crunchy` dev CLI (`parse`, `surfaces`, `cells`, `model`, `renumber`) |
 | `crunchy-py` | Python bindings (PyO3 + maturin, `abi3` wheels) |
 
 ## Rust
 
 ```rust
-use crunchy_core::Deck;
+use crunchy_core::Model;
 
-let mut deck = Deck::parse(std::fs::read_to_string("model.mcnp")?);
-for s in deck.surfaces() {
+let mut model = Model::parse(std::fs::read_to_string("model.mcnp")?);
+for s in model.surfaces() {
     println!("{} {} {:?}", s.id, s.kind.mnemonic(), s.coeffs);
 }
-deck.renumber_surfaces(|id| id + 1000); // defs + all references
-std::fs::write("out.mcnp", deck.to_source())?;
+model.renumber_surfaces(|id| id + 1000); // defs + all references
+std::fs::write("out.mcnp", model.to_source())?;
 ```
 
 ## Python
 
 ```python
 import crunchy
-deck = crunchy.Deck.from_file("model.mcnp")
-print(deck.surface(113).coeffs)
-deck.offset_surfaces(1_000_000)     # or deck.renumber_surfaces({1: 100, ...})
-deck.save("out.mcnp")
+model = crunchy.Model.from_file("model.mcnp")
+print(model.surface(113).coeffs)
+model.offset_surfaces(1_000_000)     # or model.renumber_surfaces({1: 100, ...})
+model.save("out.mcnp")
 ```
 
 Run the example with [uv](https://docs.astral.sh/uv/) — it builds the extension

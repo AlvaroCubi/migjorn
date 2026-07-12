@@ -12,7 +12,7 @@ import os
 import crunchy
 
 PUBLIC_CLASSES = [
-    "Deck",
+    "Model",
     "Surface",
     "Cell",
     "Material",

@@ -19,7 +19,7 @@ commands in this crate's README.
 
 import crunchy
 
-DECK = """\
+MODEL = """\
 Crunchy demo: a small pin-cell-ish model
 c --- cells ---
 1 1 -10.5 -1 imp:n=1                  $ fuel pin
@@ -65,19 +65,19 @@ def cell_line(text, cell_id):
 
 def main():
     print("crunchy version:", crunchy.__version__)
-    deck = crunchy.parse(DECK)
+    model = crunchy.parse(MODEL)
 
     rule("parse")
-    print(repr(deck))
-    print("diagnostics:", deck.diagnostics)
+    print(repr(model))
+    print("diagnostics:", model.diagnostics)
 
     rule("surfaces")
-    for s in deck.surfaces:
+    for s in model.surfaces:
         tr = f"  (TR{s.transform})" if s.transform else ""
         print(f"{s.id:>3}  {s.kind:<4} {s.coeffs}{tr}")
 
     rule("cells")
-    for c in deck.cells:
+    for c in model.cells:
         if c.like is not None:
             print(f"{c.id:>3}  LIKE {c.like} BUT ...")
             continue
@@ -86,23 +86,23 @@ def main():
         print(f"{c.id:>3}  {kind:<14} surfaces {c.signed_surfaces}{extra}")
 
     rule("materials & transforms")
-    for m in deck.materials:
+    for m in model.materials:
         comp = "  ".join(f"{z}={frac}" for z, frac in m.entries)
         print(f"m{m.id:<2} {comp}")
-    for t in deck.transforms:
+    for t in model.transforms:
         print(f"tr{t.id}  displacement {t.displacement}")
 
     rule("lossless round-trip")
-    assert str(deck) == DECK
-    print("byte-for-byte lossless:", str(deck) == DECK)
+    assert str(model) == MODEL
+    print("byte-for-byte lossless:", str(model) == MODEL)
 
     rule("whole-geometry renumbering")
-    print("cell 3 before:", cell_line(str(deck), 3))
-    deck.offset_surfaces(1000)  # every surface +1000 (defs + refs)
-    deck.renumber_cells(lambda n: n + 900)  # every cell   +900  (defs + #n + LIKE)
-    print("cell 3 after: ", cell_line(str(deck), 903))
+    print("cell 3 before:", cell_line(str(model), 3))
+    model.offset_surfaces(1000)  # every surface +1000 (defs + refs)
+    model.renumber_cells(lambda n: n + 900)  # every cell   +900  (defs + #n + LIKE)
+    print("cell 3 after: ", cell_line(str(model), 903))
 
-    edited = str(deck)
+    edited = str(model)
     print("comment preserved:      ", "$ moderator minus the insert" in edited)
     print("continuation preserved: ", "imp:p=1 &" in edited)
     print("surface def renumbered:  ", "1040 RPP -1 1 -1 1 -1 2" in edited)

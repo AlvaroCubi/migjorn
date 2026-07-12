@@ -1,8 +1,8 @@
 //! Python bindings for the crunchy MCNP parser.
 //!
-//! The public surface mirrors `crunchy-core`'s `Deck` facade with Pythonic
-//! ergonomics: `crunchy.parse(text)` (or `crunchy.Deck.from_file(path)`) returns
-//! a `Deck` exposing typed lists, id lookups, lossless re-emission, and
+//! The public surface mirrors `crunchy-core`'s `Model` facade with Pythonic
+//! ergonomics: `crunchy.parse(text)` (or `crunchy.Model.from_file(path)`) returns
+//! a `Model` exposing typed lists, id lookups, lossless re-emission, and
 //! whole-geometry renumbering.
 
 use std::cell::OnceCell;
@@ -293,32 +293,32 @@ impl Diagnostic {
     }
 }
 
-/// A parsed MCNP deck.
+/// A parsed MCNP model.
 ///
-/// Construct with :func:`crunchy.parse`, ``Deck(text)``, or
-/// :meth:`Deck.from_file`. The deck is *lossless*: :meth:`to_source` (and
-/// ``str(deck)``) reproduce the input byte-for-byte until you edit it, and edits
+/// Construct with :func:`crunchy.parse`, ``Model(text)``, or
+/// :meth:`Model.from_file`. The model is *lossless*: :meth:`to_source` (and
+/// ``str(model)``) reproduce the input byte-for-byte until you edit it, and edits
 /// such as :meth:`renumber_surfaces` change only the affected numbers.
 ///
 /// The ``cells``/``surfaces``/``materials``/``transforms``/``data_cards``
-/// properties materialise full lists -- convenient, but for very large decks
+/// properties materialise full lists -- convenient, but for very large models
 /// prefer the id lookups (:meth:`surface`, :meth:`cell`, ...) and the ``num_*``
 /// counts, which do not build the whole list.
 #[pyclass(unsendable, module = "crunchy")]
-struct Deck {
-    inner: core::Deck,
-    index: OnceCell<core::DeckIndex>,
+struct Model {
+    inner: core::Model,
+    index: OnceCell<core::ModelIndex>,
 }
 
-impl Deck {
-    fn build(inner: core::Deck) -> Self {
-        Deck {
+impl Model {
+    fn build(inner: core::Model) -> Self {
+        Model {
             inner,
             index: OnceCell::new(),
         }
     }
 
-    fn idx(&self) -> &core::DeckIndex {
+    fn idx(&self) -> &core::ModelIndex {
         self.index.get_or_init(|| self.inner.index())
     }
 
@@ -329,28 +329,28 @@ impl Deck {
 }
 
 #[pymethods]
-impl Deck {
-    /// Parse MCNP `text` into a deck.
+impl Model {
+    /// Parse MCNP `text` into a model.
     #[new]
     fn new(text: &str) -> Self {
-        Deck::build(core::Deck::parse(text))
+        Model::build(core::Model::parse(text))
     }
 
-    /// Parse the MCNP deck at `path`.
+    /// Parse the MCNP model at `path`.
     #[staticmethod]
     fn from_file(path: &str) -> PyResult<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| PyIOError::new_err(format!("cannot read {path}: {e}")))?;
-        Ok(Deck::build(core::Deck::parse(text)))
+        Ok(Model::build(core::Model::parse(text)))
     }
 
-    /// Re-emit the deck as MCNP text (byte-for-byte identical to the input when
+    /// Re-emit the model as MCNP text (byte-for-byte identical to the input when
     /// unedited; only edited numbers differ otherwise).
     fn to_source(&self) -> String {
         self.inner.to_source()
     }
 
-    /// Write the deck to `path`.
+    /// Write the model to `path`.
     fn save(&self, path: &str) -> PyResult<()> {
         std::fs::write(path, self.inner.to_source())
             .map_err(|e| PyIOError::new_err(format!("cannot write {path}: {e}")))
@@ -363,7 +363,7 @@ impl Deck {
     fn __repr__(&self) -> String {
         let idx = self.idx();
         format!(
-            "Deck(cells={}, surfaces={}, materials={}, transforms={}, diagnostics={})",
+            "Model(cells={}, surfaces={}, materials={}, transforms={}, diagnostics={})",
             idx.cells.len(),
             idx.surfaces.len(),
             idx.materials.len(),
@@ -458,8 +458,8 @@ impl Deck {
     ///
     /// Example::
     ///
-    ///     deck.renumber_surfaces(lambda n: n + 1000)
-    ///     deck.renumber_surfaces({1: 100, 2: 200})
+    ///     model.renumber_surfaces(lambda n: n + 1000)
+    ///     model.renumber_surfaces({1: 100, 2: 200})
     fn renumber_surfaces(&mut self, mapping: Bound<'_, PyAny>) -> PyResult<()> {
         let mut mapper = Mapper::build(mapping)?;
         self.inner.renumber_surfaces(|id| mapper.map(id));
@@ -555,10 +555,10 @@ impl<'py> Mapper<'py> {
     }
 }
 
-/// Parse MCNP `text` into a :class:`Deck`.
+/// Parse MCNP `text` into a :class:`Model`.
 #[pyfunction]
-fn parse(text: &str) -> Deck {
-    Deck::new(text)
+fn parse(text: &str) -> Model {
+    Model::new(text)
 }
 
 /// crunchy -- a fast, lossless MCNP parser (private compiled module; the public
@@ -567,7 +567,7 @@ fn parse(text: &str) -> Deck {
 fn _crunchy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(parse, m)?)?;
-    m.add_class::<Deck>()?;
+    m.add_class::<Model>()?;
     m.add_class::<Surface>()?;
     m.add_class::<Cell>()?;
     m.add_class::<Material>()?;

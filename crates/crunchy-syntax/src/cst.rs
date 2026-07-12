@@ -114,6 +114,21 @@ impl GreenTree {
         self.next_slot
     }
 
+    /// Reassign the stable card slots (position → slot) and the monotonic
+    /// counter. Used after a structural splice-and-reparse to preserve handle
+    /// identity: cards that carried over keep their old slot, and any new card
+    /// gets a fresh one. `slots.len()` must equal the number of cards.
+    pub fn set_card_slots(&mut self, slots: Vec<u32>, next_slot: u32) {
+        assert_eq!(
+            slots.len(),
+            self.cards.len(),
+            "set_card_slots: one slot per card"
+        );
+        self.slot_to_pos = slots.iter().enumerate().map(|(pos, &s)| (s, pos)).collect();
+        self.card_slots = slots;
+        self.next_slot = next_slot;
+    }
+
     /// The original source.
     #[inline]
     pub fn src(&self) -> &str {

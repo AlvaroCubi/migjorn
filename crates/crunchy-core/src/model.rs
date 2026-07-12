@@ -5,15 +5,15 @@
 //! surface downstream crates and the Python bindings consume — owned types, no
 //! leaked lifetimes.
 
-use crunchy_syntax::{Diagnostic, GreenTree, Parsed};
+use crunchy_syntax::{Diagnostic, GreenTree, Parsed, SyntaxKind};
 use rustc_hash::FxHashMap;
 
 use crate::cell::{cell_id, cells, parse_cell, promote_cell, Cell, GeomExpr, OwnedCell};
 use crate::datacard::{data_cards, DataCard};
 use crate::emit::emit_cell;
-use crate::material::{materials, Material};
+use crate::material::{materials, parse_material, Material};
 use crate::renumber::{renumber_cells, renumber_surfaces};
-use crate::surface::{surface_id, surfaces, Surface};
+use crate::surface::{parse_surface, surface_id, surfaces, Surface};
 use crate::transform::{transforms, Transform};
 
 /// A parsed MCNP model: the lossless tree, diagnostics, and typed access.
@@ -24,6 +24,9 @@ pub struct Model {
     /// cell is here it is the source of truth for reads (`read_cell`) and is
     /// re-emitted from this typed node; the CST holds the emitted text.
     owned_cells: FxHashMap<u32, OwnedCell>,
+    /// Monotonic slot counter that survives structural reparses, so a slot is
+    /// never reused and handles stay stable across add/remove.
+    next_slot: u32,
 }
 
 impl Model {
@@ -31,10 +34,12 @@ impl Model {
     /// diagnostics and a best-effort model.
     pub fn parse(src: impl Into<String>) -> Model {
         let Parsed { tree, diagnostics } = crunchy_syntax::parse(src);
+        let next_slot = tree.next_slot();
         Model {
             tree,
             diagnostics,
             owned_cells: FxHashMap::default(),
+            next_slot,
         }
     }
 
@@ -108,6 +113,127 @@ impl Model {
             return Some(CellRead::Owned(oc));
         }
         Some(CellRead::Parsed(parse_cell(&self.tree, card_index)?))
+    }
+
+    /// Add a new cell from MCNP `text` (a cell card body, e.g.
+    /// `"10 6 -7.85 -5 6 imp:n=1"`), appended to the end of the cell block.
+    /// Returns the new card's stable slot. The text must parse as exactly one
+    /// well-formed cell.
+    pub fn add_cell(&mut self, text: &str) -> Result<u32, EditError> {
+        self.add_card(text, SyntaxKind::CELL_CARD)
+    }
+
+    /// Add a new surface from MCNP `text` (e.g. `"5 SO 12.0"`), appended to the
+    /// end of the surface block. Returns the new card's stable slot.
+    pub fn add_surface(&mut self, text: &str) -> Result<u32, EditError> {
+        self.add_card(text, SyntaxKind::SURFACE_CARD)
+    }
+
+    /// Add a new data card from MCNP `text` (e.g. `"m7 26000 -1.0"`), appended
+    /// to the end of the data block. Returns the new card's stable slot.
+    pub fn add_data_card(&mut self, text: &str) -> Result<u32, EditError> {
+        self.add_card(text, SyntaxKind::DATA_CARD)
+    }
+
+    /// Remove the cell numbered `id`. Returns whether a cell was removed.
+    pub fn remove_cell(&mut self, id: i64) -> Result<bool, EditError> {
+        self.remove_card(id, SyntaxKind::CELL_CARD)
+    }
+
+    /// Remove the surface numbered `id`. Returns whether a surface was removed.
+    pub fn remove_surface(&mut self, id: i64) -> Result<bool, EditError> {
+        self.remove_card(id, SyntaxKind::SURFACE_CARD)
+    }
+
+    /// Check referential integrity of the model: every surface/cell/material a
+    /// cell references must exist. Returns a list of human-readable problems
+    /// (empty when the model is consistent).
+    pub fn validate(&self) -> Vec<String> {
+        let idx = self.index();
+        let mut problems = Vec::new();
+        for pos in 0..self.tree.cards().len() {
+            let Some(cr) = self.read_cell(pos) else {
+                continue;
+            };
+            let id = cr.id();
+            for sid in cr.surface_ids() {
+                if !idx.surfaces.contains_key(&sid) {
+                    problems.push(format!("cell {id} references missing surface {sid}"));
+                }
+            }
+            for rid in cr.cell_refs() {
+                if !idx.cells.contains_key(&rid) {
+                    problems.push(format!("cell {id} references missing cell {rid}"));
+                }
+            }
+            if let Some(m) = cr.material() {
+                if m != 0 && !idx.materials.contains_key(&m) {
+                    problems.push(format!("cell {id} references missing material {m}"));
+                }
+            }
+        }
+        problems
+    }
+
+    /// Validate `text` as a single card of `kind`, splice it into the end of the
+    /// matching block, reparse, and remap slots so existing handles survive.
+    fn add_card(&mut self, text: &str, kind: SyntaxKind) -> Result<u32, EditError> {
+        let text = text.trim();
+        validate_snippet(text, kind)?;
+        let cur = self.to_source();
+        let tmp = crunchy_syntax::parse(&cur).tree;
+        let last = last_pos_of_kind(&tmp, kind).ok_or(EditError::NoBlock)?;
+        let (_, line_end) = card_line_span(&tmp, last);
+        let new_source = format!("{}{}\n{}", &cur[..line_end], text, &cur[line_end..]);
+        Ok(self.reparse_with_change(new_source, Change::Insert(last + 1)))
+    }
+
+    /// Locate the card numbered `id` of `kind`, remove its physical line(s)
+    /// (preserving surrounding delimiters), reparse, and remap slots.
+    fn remove_card(&mut self, id: i64, kind: SyntaxKind) -> Result<bool, EditError> {
+        let Some(pos) = find_pos(&self.tree, id, kind) else {
+            return Ok(false);
+        };
+        let cur = self.to_source();
+        let tmp = crunchy_syntax::parse(&cur).tree;
+        let (start, end) = card_line_span(&tmp, pos);
+        let new_source = format!("{}{}", &cur[..start], &cur[end..]);
+        self.reparse_with_change(new_source, Change::Delete(pos));
+        Ok(true)
+    }
+
+    /// Reparse `new_source` (which differs from the current model by exactly one
+    /// inserted or deleted card at the given index) and reassign slots so
+    /// carried-over cards keep their slot and a new card gets a fresh one.
+    /// Flattens any pending value/geometry edits into the reparsed tokens.
+    fn reparse_with_change(&mut self, new_source: String, change: Change) -> u32 {
+        let old_slots: Vec<u32> = (0..self.tree.cards().len())
+            .map(|p| self.tree.card_slot(p))
+            .collect();
+        let Parsed { tree, diagnostics } = crunchy_syntax::parse(new_source);
+        let (new_slots, ret) = match change {
+            Change::Insert(i) => {
+                let fresh = self.next_slot;
+                self.next_slot += 1;
+                let mut v = Vec::with_capacity(old_slots.len() + 1);
+                v.extend_from_slice(&old_slots[..i]);
+                v.push(fresh);
+                v.extend_from_slice(&old_slots[i..]);
+                (v, fresh)
+            }
+            Change::Delete(i) => {
+                let removed = old_slots[i];
+                let mut v = old_slots;
+                v.remove(i);
+                (v, removed)
+            }
+        };
+        let mut tree = tree;
+        tree.set_card_slots(new_slots, self.next_slot);
+        self.tree = tree;
+        self.diagnostics = diagnostics;
+        self.owned_cells.clear();
+        ret
     }
 
     /// Set the material number of the cell at `card_index`, in place.
@@ -252,6 +378,92 @@ impl Model {
     }
 }
 
+/// A structural change applied by [`Model::reparse_with_change`].
+enum Change {
+    /// A card was inserted at this position in the reparsed tree.
+    Insert(usize),
+    /// The card at this position was removed.
+    Delete(usize),
+}
+
+/// Byte span `[start, end)` of a card's own physical line(s): from the start of
+/// its first line to just past the newline ending its last content line. Used
+/// to remove a card cleanly while preserving surrounding blank delimiters and
+/// comment lines.
+fn card_line_span(tree: &GreenTree, pos: usize) -> (usize, usize) {
+    let card = tree.cards()[pos];
+    let start = tree.token_span(card.first_tok).start as usize;
+    let mut content_last = card.first_tok;
+    for i in tree.card_content_tokens(&card) {
+        content_last = i;
+    }
+    let mut end = tree.token_span(content_last).end as usize;
+    for i in content_last..card.tok_end {
+        if tree.token_kind(i) == SyntaxKind::NEWLINE {
+            end = tree.token_span(i).end as usize;
+            break;
+        }
+    }
+    (start, end)
+}
+
+/// Position of the last card of `kind`, if any.
+fn last_pos_of_kind(tree: &GreenTree, kind: SyntaxKind) -> Option<usize> {
+    (0..tree.cards().len()).rfind(|&i| tree.cards()[i].kind == kind)
+}
+
+/// Position of the card numbered `id` of `kind` (cell or surface), if any.
+fn find_pos(tree: &GreenTree, id: i64, kind: SyntaxKind) -> Option<usize> {
+    (0..tree.cards().len()).find(|&i| {
+        tree.cards()[i].kind == kind
+            && match kind {
+                SyntaxKind::CELL_CARD => cell_id(tree, i).is_some_and(|(_, cid)| cid == id),
+                SyntaxKind::SURFACE_CARD => {
+                    surface_id(tree, i).is_some_and(|(_, sid, _)| sid == id)
+                }
+                _ => false,
+            }
+    })
+}
+
+/// Validate that `text` is exactly one well-formed card of `kind`, by parsing it
+/// alone in a minimal wrapper model.
+fn validate_snippet(text: &str, kind: SyntaxKind) -> Result<(), EditError> {
+    if text.is_empty() {
+        return Err(EditError::InvalidCardText);
+    }
+    let wrapped = match kind {
+        SyntaxKind::CELL_CARD => format!("t\n{text}\n\n1 PX 0\n\nm1 1001 1\n"),
+        SyntaxKind::SURFACE_CARD => format!("t\n1 0 -1\n\n{text}\n\nm1 1001 1\n"),
+        SyntaxKind::DATA_CARD => format!("t\n1 0 -1\n\n1 PX 0\n\n{text}\n"),
+        _ => return Err(EditError::InvalidCardText),
+    };
+    let tree = crunchy_syntax::parse(wrapped).tree;
+    let of_kind: Vec<usize> = (0..tree.cards().len())
+        .filter(|&i| tree.cards()[i].kind == kind)
+        .collect();
+    if of_kind.len() != 1 {
+        return Err(EditError::InvalidCardText);
+    }
+    let i = of_kind[0];
+    let ok = match kind {
+        SyntaxKind::CELL_CARD => parse_cell(&tree, i).is_some(),
+        SyntaxKind::SURFACE_CARD => parse_surface(&tree, i).is_some(),
+        // Materials must parse as such; other data cards are accepted as-is.
+        SyntaxKind::DATA_CARD => {
+            let looks_material = text.trim_start().to_ascii_uppercase().starts_with('M')
+                && !text.trim_start().to_ascii_uppercase().starts_with("MODE");
+            !looks_material || parse_material(&tree, i).is_some()
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(EditError::InvalidCardText)
+    }
+}
+
 /// A read view of a cell: either a structurally-edited owned node or a freshly
 /// parsed CST view. Exposes the same fields either way so callers need not
 /// branch. Returned by [`Model::read_cell`].
@@ -349,6 +561,11 @@ pub enum EditError {
     NotEditableGeometry,
     /// The edit would leave the cell with no geometry at all.
     WouldEmptyGeometry,
+    /// The text supplied for a new card did not parse as exactly one card of the
+    /// expected kind.
+    InvalidCardText,
+    /// The target block (cell/surface/data) has no card to append after.
+    NoBlock,
 }
 
 impl std::fmt::Display for EditError {
@@ -368,6 +585,10 @@ impl std::fmt::Display for EditError {
                 "cell has no editable geometry (a LIKE n BUT cell, or malformed geometry)"
             }
             EditError::WouldEmptyGeometry => "edit would leave the cell with no geometry",
+            EditError::InvalidCardText => {
+                "text did not parse as exactly one card of the expected kind"
+            }
+            EditError::NoBlock => "the target block has no card to append after",
         };
         f.write_str(msg)
     }
@@ -559,6 +780,83 @@ sdef pos=0 0 0
         assert_eq!(
             m.add_cell_surface(ci, 2, false),
             Err(EditError::NotEditableGeometry)
+        );
+    }
+
+    #[test]
+    fn add_cell_appends_and_is_addressable_and_editable() {
+        let mut m = Model::parse(MODEL);
+        let slot = m.add_cell("10 1 -2.0 -1 imp:n=1").unwrap();
+        let out = m.to_source();
+        // Appended into the cell block, before the surface block delimiter.
+        assert!(
+            out.contains("2 0 1 imp:n=0\n10 1 -2.0 -1 imp:n=1\n\n1 SO 5"),
+            "got:\n{out}"
+        );
+        // Addressable by number and by the returned slot; still editable.
+        let ci = *m.index().cells.get(&10).unwrap();
+        assert_eq!(m.tree().card_slot(ci), slot);
+        m.add_cell_surface(ci, 1, false).unwrap(); // surface 1 exists in MODEL
+        assert_eq!(m.read_cell(ci).unwrap().signed_surfaces(), vec![-1, 1]);
+        // (Emitting a restructured cell reformats the density -2.0 as -2.)
+        assert!(
+            m.to_source().contains("10 1 -2 -1 1 imp:n=1"),
+            "got:\n{}",
+            m.to_source()
+        );
+        assert!(m.validate().is_empty(), "{:?}", m.validate());
+    }
+
+    #[test]
+    fn add_surface_appends_to_surface_block() {
+        let mut m = Model::parse(MODEL);
+        m.add_surface("9 SO 12.0").unwrap();
+        let out = m.to_source();
+        assert!(out.contains("1 SO 5\n9 SO 12.0\n\nm1"), "got:\n{out}");
+        assert!(Model::parse(&out).diagnostics().is_empty());
+    }
+
+    #[test]
+    fn add_rejects_bad_text() {
+        let mut m = Model::parse(MODEL);
+        assert_eq!(
+            m.add_cell("not a cell !!!"),
+            Err(EditError::InvalidCardText)
+        );
+        assert_eq!(
+            m.add_surface("10 1 -2.0 -1"),
+            Err(EditError::InvalidCardText)
+        );
+    }
+
+    #[test]
+    fn remove_cell_preserves_other_cards_and_slots() {
+        let mut m = Model::parse(MODEL);
+        // Hold a handle-slot for cell 1 before removing cell 2.
+        let ci1 = *m.index().cells.get(&1).unwrap();
+        let slot1 = m.tree().card_slot(ci1);
+        assert!(m.remove_cell(2).unwrap());
+        let out = m.to_source();
+        assert!(!out.contains("\n2 0 1"), "cell 2 not removed:\n{out}");
+        assert!(out.contains("1 SO 5"), "surfaces intact");
+        // Cell 1's slot still resolves to cell 1 (handle survived).
+        let pos = m.tree().card_by_slot(slot1).unwrap();
+        assert_eq!(m.read_cell(pos).unwrap().id(), 1);
+        // Removing a missing cell is a no-op false.
+        assert!(!m.remove_cell(999).unwrap());
+    }
+
+    #[test]
+    fn validate_flags_dangling_reference() {
+        // Cell 1 complements cell 3; removing cell 3 leaves a dangling ref.
+        let mut m =
+            Model::parse("t\n1 0 -1 #3 imp:n=1\n3 0 -2 imp:n=1\n\n1 SO 5\n2 SO 9\n\nm1 1001 1\n");
+        assert!(m.validate().is_empty());
+        m.remove_cell(3).unwrap();
+        let problems = m.validate();
+        assert!(
+            problems.iter().any(|p| p.contains("missing cell 3")),
+            "got: {problems:?}"
         );
     }
 }

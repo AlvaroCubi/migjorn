@@ -241,3 +241,32 @@ class Model:
     def offset_cells(self, delta: int) -> None:
         """Shift every cell number by ``delta``."""
         ...
+
+    def add_cell(self, text: str) -> Cell:
+        """Add a new cell from an MCNP card body (e.g. ``"10 6 -7.85 -5 6
+        imp:n=1"``), appended to the cell block. Returns a live handle. Raises
+        ``ValueError`` if the text is not exactly one well-formed cell."""
+        ...
+
+    def add_surface(self, text: str) -> Surface:
+        """Add a new surface from an MCNP card body (e.g. ``"5 SO 12.0"``),
+        appended to the surface block. Returns a live handle."""
+        ...
+
+    def add_material(self, text: str) -> Material:
+        """Add a new material from an MCNP card body (e.g. ``"m7 26000 -1.0"``),
+        appended to the data block. Returns a live handle."""
+        ...
+
+    def remove_cell(self, id: int) -> bool:
+        """Remove the cell numbered ``id``. Returns whether one was removed."""
+        ...
+
+    def remove_surface(self, id: int) -> bool:
+        """Remove the surface numbered ``id``. Returns whether one was removed."""
+        ...
+
+    def validate(self) -> list[str]:
+        """Referential-integrity check: a list of human-readable problems
+        (dangling surface/cell/material references), empty when consistent."""
+        ...

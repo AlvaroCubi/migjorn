@@ -722,6 +722,73 @@ impl Model {
         self.inner.renumber_cells(|id| id + delta);
         self.invalidate();
     }
+
+    /// Add a new cell from MCNP `text` (a cell card body, e.g.
+    /// ``"10 6 -7.85 -5 6 imp:n=1"``), appended to the cell block. Returns a live
+    /// handle to the new cell. Raises ``ValueError`` if the text is not exactly
+    /// one well-formed cell.
+    fn add_cell(slf: Bound<'_, Self>, text: &str) -> PyResult<Cell> {
+        let slot = {
+            let mut m = slf.borrow_mut();
+            let s = m.inner.add_cell(text).map_err(edit_error)?;
+            m.invalidate();
+            s
+        };
+        Ok(Cell {
+            model: slf.unbind(),
+            slot,
+        })
+    }
+
+    /// Add a new surface from MCNP `text` (e.g. ``"5 SO 12.0"``), appended to the
+    /// surface block. Returns a live handle to the new surface.
+    fn add_surface(slf: Bound<'_, Self>, text: &str) -> PyResult<Surface> {
+        let slot = {
+            let mut m = slf.borrow_mut();
+            let s = m.inner.add_surface(text).map_err(edit_error)?;
+            m.invalidate();
+            s
+        };
+        Ok(Surface {
+            model: slf.unbind(),
+            slot,
+        })
+    }
+
+    /// Add a new material from MCNP `text` (e.g. ``"m7 26000 -1.0"``), appended to
+    /// the data block. Returns a live handle to the new material.
+    fn add_material(slf: Bound<'_, Self>, text: &str) -> PyResult<Material> {
+        let slot = {
+            let mut m = slf.borrow_mut();
+            let s = m.inner.add_data_card(text).map_err(edit_error)?;
+            m.invalidate();
+            s
+        };
+        Ok(Material {
+            model: slf.unbind(),
+            slot,
+        })
+    }
+
+    /// Remove the cell numbered `id`. Returns whether a cell was removed.
+    fn remove_cell(&mut self, id: i64) -> PyResult<bool> {
+        let removed = self.inner.remove_cell(id).map_err(edit_error)?;
+        self.invalidate();
+        Ok(removed)
+    }
+
+    /// Remove the surface numbered `id`. Returns whether a surface was removed.
+    fn remove_surface(&mut self, id: i64) -> PyResult<bool> {
+        let removed = self.inner.remove_surface(id).map_err(edit_error)?;
+        self.invalidate();
+        Ok(removed)
+    }
+
+    /// Check referential integrity: return a list of human-readable problems
+    /// (dangling surface/cell/material references), empty when consistent.
+    fn validate(&self) -> Vec<String> {
+        self.inner.validate()
+    }
 }
 
 /// A number-mapping supplied from Python: either a dict or a callable.

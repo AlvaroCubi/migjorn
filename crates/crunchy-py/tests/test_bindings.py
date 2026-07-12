@@ -177,6 +177,52 @@ def test_geometry_edit_refused_when_it_would_empty():
         raise AssertionError("expected ValueError removing the last surface")
 
 
+def test_add_cell_returns_editable_handle():
+    model = crunchy.parse(MODEL)
+    c = model.add_cell("10 0 -1")  # new void cell in the cell block
+    assert c.id == 10 and c.is_void
+    c.add_surface(2)  # edit the freshly-added cell like any other
+    assert 2 in c.surface_ids
+    out = str(model)
+    assert "10 0 -1 2" in out
+    # Existing cards untouched; model still re-parses cleanly.
+    assert "1 1 -1.0 -1 2 #3 imp:n=1 $ fuel" in out
+    assert model.num_cells == 4
+    assert crunchy.parse(out).diagnostics == []
+
+
+def test_add_surface_and_material():
+    model = crunchy.parse(MODEL)
+    s = model.add_surface("9 SO 12.0")
+    assert s.id == 9 and s.kind == "SO" and s.coeffs == [12.0]
+    m = model.add_material("m2 26000 -1.0")
+    assert m.id == 2
+    assert model.num_surfaces == 3
+    assert crunchy.parse(str(model)).diagnostics == []
+
+
+def test_remove_cell_and_validate():
+    model = crunchy.parse(MODEL)
+    # Cell 1 has a #3 complement; removing cell 3 makes it dangle.
+    assert model.validate() == []
+    assert model.remove_cell(3) is True
+    assert model.num_cells == 2
+    problems = model.validate()
+    assert any("missing cell 3" in p for p in problems), problems
+    # Removing a missing cell is a no-op.
+    assert model.remove_cell(999) is False
+
+
+def test_add_rejects_bad_text():
+    model = crunchy.parse(MODEL)
+    try:
+        model.add_cell("this is not a cell")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for malformed cell text")
+
+
 if __name__ == "__main__":
     test_parse_and_lossless()
     test_typed_access()
@@ -190,4 +236,8 @@ if __name__ == "__main__":
     test_add_and_remove_surface_in_geometry()
     test_add_and_remove_complement()
     test_geometry_edit_refused_when_it_would_empty()
+    test_add_cell_returns_editable_handle()
+    test_add_surface_and_material()
+    test_remove_cell_and_validate()
+    test_add_rejects_bad_text()
     print("all crunchy binding smoke tests passed")

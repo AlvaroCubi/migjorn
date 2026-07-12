@@ -108,6 +108,36 @@ def main():
     print("surface def renumbered:  ", "1040 RPP -1 1 -1 1 -1 2" in edited)
     print("LIKE base renumbered:    ", "910 like 901 but" in edited)
 
+    rule("per-card editing")
+    # Live handles: explore by card text, then edit values in place.
+    demo = crunchy.parse(MODEL)
+    for cell in demo.cells:
+        if "$ fuel pin" in cell.text:
+            cell.material = 5
+            cell.density = -10.9
+    print(cell_line(str(demo), 1))
+
+    rule("structural geometry editing")
+    c = demo.cell(2)
+    print("before:", c.signed_surfaces)
+    c.add_surface(-3)  # intersect the region with -3
+    c.add_complement(4)  # AND in  #4
+    c.remove_surface(1)  # drop surface 1 (either sense)
+    print("after: ", c.signed_surfaces, " complements", c.cell_refs)
+    print(cell_line(str(demo), 2))
+
+    rule("building & removing cards")
+    demo2 = crunchy.parse(MODEL)
+    demo2.add_surface("50 SO 200")
+    demo2.add_material("m9 6000 1")
+    new = demo2.add_cell("20 9 -2.0 -50")  # live handle to the new cell
+    new.add_surface(1)  # ...editable like any other cell
+    print(cell_line(str(demo2), 20))
+    print("materials:", demo2.num_materials, " surfaces:", demo2.num_surfaces)
+    print("validate:", demo2.validate())  # [] -- consistent
+    demo2.remove_surface(50)  # break a reference on purpose
+    print("after removing surface 50:", demo2.validate())
+
 
 if __name__ == "__main__":
     main()

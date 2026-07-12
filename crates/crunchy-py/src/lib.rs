@@ -710,6 +710,29 @@ impl Model {
         Ok(())
     }
 
+    /// Renumber every material -- `Mn` definitions, every cell's material field,
+    /// and `MTn`/`MXn` cards -- consistently. Void cells (material 0) are left
+    /// unchanged. `mapping` is a dict or callable, as for
+    /// :meth:`renumber_surfaces`.
+    fn renumber_materials(&mut self, mapping: Bound<'_, PyAny>) -> PyResult<()> {
+        let mut mapper = Mapper::build(mapping)?;
+        self.inner.renumber_materials(|id| mapper.map(id));
+        mapper.into_result()?;
+        self.invalidate();
+        Ok(())
+    }
+
+    /// Renumber every transform -- `TRn`/`*TRn` definitions and every surface's
+    /// transform field (periodic sign preserved) -- consistently. `mapping` is a
+    /// dict or callable, as for :meth:`renumber_surfaces`.
+    fn renumber_transforms(&mut self, mapping: Bound<'_, PyAny>) -> PyResult<()> {
+        let mut mapper = Mapper::build(mapping)?;
+        self.inner.renumber_transforms(|id| mapper.map(id));
+        mapper.into_result()?;
+        self.invalidate();
+        Ok(())
+    }
+
     /// Shift every surface number by `delta` (a fast convenience for
     /// ``renumber_surfaces(lambda n: n + delta)``).
     fn offset_surfaces(&mut self, delta: i64) {

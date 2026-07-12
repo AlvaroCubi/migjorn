@@ -234,6 +234,16 @@ class Model:
         """Renumber every cell (definitions, ``#n``, ``LIKE n``) via ``mapping``."""
         ...
 
+    def renumber_materials(self, mapping: Mapping) -> None:
+        """Renumber every material (``Mn`` defs, cell material fields,
+        ``MT``/``MX``) via ``mapping``. Void cells are left unchanged."""
+        ...
+
+    def renumber_transforms(self, mapping: Mapping) -> None:
+        """Renumber every transform (``TRn``/``*TRn`` defs and surface transform
+        fields, periodic sign preserved) via ``mapping``."""
+        ...
+
     def offset_surfaces(self, delta: int) -> None:
         """Shift every surface number by ``delta``."""
         ...

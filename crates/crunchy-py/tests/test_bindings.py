@@ -223,6 +223,18 @@ def test_add_rejects_bad_text():
         raise AssertionError("expected ValueError for malformed cell text")
 
 
+def test_renumber_materials_and_transforms():
+    model = crunchy.parse(MODEL)
+    model.renumber_materials({1: 101})
+    out = str(model)
+    assert "m101 1001.31c 0.667" in out  # Mn definition
+    assert "1 101 -1.0" in out  # cell 1's material field
+    # Transforms: the model has tr1 and surfaces have no transform field here,
+    # so just check the definition renumbers.
+    model.renumber_transforms(lambda n: n + 5)
+    assert "tr6 0 0 5" in str(model)
+
+
 if __name__ == "__main__":
     test_parse_and_lossless()
     test_typed_access()
@@ -240,4 +252,5 @@ if __name__ == "__main__":
     test_add_surface_and_material()
     test_remove_cell_and_validate()
     test_add_rejects_bad_text()
+    test_renumber_materials_and_transforms()
     print("all crunchy binding smoke tests passed")

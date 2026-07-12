@@ -12,7 +12,7 @@ use crate::cell::{cell_id, cells, parse_cell, promote_cell, Cell, GeomExpr, Owne
 use crate::datacard::{data_cards, DataCard};
 use crate::emit::emit_cell;
 use crate::material::{materials, parse_material, Material};
-use crate::renumber::{renumber_cells, renumber_surfaces};
+use crate::renumber::{renumber_cells, renumber_materials, renumber_surfaces, renumber_transforms};
 use crate::surface::{parse_surface, surface_id, surfaces, Surface};
 use crate::transform::{transforms, Transform};
 
@@ -102,6 +102,18 @@ impl Model {
     /// Renumber every cell (definitions + references) via `map`.
     pub fn renumber_cells(&mut self, map: impl FnMut(i64) -> i64) {
         renumber_cells(&mut self.tree, map);
+    }
+
+    /// Renumber every material (`Mn` defs, cell material fields, `MT`/`MX`) via
+    /// `map`. Void cells are left unchanged.
+    pub fn renumber_materials(&mut self, map: impl FnMut(i64) -> i64) {
+        renumber_materials(&mut self.tree, map);
+    }
+
+    /// Renumber every transform (`TRn`/`*TRn` defs and surface transform fields,
+    /// periodic sign preserved) via `map`.
+    pub fn renumber_transforms(&mut self, map: impl FnMut(i64) -> i64) {
+        renumber_transforms(&mut self.tree, map);
     }
 
     /// Read the cell at `card_index`, preferring a structurally-edited (owned)

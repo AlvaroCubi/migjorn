@@ -428,6 +428,29 @@ pub fn cells(tree: &GreenTree) -> impl Iterator<Item = Cell> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_cell(tree, i))
 }
 
+/// Minimal read of a cell's material field: `(material_token, material)`, or
+/// `None` for a non-cell card or a `LIKE n BUT` cell (which has no material
+/// field). Allocation-light; used by material renumbering.
+pub fn cell_material(tree: &GreenTree, card_index: usize) -> Option<(u32, i64)> {
+    let card = tree.cards()[card_index];
+    if card.kind != SyntaxKind::CELL_CARD {
+        return None;
+    }
+    let mut it = tree
+        .card_content_tokens(&card)
+        .filter(|&i| tree.token_kind(i) != SyntaxKind::AMP);
+    let id_tok = it.next()?;
+    if tree.token_kind(id_tok) != SyntaxKind::NUMBER {
+        return None;
+    }
+    let mat_tok = it.next()?;
+    // A `LIKE n BUT` cell has an IDENT here, not a material number.
+    if tree.token_kind(mat_tok) != SyntaxKind::NUMBER {
+        return None;
+    }
+    Some((mat_tok, parse_int(&tree.token_text(mat_tok))?))
+}
+
 /// Minimal cell-header read for indexing: `(id_token, id)`. Allocation-free.
 pub fn cell_id(tree: &GreenTree, card_index: usize) -> Option<(u32, i64)> {
     let card = tree.cards()[card_index];

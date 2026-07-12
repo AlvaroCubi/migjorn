@@ -24,7 +24,7 @@ pub use emit::{emit_cell, emit_geometry};
 pub use material::{materials, parse_material, Material, MaterialEntry};
 pub use model::{CellRead, EditError, Model, ModelIndex};
 pub use num::{parse_float, parse_int};
-pub use renumber::{renumber_cells, renumber_surfaces};
+pub use renumber::{renumber_cells, renumber_materials, renumber_surfaces, renumber_transforms};
 pub use surface::{parse_surface, surface_id, surfaces, Surface, SurfaceKind};
 pub use transform::{parse_transform, transforms, Transform};
 

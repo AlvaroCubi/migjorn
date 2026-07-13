@@ -1,10 +1,12 @@
 //! Emit typed nodes back to MCNP source text.
 //!
 //! This is the counterpart to parsing: given an edited/owned node, produce the
-//! card body that re-parses to the same structure. Only *restructured* cards go
-//! through here; untouched cards are still re-emitted byte-for-byte from the
-//! CST, so the emitter's job is correctness of the edited card, not preserving
-//! original formatting (which is gone the moment a card is restructured).
+//! card body that re-parses to the same structure. Most edits are now expressed
+//! as lossless token splices on the CST (see `model.rs`); this whole-card emit
+//! is the **fallback** used only where a splice is not available — a brand-new
+//! card from `add_cell`, or removing a surface from a nested union. Its job is
+//! correctness of the edited card, not preserving original formatting (which the
+//! fallback does not attempt to keep).
 
 use crate::cell::{GeomExpr, OwnedCell};
 

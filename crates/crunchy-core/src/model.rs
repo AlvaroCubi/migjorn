@@ -1240,8 +1240,9 @@ pub enum EditError {
     InvalidCardText,
     /// The target block (cell/surface/data) has no card to append after.
     NoBlock,
-    /// The edit would add or remove a field (change the number of tokens) — a
-    /// structural change the overlay-based editing cannot express.
+    /// The edit is structurally ambiguous and cannot be expressed as a local
+    /// splice — currently only adding rotation entries to a transform whose
+    /// displacement is incomplete (the new numbers would read as displacement).
     StructuralEdit,
     /// A coefficient/entry index was out of range for the target card.
     IndexOutOfRange,
@@ -1268,7 +1269,8 @@ impl std::fmt::Display for EditError {
             }
             EditError::NoBlock => "the target block has no card to append after",
             EditError::StructuralEdit => {
-                "edit would add or remove a field (a structural edit; not yet supported)"
+                "edit is structurally ambiguous (adding rotation entries to a \
+                 transform whose displacement is incomplete)"
             }
             EditError::IndexOutOfRange => "coefficient/entry index is out of range",
         };

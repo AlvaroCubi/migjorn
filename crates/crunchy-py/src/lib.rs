@@ -8,7 +8,7 @@
 //! The typed objects (`Cell`, `Surface`, `Material`, `Transform`) are **live
 //! handles**, not snapshots: each holds a reference to its `Model` plus a stable
 //! card slot. Getters read the current card on demand and setters (e.g.
-//! `cell.material = 124`) write straight through the lossless override engine, so
+//! `cell.material = 124`) write straight through the lossless editing engine, so
 //! edits are visible immediately and the rest of the model stays byte-for-byte.
 
 use std::cell::OnceCell;
@@ -25,8 +25,8 @@ fn stale_handle() -> PyErr {
     PyRuntimeError::new_err("stale handle: the referenced card no longer exists")
 }
 
-/// Map a core editing error (all of which describe unsupported structural edits)
-/// to a Python `ValueError`.
+/// Map a core editing error (an invalid or unsupported edit — e.g. emptying a
+/// cell's geometry, or an out-of-range index) to a Python `ValueError`.
 fn edit_error(e: core::EditError) -> PyErr {
     PyValueError::new_err(e.to_string())
 }

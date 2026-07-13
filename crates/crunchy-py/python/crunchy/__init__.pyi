@@ -2,6 +2,12 @@
 
 These mirror the runtime API implemented in `crates/crunchy-py/src/lib.rs`.
 Keep them in sync when the bindings change.
+
+Handle attributes are declared as properties so writability is explicit: a
+read-only attribute has only a getter, while an assignable one also has a
+``@x.setter``. Note that a setter's type can be narrower than its getter's —
+e.g. ``Cell.material`` reads ``int | None`` but is assigned an ``int`` (use
+``material = 0`` to make a cell void, not ``None``).
 """
 
 from collections.abc import Callable
@@ -21,27 +27,58 @@ class Surface:
 
     ``coeffs`` and ``transform`` are assignable in place. Assigning ``coeffs``
     rewrites every coefficient and requires a list of the same length (changing
-    the count is a structural edit -> ``ValueError``); changing ``transform``
-    between a number and ``None`` (adding/removing the field) also raises
-    ``ValueError``.
+    the count raises ``ValueError``); ``transform`` may be set to a number or to
+    ``None`` — adding or removing the field is a lossless splice.
     """
 
-    id: int
-    """Surface number."""
-    kind: str
-    """MCNP mnemonic, e.g. ``"PX"``, ``"GQ"``, ``"C/X"``, ``"RPP"``."""
-    coeffs: list[float]
-    """Surface coefficients. Writable (same-length list)."""
-    transform: int | None
-    """Transformation number (negative => periodic), or ``None``. Writable."""
-    reflective: bool
-    """Reflective boundary (leading ``*``)."""
-    white: bool
-    """White boundary (leading ``+``)."""
-    well_formed: bool
-    """``False`` if a coefficient could not be parsed."""
-    text: str
-    """The card's exact source text, reflecting any edits."""
+    @property
+    def id(self) -> int:
+        """Surface number."""
+        ...
+
+    @property
+    def kind(self) -> str:
+        """MCNP mnemonic, e.g. ``"PX"``, ``"GQ"``, ``"C/X"``, ``"RPP"``."""
+        ...
+
+    @property
+    def coeffs(self) -> list[float]:
+        """Surface coefficients."""
+        ...
+    @coeffs.setter
+    def coeffs(self, value: list[float]) -> None:
+        """Rewrite all coefficients; the list length must match the current
+        count (a count change raises ``ValueError``)."""
+        ...
+
+    @property
+    def transform(self) -> int | None:
+        """Transformation number (negative => periodic), or ``None``."""
+        ...
+    @transform.setter
+    def transform(self, value: int | None) -> None:
+        """Set, add, or remove the transform number (a lossless splice)."""
+        ...
+
+    @property
+    def reflective(self) -> bool:
+        """Reflective boundary (leading ``*``)."""
+        ...
+
+    @property
+    def white(self) -> bool:
+        """White boundary (leading ``+``)."""
+        ...
+
+    @property
+    def well_formed(self) -> bool:
+        """``False`` if a coefficient could not be parsed."""
+        ...
+
+    @property
+    def text(self) -> str:
+        """The card's exact source text, reflecting any edits."""
+        ...
 
     def set_coeff(self, index: int, value: float) -> None:
         """Set a single coefficient (by index) in place. Raises ``ValueError``
@@ -53,36 +90,73 @@ class Surface:
 class Cell:
     """A cell card (a live handle onto its model).
 
-    ``material`` and ``density`` are assignable in place; the edit writes
-    straight through the lossless engine (``cell.material = 124``). Assigning a
-    real material to a void cell gives it a placeholder density of ``0.0`` (set
-    the real value via ``density``); assigning ``material = 0`` makes the cell
-    void and drops its density.
+    ``material`` and ``density`` are assignable in place through the lossless
+    engine (``cell.material = 124``). Assigning a real material to a void cell
+    gives it a placeholder density of ``0.0`` (set the real value via
+    ``density``); assigning ``material = 0`` makes the cell void and drops its
+    density.
     """
 
-    id: int
-    """Cell number."""
-    material: int | None
-    """Material number (0 = void); ``None`` for ``LIKE n BUT`` cells. Writable
-    (assigning across the void/non-void boundary adjusts the density field)."""
-    density: float | None
-    """Density (positive = atom, negative = mass), or ``None`` for void. Writable
-    for a non-void cell."""
-    is_void: bool
-    """``True`` when the material number is 0."""
-    like: int | None
-    """Base cell number for a ``LIKE n BUT`` card, or ``None``."""
-    surface_ids: list[int]
-    """Referenced surface numbers (magnitudes)."""
-    signed_surfaces: list[int]
-    """Referenced surfaces with sense (sign)."""
-    cell_refs: list[int]
-    """Referenced cells (``#n`` complements, ``LIKE n`` base)."""
-    well_formed: bool
-    """``False`` if the geometry could not be fully parsed."""
-    text: str
-    """The card's exact source text, including inline ``$`` comments and
-    continuations, reflecting any edits."""
+    @property
+    def id(self) -> int:
+        """Cell number."""
+        ...
+
+    @property
+    def material(self) -> int | None:
+        """Material number (0 = void); ``None`` for ``LIKE n BUT`` cells."""
+        ...
+    @material.setter
+    def material(self, value: int) -> None:
+        """Set the material (``0`` = void). Crossing the void/non-void boundary
+        adds or removes the density field losslessly."""
+        ...
+
+    @property
+    def density(self) -> float | None:
+        """Density (positive = atom, negative = mass), or ``None`` for void."""
+        ...
+    @density.setter
+    def density(self, value: float) -> None:
+        """Set the density of a non-void cell (raises ``ValueError`` on a void
+        cell — assign a ``material`` first)."""
+        ...
+
+    @property
+    def is_void(self) -> bool:
+        """``True`` when the material number is 0."""
+        ...
+
+    @property
+    def like(self) -> int | None:
+        """Base cell number for a ``LIKE n BUT`` card, or ``None``."""
+        ...
+
+    @property
+    def surface_ids(self) -> list[int]:
+        """Referenced surface numbers (magnitudes)."""
+        ...
+
+    @property
+    def signed_surfaces(self) -> list[int]:
+        """Referenced surfaces with sense (sign)."""
+        ...
+
+    @property
+    def cell_refs(self) -> list[int]:
+        """Referenced cells (``#n`` complements, ``LIKE n`` base)."""
+        ...
+
+    @property
+    def well_formed(self) -> bool:
+        """``False`` if the geometry could not be fully parsed."""
+        ...
+
+    @property
+    def text(self) -> str:
+        """The card's exact source text, including inline ``$`` comments and
+        continuations, reflecting any edits."""
+        ...
 
     def add_surface(self, surface: int) -> None:
         """Intersect the geometry with a signed surface (negative int = negative
@@ -125,14 +199,25 @@ class Cell:
 class Material:
     """A material (``Mn``) card (a live handle onto its model)."""
 
-    id: int
-    """Material number."""
-    entries: list[tuple[str, float]]
-    """``(zaid, fraction)`` pairs; positive = atomic, negative = by weight."""
-    well_formed: bool
-    """``False`` if entries were not clean ZAID/fraction pairs."""
-    text: str
-    """The card's exact source text, reflecting any edits."""
+    @property
+    def id(self) -> int:
+        """Material number."""
+        ...
+
+    @property
+    def entries(self) -> list[tuple[str, float]]:
+        """``(zaid, fraction)`` pairs; positive = atomic, negative = by weight."""
+        ...
+
+    @property
+    def well_formed(self) -> bool:
+        """``False`` if entries were not clean ZAID/fraction pairs."""
+        ...
+
+    @property
+    def text(self) -> str:
+        """The card's exact source text, reflecting any edits."""
+        ...
 
     def set_fraction(self, entry: int, value: float) -> None:
         """Set the fraction of the ``entry``-th ``(zaid, fraction)`` pair in
@@ -150,26 +235,45 @@ class Material:
 class Transform:
     """A coordinate transformation (``TRn`` / ``*TRn``) card (a live handle).
 
-    ``displacement`` is assignable in place; a component not written in the
-    source (defaulted to 0) has no token to rewrite, so setting it raises
-    ``ValueError``.
+    ``displacement`` is assignable in place: components already written are
+    rewritten, and a component that defaulted to 0 (no token) is spliced in
+    losslessly.
     """
 
-    id: int
-    """Transformation number."""
-    degrees: bool
-    """Rotation entries are angles in degrees (``*TRn``)."""
-    displacement: tuple[float, float, float]
-    """Origin displacement. Writable."""
-    rotation: list[float]
-    """Rotation entries as written."""
-    text: str
-    """The card's exact source text, reflecting any edits."""
+    @property
+    def id(self) -> int:
+        """Transformation number."""
+        ...
+
+    @property
+    def degrees(self) -> bool:
+        """Rotation entries are angles in degrees (``*TRn``)."""
+        ...
+
+    @property
+    def displacement(self) -> tuple[float, float, float]:
+        """Origin displacement."""
+        ...
+    @displacement.setter
+    def displacement(self, value: tuple[float, float, float]) -> None:
+        """Set the displacement vector; missing components are filled in
+        losslessly."""
+        ...
+
+    @property
+    def rotation(self) -> list[float]:
+        """Rotation entries as written."""
+        ...
+
+    @property
+    def text(self) -> str:
+        """The card's exact source text, reflecting any edits."""
+        ...
 
     def set_rotation(self, rotation: list[float]) -> None:
-        """Rewrite the rotation entries in place. ``rotation`` must have the same
-        length as the current entries (changing the count is a structural edit
-        -> ``ValueError``)."""
+        """Rewrite the rotation entries in place. Extra entries are spliced in
+        and surplus entries deleted losslessly; adding rotation to a transform
+        whose displacement is incomplete raises ``ValueError``."""
         ...
 
     def __repr__(self) -> str: ...
@@ -177,25 +281,46 @@ class Transform:
 class DataCard:
     """A generically-parsed data card."""
 
-    name: str
-    """Uppercased mnemonic including any number (``"SDEF"``, ``"F4"``)."""
-    particle: str | None
-    """Particle designator after ``:`` (``"n"``, ``"n,p"``), or ``None``."""
-    starred: bool
-    """Leading ``*`` modifier (``*F``, ``*TR``)."""
+    @property
+    def name(self) -> str:
+        """Uppercased mnemonic including any number (``"SDEF"``, ``"F4"``)."""
+        ...
+
+    @property
+    def particle(self) -> str | None:
+        """Particle designator after ``:`` (``"n"``, ``"n,p"``), or ``None``."""
+        ...
+
+    @property
+    def starred(self) -> bool:
+        """Leading ``*`` modifier (``*F``, ``*TR``)."""
+        ...
+
     def __repr__(self) -> str: ...
 
 class Diagnostic:
     """A parser diagnostic."""
 
-    severity: str
-    """``"error"`` or ``"warning"``."""
-    message: str
-    """Human-readable description."""
-    start: int
-    """Byte offset where the span begins."""
-    end: int
-    """Byte offset where the span ends."""
+    @property
+    def severity(self) -> str:
+        """``"error"`` or ``"warning"``."""
+        ...
+
+    @property
+    def message(self) -> str:
+        """Human-readable description."""
+        ...
+
+    @property
+    def start(self) -> int:
+        """Byte offset where the span begins."""
+        ...
+
+    @property
+    def end(self) -> int:
+        """Byte offset where the span ends."""
+        ...
+
     def __repr__(self) -> str: ...
 
 class Model:

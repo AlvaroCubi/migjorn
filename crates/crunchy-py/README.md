@@ -67,6 +67,8 @@ maturin develop --release
 To build a wheel: `maturin build --release` (produces an `abi3` wheel that works
 on CPython 3.9+).
 
+To build a Windows wheel on Linux, use `maturin build --release --target x86_64-pc-windows-msvc -m crates/crunchy-py/Cargo.toml -i python3.12`.
+
 ## Quick start
 
 ```python
@@ -84,6 +86,18 @@ print(s.id, s.kind, s.coeffs)    # 113 'PX' [-10.0]
 
 c = model.cell(800)
 print(c.material, c.density, c.signed_surfaces)
+
+# --- In-place value edits (write straight through, lossless elsewhere) ------
+c.material = 124                  # replace the material
+c.density  = -7.93               # replace the density
+
+# Assigning a material to a *void* cell just works: it gains a placeholder
+# density of 0.0 (never raises, so it's safe in a loop). Set the real density
+# next; assigning material 0 makes the cell void again and drops the density.
+void = model.cell(2)
+void.material = 5                    # 5 0 ...   (placeholder density 0.0)
+void.density  = -2.0                # 5 -2.0 ...
+void.material = 0                    # 0 ...     (void again, density dropped)
 
 # Diagnostics (empty on a clean parse).
 for d in model.diagnostics:

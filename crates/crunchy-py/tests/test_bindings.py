@@ -114,22 +114,38 @@ def test_edit_material_and_density_in_place():
     assert "m1 1001.31c 0.667 8016.31c 0.333" in out
 
 
-def test_edit_requiring_structural_change_raises():
+def test_density_on_void_cell_raises():
     model = crunchy.parse(MODEL)
-    # Cell 2 is void: it has no density field to set.
+    # Cell 2 is void: it has no density field to set (assign a material first).
     try:
         model.cell(2).density = 1.0
     except ValueError:
         pass
     else:
         raise AssertionError("expected ValueError setting density on a void cell")
-    # Void -> real material would add a density field.
-    try:
-        model.cell(2).material = 5
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError on a void/non-void change")
+
+
+def test_assign_material_to_void_cell():
+    model = crunchy.parse(MODEL)
+    cell = model.cell(2)  # "2 0 1 imp:n=0" (void)
+    assert cell.is_void is True
+    # Assigning a real material to a void cell just works: it gains a placeholder
+    # density of 0.0 (no exception -- safe to do in a loop over cells).
+    cell.material = 5
+    assert cell.is_void is False
+    assert cell.material == 5
+    assert cell.density == 0.0
+    assert "2 5 0 1 imp:n=0" in str(model)  # params tail preserved
+    # Set the real density the usual way.
+    cell.density = -2.0
+    assert "2 5 -2 1 imp:n=0" in str(model)
+    # The rest of the model is untouched and it re-parses cleanly.
+    assert "1 1 -1.0 -1 2 #3 imp:n=1 $ fuel" in str(model)
+    assert crunchy.parse(str(model)).diagnostics == []
+    # Assigning material 0 makes it void again, dropping the density.
+    cell.material = 0
+    assert cell.is_void is True
+    assert "2 0 1 imp:n=0" in str(model)
 
 
 def test_edit_surface_coeffs_in_place():
@@ -359,7 +375,8 @@ if __name__ == "__main__":
     test_renumber_callable_error_propagates()
     test_card_text_includes_inline_comment()
     test_edit_material_and_density_in_place()
-    test_edit_requiring_structural_change_raises()
+    test_density_on_void_cell_raises()
+    test_assign_material_to_void_cell()
     test_edit_surface_coeffs_in_place()
     test_edit_surface_transform_field()
     test_edit_material_entries_in_place()

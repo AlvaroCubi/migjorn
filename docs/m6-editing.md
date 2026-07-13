@@ -33,16 +33,19 @@ New surface area:
 ## The replace-only boundary
 
 The override overlay can only *replace* an existing token, never insert or delete
-one. So value edits succeed only when the target token already exists; edits that
-would change a card's token layout raise `ValueError` (Rust `EditError`):
+one. A pure value edit therefore succeeds only when the target token already
+exists. An edit that changes a card's token layout instead re-emits the whole
+card from a typed node — how `cell.material` adds or drops the density field when
+it crosses the void ↔ non-void boundary — or, where re-emission can't help,
+raises `ValueError` (Rust `EditError`):
 
 | Attempted edit | Result |
 |---|---|
-| `cell.material = N` (real → real) | ✓ replaces the material token |
-| `cell.density = X` (non-void cell) | ✓ replaces the density token |
-| `cell.density = X` on a void cell | ✗ `NoDensityField` (would add a token) |
-| `cell.material = 0` on a real cell | ✗ `VoidnessChange` (would remove density) |
-| `cell.material = N` on a void cell | ✗ `VoidnessChange` (would add density) |
+| `cell.material = N` (real → real) | ✓ replaces the material token in place |
+| `cell.density = X` (non-void cell) | ✓ replaces the density token in place |
+| `cell.material = N` on a void cell | ✓ re-emits the card non-void (adds a placeholder density `0.0`) |
+| `cell.material = 0` on a real cell | ✓ re-emits the card void (drops the density) |
+| `cell.density = X` on a void cell | ✗ `NoDensityField` (assign a material first) |
 | material/density on a `LIKE n BUT` cell | ✗ `NoMaterialField` |
 
 Structural edits (adding/removing surfaces, params, or whole cards) are the next

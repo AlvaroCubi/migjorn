@@ -36,7 +36,9 @@ fn edit_error(e: core::EditError) -> PyErr {
 /// Attributes:
 ///     id (int): Cell number.
 ///     material (int | None): Material number (0 = void; None for ``LIKE n BUT``).
-///         Assignable in place (subject to the void/non-void restriction).
+///         Assignable in place. Assigning a real material to a void cell gives
+///         it a placeholder density of 0.0 (set the real value via ``density``);
+///         assigning 0 makes the cell void and drops its density.
 ///     density (float | None): Density (positive = atom, negative = mass).
 ///         Assignable in place for a non-void cell.
 ///     is_void (bool): True when the material number is 0.

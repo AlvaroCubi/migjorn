@@ -54,17 +54,20 @@ class Cell:
     """A cell card (a live handle onto its model).
 
     ``material`` and ``density`` are assignable in place; the edit writes
-    straight through the lossless engine (``cell.material = 124``). Changing a
-    cell between void (material 0) and a real material, or adding a density to a
-    void cell, needs a structural edit and raises ``ValueError``.
+    straight through the lossless engine (``cell.material = 124``). Assigning a
+    real material to a void cell gives it a placeholder density of ``0.0`` (set
+    the real value via ``density``); assigning ``material = 0`` makes the cell
+    void and drops its density.
     """
 
     id: int
     """Cell number."""
     material: int | None
-    """Material number (0 = void); ``None`` for ``LIKE n BUT`` cells. Writable."""
+    """Material number (0 = void); ``None`` for ``LIKE n BUT`` cells. Writable
+    (assigning across the void/non-void boundary adjusts the density field)."""
     density: float | None
-    """Density (positive = atom, negative = mass), or ``None`` for void. Writable."""
+    """Density (positive = atom, negative = mass), or ``None`` for void. Writable
+    for a non-void cell."""
     is_void: bool
     """``True`` when the material number is 0."""
     like: int | None

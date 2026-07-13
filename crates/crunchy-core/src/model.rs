@@ -327,35 +327,55 @@ impl Model {
 
     /// Set the material number of the cell at `card_index`, in place.
     ///
-    /// This is a *value* edit: it replaces the existing material. It cannot
-    /// change a cell between void (material 0) and a real material, because that
-    /// adds or removes the density field — a structural edit — so such requests
-    /// return [`EditError::VoidnessChange`].
+    /// A same-voidness change (real → real, keeping a density) is a pure value
+    /// edit that replaces the material token and preserves the card's formatting
+    /// byte-for-byte. Crossing the void ↔ non-void boundary also works, but
+    /// necessarily adds or removes the density field, so the card is re-emitted
+    /// (its own spacing/comments are not preserved; every other card stays
+    /// byte-for-byte):
+    /// - assigning a non-zero material to a **void** cell gives it a placeholder
+    ///   density of `0.0` — set the real value with [`Model::set_cell_density`];
+    /// - assigning material `0` makes the cell **void** and drops its density.
+    ///
+    /// This never fails on voidness, so it is safe to call across a whole cell
+    /// loop. A `LIKE n BUT` cell has no material field ([`EditError::NoMaterialField`]),
+    /// and a void cell whose geometry did not parse cleanly cannot be re-emitted
+    /// ([`EditError::NotEditableGeometry`]).
     pub fn set_cell_material(&mut self, card_index: usize, material: i64) -> Result<(), EditError> {
         let slot = self.tree.card_slot(card_index);
         if self.owned_cells.contains_key(&slot) {
             let oc = self.owned_cells.get_mut(&slot).unwrap();
-            if (oc.material == Some(0)) != (material == 0) {
-                return Err(EditError::VoidnessChange);
+            if oc.material.is_none() {
+                return Err(EditError::NoMaterialField); // a LIKE n BUT cell
             }
-            oc.material = Some(material);
+            set_owned_material(oc, material);
             let text = emit_cell(oc);
             self.tree.replace_card_content(card_index, text);
             return Ok(());
         }
         let cell = parse_cell(&self.tree, card_index).ok_or(EditError::NotACell)?;
         let tok = cell.material_token.ok_or(EditError::NoMaterialField)?;
-        if (cell.material == Some(0)) != (material == 0) {
-            return Err(EditError::VoidnessChange);
+        if (cell.material == Some(0)) == (material == 0) {
+            // Voidness unchanged: replace the material token in place, preserving
+            // the card's formatting.
+            self.tree.set_token_int(tok, material);
+            return Ok(());
         }
-        self.tree.set_token_int(tok, material);
+        // Voidness changes: the density field must be added or removed, which the
+        // token overlay cannot express, so promote the cell and re-emit it.
+        let mut oc = promote_cell(&self.tree, card_index).ok_or(EditError::NotEditableGeometry)?;
+        set_owned_material(&mut oc, material);
+        let text = emit_cell(&oc);
+        self.tree.replace_card_content(card_index, text);
+        self.owned_cells.insert(slot, oc);
         Ok(())
     }
 
     /// Set the density of the cell at `card_index`, in place (positive = atom
-    /// density, negative = mass density). A void cell has no density field to
-    /// set, which returns [`EditError::NoDensityField`] (adding one is a
-    /// structural edit).
+    /// density, negative = mass density). A void cell has no density field, so
+    /// this returns [`EditError::NoDensityField`]; assign a material first (via
+    /// [`Model::set_cell_material`], which makes the cell non-void with a
+    /// placeholder density) and then set the real density.
     pub fn set_cell_density(&mut self, card_index: usize, density: f64) -> Result<(), EditError> {
         let slot = self.tree.card_slot(card_index);
         if self.owned_cells.contains_key(&slot) {
@@ -574,6 +594,19 @@ enum Change {
     Delete(usize),
 }
 
+/// Set an owned cell's material, keeping its density field consistent with
+/// MCNP's rule that only non-void cells carry a density: a cell becoming
+/// non-void gains a placeholder density of `0.0` (the caller sets the real value
+/// separately), and a cell becoming void drops its density.
+fn set_owned_material(oc: &mut OwnedCell, material: i64) {
+    oc.material = Some(material);
+    if material == 0 {
+        oc.density = None;
+    } else if oc.density.is_none() {
+        oc.density = Some(0.0);
+    }
+}
+
 /// Byte span `[start, end)` of a card's own physical line(s): from the start of
 /// its first line to just past the newline ending its last content line. Used
 /// to remove a card cleanly while preserving surrounding blank delimiters and
@@ -748,12 +781,9 @@ pub enum EditError {
     NotATransform,
     /// The cell has no material field to set (e.g. a `LIKE n BUT` cell).
     NoMaterialField,
-    /// The cell has no density field to set (a void cell); adding one would be
-    /// a structural edit.
+    /// The cell has no density field to set (a void cell); assign a material
+    /// first (which makes it non-void), then set the density.
     NoDensityField,
-    /// The edit would change the cell between void and non-void, which adds or
-    /// removes the density field — a structural edit.
-    VoidnessChange,
     /// The cell has no editable geometry (a `LIKE n BUT` cell, or geometry that
     /// did not parse cleanly).
     NotEditableGeometry,
@@ -780,12 +810,8 @@ impl std::fmt::Display for EditError {
             EditError::NotATransform => "card is not a transform",
             EditError::NoMaterialField => "cell has no material field to set (a LIKE n BUT cell?)",
             EditError::NoDensityField => {
-                "cell has no density field to set; adding density to a void cell \
-                 is a structural edit (not yet supported)"
-            }
-            EditError::VoidnessChange => {
-                "changing a cell between void (material 0) and a real material adds \
-                 or removes the density field; this is a structural edit (not yet supported)"
+                "cell has no density field to set (a void cell); assign a material \
+                 first (making it non-void), then set the density"
             }
             EditError::NotEditableGeometry => {
                 "cell has no editable geometry (a LIKE n BUT cell, or malformed geometry)"
@@ -974,20 +1000,35 @@ sdef pos=0 0 0
     }
 
     #[test]
-    fn voidness_change_is_rejected() {
+    fn assign_material_to_void_cell_adds_placeholder_density() {
         let mut m = Model::parse(MODEL);
-        // void -> real material would need a density field inserted.
-        let void_ci = cell_pos(&m, 2);
-        assert_eq!(
-            m.set_cell_material(void_ci, 5),
-            Err(EditError::VoidnessChange)
-        );
-        // real material -> void would need the density field removed.
-        let mat_ci = cell_pos(&m, 1);
-        assert_eq!(
-            m.set_cell_material(mat_ci, 0),
-            Err(EditError::VoidnessChange)
-        );
+        let void_ci = cell_pos(&m, 2); // "2 0 1 imp:n=0"
+                                       // Assigning a real material to a void cell just works (no error) and
+                                       // gives it a placeholder density of 0.
+        m.set_cell_material(void_ci, 5).unwrap();
+        let read = m.read_cell(void_ci).unwrap();
+        assert!(!read.is_void());
+        assert_eq!(read.density(), Some(0.0));
+        let out = m.to_source();
+        assert!(out.contains("2 5 0 1 imp:n=0"), "got: {out}"); // params preserved
+                                                                // Everything else is byte-for-byte.
+        assert!(out.contains("1 1 -1.0 -1 imp:n=1"));
+        assert!(out.contains("1 SO 5"));
+        // The real density can now be set the usual way.
+        m.set_cell_density(void_ci, -2.5).unwrap();
+        assert!(m.to_source().contains("2 5 -2.5 1 imp:n=0"));
+    }
+
+    #[test]
+    fn material_zero_makes_cell_void_and_drops_density() {
+        let mut m = Model::parse(MODEL);
+        let ci = cell_pos(&m, 1); // "1 1 -1.0 -1 imp:n=1"
+        m.set_cell_material(ci, 0).unwrap();
+        assert!(m.read_cell(ci).unwrap().is_void());
+        let out = m.to_source();
+        assert!(out.contains("1 0 -1 imp:n=1"), "got: {out}");
+        // Re-parse is clean.
+        assert!(Model::parse(&out).diagnostics().is_empty());
     }
 
     #[test]

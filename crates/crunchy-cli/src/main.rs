@@ -376,7 +376,7 @@ fn surfaces_cmd(path: &str) {
     eprintln!("malformed (need shortcut expansion): {malformed}");
     eprintln!("mnemonic histogram:");
     let mut entries: Vec<_> = hist.into_iter().collect();
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.1));
     for (k, n) in entries {
         eprintln!("  {k:<14} {n}");
     }

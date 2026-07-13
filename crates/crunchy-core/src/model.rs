@@ -419,7 +419,8 @@ impl Model {
     ) -> Result<(), EditError> {
         let m = parse_material(&self.tree, card_index).ok_or(EditError::NotAMaterial)?;
         let e = m.entries.get(entry).ok_or(EditError::IndexOutOfRange)?;
-        self.tree.set_token_text(e.fraction_token, format!("{value}"));
+        self.tree
+            .set_token_text(e.fraction_token, format!("{value}"));
         Ok(())
     }
 
@@ -446,9 +447,9 @@ impl Model {
         displacement: [f64; 3],
     ) -> Result<(), EditError> {
         let t = parse_transform(&self.tree, card_index).ok_or(EditError::NotATransform)?;
-        for i in 0..3 {
+        for (i, &value) in displacement.iter().enumerate() {
             let tok = t.displacement_tokens[i].ok_or(EditError::StructuralEdit)?;
-            self.tree.set_token_text(tok, format!("{}", displacement[i]));
+            self.tree.set_token_text(tok, format!("{}", value));
         }
         Ok(())
     }

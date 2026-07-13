@@ -177,12 +177,6 @@ class Cell:
         """Remove every ``#n`` complement of cell ``id`` from the geometry."""
         ...
 
-    def set_material_density(self, material: int, density: float) -> None:
-        """Set material and density together (positive = atom, negative = mass).
-        The lossless way to make a void cell real. ``material=0`` makes it void
-        and ignores ``density``."""
-        ...
-
     def add_param(self, text: str) -> None:
         """Append a parameter (e.g. ``"imp:n=1"``) to the cell's parameter
         section, spliced in before any trailing inline ``$`` comment."""

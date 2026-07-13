@@ -196,7 +196,9 @@ def test_void_to_real_is_lossless():
     )
     model = crunchy.parse(src)
     c = model.cell(1)
-    c.set_material_density(200, 2.2875)
+    # The two-step property flow (material, then density) is lossless.
+    c.material = 200
+    c.density = 2.2875
     out = str(model)
     # Only the header changes; the inline comment and continuation stay put.
     assert "1 200 2.2875      -1 -2  $ hollow" in out

@@ -425,24 +425,6 @@ impl Model {
         Ok(())
     }
 
-    /// Set a cell's material **and** density together (positive = atom, negative
-    /// = mass density). This is the lossless path for making a void cell real:
-    /// the header is spliced against the original tokens, so the geometry,
-    /// continuation lines, and parameter tail stay byte-for-byte. Passing
-    /// `material == 0` makes the cell void and ignores `density`.
-    pub fn set_cell_material_density(
-        &mut self,
-        card_index: usize,
-        material: i64,
-        density: f64,
-    ) -> Result<(), EditError> {
-        self.set_cell_material(card_index, material)?;
-        if material != 0 {
-            self.set_cell_density(card_index, density)?;
-        }
-        Ok(())
-    }
-
     /// Set the transform number of the surface at `card_index`, in place. The
     /// sign of `transform` encodes periodicity (negative = periodic). Adding a
     /// transform to a surface that has none (or removing an existing one) is a
@@ -1528,7 +1510,9 @@ sdef pos=0 0 0
                    \n1 SO 5\n2 PX 0\n3 PY 0\n\nm1 1001 1\n";
         let mut m = Model::parse(src);
         let ci = m.index().cell(1).unwrap();
-        m.set_cell_material_density(ci, 200, 2.2875).unwrap();
+        // The two-step property flow (set material, then density) is lossless.
+        m.set_cell_material(ci, 200).unwrap();
+        m.set_cell_density(ci, 2.2875).unwrap();
         let out = m.to_source();
         let expected = "title\n\
                         1 200 2.2875      -1 -2 -3\n\

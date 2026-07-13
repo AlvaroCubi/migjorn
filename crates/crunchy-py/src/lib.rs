@@ -170,16 +170,6 @@ impl Cell {
         self.edit(py, |m, ci| m.remove_cell_complement(ci, id))
     }
 
-    /// Set the material and density together (positive = atom, negative = mass).
-    /// The lossless way to make a void cell real: only the header changes, the
-    /// geometry and parameter tail stay byte-for-byte. ``material=0`` makes the
-    /// cell void and ignores ``density``.
-    fn set_material_density(&self, py: Python<'_>, material: i64, density: f64) -> PyResult<()> {
-        self.edit(py, |m, ci| {
-            m.set_cell_material_density(ci, material, density)
-        })
-    }
-
     /// Append a parameter (e.g. ``"imp:n=1"`` or ``"u=5"``) to the cell's
     /// parameter section. Spliced in after the cell's last token and before any
     /// trailing inline ``$`` comment, so the rest of the card is preserved.

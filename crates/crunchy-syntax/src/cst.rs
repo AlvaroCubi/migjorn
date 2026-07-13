@@ -439,13 +439,7 @@ pub fn parse(src: impl Into<String>) -> Parsed {
 
     // ---- 3. Assign a section to each line and group into cards. ----
     let mut diagnostics = Vec::new();
-    let cards = build_cards(
-        &lines,
-        &tok_kind,
-        &mut diagnostics,
-        src.as_bytes(),
-        &tok_start,
-    );
+    let cards = build_cards(&lines, &tok_kind, &mut diagnostics, &tok_start);
 
     // Stable card identity: at parse time slot == position. Structural edits
     // (later milestones) hand out fresh slots from `next_slot` and rebuild the
@@ -579,7 +573,6 @@ fn build_cards(
     lines: &[LineInfo],
     tok_kind: &[u16],
     diagnostics: &mut Vec<Diagnostic>,
-    src: &[u8],
     tok_start: &[u32],
 ) -> Vec<Card> {
     let n_tok = tok_kind.len() as u32;
@@ -693,10 +686,6 @@ fn build_cards(
         }
     }
     close(&mut cards, &mut cur, n_tok);
-
-    // Suppress unused-parameter lint in builds where `src` is not otherwise
-    // referenced here (kept for future column-based diagnostics).
-    let _ = src;
     cards
 }
 

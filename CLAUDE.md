@@ -27,17 +27,13 @@ uvx ruff@0.15.21 check crates/crunchy-py             # lint (CI-pinned version)
 uvx ruff@0.15.21 format crates/crunchy-py            # CI runs --check
 ```
 
-CLI (`crunchy` dev binary): `cargo run -p crunchy-cli -- <cmd> <file.mcnp>` where `<cmd>` is `model`, `parse`, `surfaces`, `cells`, `renumber [offset]`, `bench`, or `lex`.
-
 ## Architecture
 
-Four crates, layered bottom-up (each depends only on those below):
+Three crates, layered bottom-up (each depends only on those below):
 
-- **`crunchy-syntax`** — the lossless syntax layer. Owns the lexer and the concrete syntax tree. The production tree is a **custom flat arena** (`flat.rs`), *not* rowan: MCNP tokens tile the source exactly, so tokens are stored as `(kind, len)` parallel `Vec`s and text is recovered as spans into the original source — no per-token interning or heap traffic. This is the crate's core performance decision (rowan's `GreenNodeBuilder` cost ~10x the lexer; see `docs/m0-findings.md`). `GreenTree` also carries an **integer-override overlay** so edits rewrite only touched tokens and re-emission stays a single linear pass. The rowan-based `build_line_tree`/`parse_lossless` are an early M0 spike kept for benchmarking, not the production path.
+- **`crunchy-syntax`** — the lossless syntax layer. Owns the lexer and the concrete syntax tree. The production tree is `GreenTree` (`cst.rs`), a **custom flat arena**, *not* rowan: MCNP tokens tile the source exactly, so tokens are stored as parallel `Vec`s of `(kind, start)` and text is recovered as spans into the original source — no per-token interning or heap traffic. This is the crate's core performance decision (rowan's `GreenNodeBuilder` cost ~10x the lexer; see `docs/m0-findings.md`, which documents the since-removed rowan spike). `GreenTree` also carries an **integer-override overlay** so edits rewrite only touched tokens and re-emission stays a single linear pass.
 
 - **`crunchy-core`** — the typed AST projected *on demand* over the flat CST. Typed views (`Surface`, `Cell`, `Transform`, `Material`, `DataCard`) carry the token indices they were built from, so edits rewrite the exact tokens while everything else stays byte-for-byte. **`Model` (`model.rs`) is the single public facade** — typed-projection functions, the emitter, numeric parsing, and renumbering internals are deliberately *not* re-exported; all capability is reached through `Model`'s methods. Structurally-edited cells are stored as `OwnedCell` in `Model.owned_cells`, keyed by a monotonic slot that survives reparses so handles stay stable across add/remove.
-
-- **`crunchy-cli`** — the `crunchy` dev/benchmark binary. Single `main.rs`, hand-rolled arg dispatch (no clap).
 
 - **`crunchy-py`** — PyO3 + maturin bindings, built as `abi3` wheels (one wheel serves CPython 3.9+). The compiled extension is the private `crunchy._crunchy` submodule; the public `crunchy` package lives in `python/crunchy` and re-exports it plus PEP 561 type stubs.
 

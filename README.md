@@ -20,7 +20,6 @@ bindings.
 |---|---|
 | `crunchy-syntax` | Lexer + lossless concrete syntax tree (CST) + edit overlay |
 | `crunchy-core` | Typed AST (`Model`, `Cell`, `Surface`, …) + renumbering |
-| `crunchy-cli` | `crunchy` dev CLI (`parse`, `surfaces`, `cells`, `model`, `renumber`) |
 | `crunchy-py` | Python bindings (PyO3 + maturin, `abi3` wheels) |
 
 ## Rust

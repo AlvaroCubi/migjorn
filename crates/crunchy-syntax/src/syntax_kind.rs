@@ -1,7 +1,8 @@
 //! The flat set of token/node kinds for the MCNP concrete syntax tree.
 //!
 //! `SyntaxKind` is `#[repr(u16)]` with contiguous discriminants so it can be
-//! transmuted to/from `rowan::SyntaxKind` cheaply. Keep `__LAST` at the end.
+//! recovered from its stored `u16` via [`SyntaxKind::from_u16`]. Keep `__LAST`
+//! at the end.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
@@ -50,10 +51,6 @@ pub enum SyntaxKind {
     SURFACE_CARD,
     /// A data card (a logical line in the data block).
     DATA_CARD,
-    /// One physical source line (grouping used by the M0 spike).
-    LINE,
-    /// The whole file.
-    ROOT,
 
     #[doc(hidden)]
     __LAST,
@@ -95,39 +92,3 @@ impl SyntaxKind {
         )
     }
 }
-
-impl From<SyntaxKind> for rowan::SyntaxKind {
-    #[inline]
-    fn from(k: SyntaxKind) -> Self {
-        rowan::SyntaxKind(k as u16)
-    }
-}
-
-/// The rowan `Language` binding for MCNP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum McnpLang {}
-
-impl rowan::Language for McnpLang {
-    type Kind = SyntaxKind;
-
-    #[inline]
-    fn kind_from_raw(raw: rowan::SyntaxKind) -> SyntaxKind {
-        assert!(
-            raw.0 < SyntaxKind::__LAST as u16,
-            "invalid SyntaxKind {}",
-            raw.0
-        );
-        // SAFETY: `SyntaxKind` is `#[repr(u16)]` with contiguous discriminants
-        // in `0..__LAST`, and we just checked the bound.
-        unsafe { std::mem::transmute::<u16, SyntaxKind>(raw.0) }
-    }
-
-    #[inline]
-    fn kind_to_raw(kind: SyntaxKind) -> rowan::SyntaxKind {
-        kind.into()
-    }
-}
-
-pub type SyntaxNode = rowan::SyntaxNode<McnpLang>;
-pub type SyntaxToken = rowan::SyntaxToken<McnpLang>;
-pub type SyntaxElement = rowan::SyntaxElement<McnpLang>;

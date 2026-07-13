@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/crunchy-syntax",
     "crates/crunchy-core",
-    "crates/crunchy-cli",
     "crates/crunchy-py",
 ]
 

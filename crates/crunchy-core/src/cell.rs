@@ -234,14 +234,11 @@ pub(crate) fn promote_cell(tree: &GreenTree, card_index: usize) -> Option<OwnedC
     if !cell.well_formed {
         return None;
     }
-    let params_text = match cell.params_start {
-        Some(ps) => {
-            let card = tree.cards()[card_index];
-            let last = tree.card_content_tokens(&card).last()?;
-            let start = tree.token_span(ps).start as usize;
-            let end = tree.token_span(last).end as usize;
-            tree.src()[start..end].to_string()
-        }
+    // Capture the parameter tail from the *effective* tree so any parameters
+    // spliced in (or out) before promotion are reflected.
+    let card = tree.cards()[card_index];
+    let params_text = match tree.card_content_tokens(&card).last() {
+        Some(last) => tree.params_effective_text(cell.params_start, last),
         None => String::new(),
     };
     Some(OwnedCell {
@@ -272,6 +269,13 @@ pub struct Cell {
     pub like: Option<CellRef>,
     /// The geometry expression (absent for `LIKE n BUT`).
     pub geometry: Option<GeomExpr>,
+    /// First meaningful CST token of the geometry region, if any. A stable
+    /// anchor for splice edits (unaffected by later emit-only overlay edits).
+    pub(crate) geom_first_token: Option<u32>,
+    /// Last meaningful CST token of the geometry region, if any (may be a `)`
+    /// rather than a surface leaf). The anchor a new intersection term is
+    /// spliced in after.
+    pub(crate) geom_last_token: Option<u32>,
     /// First token index of the parameter section (IMP, VOL, …), if any.
     pub(crate) params_start: Option<u32>,
     /// False if some part failed to parse.
@@ -358,6 +362,8 @@ pub(crate) fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
                 id: ref_id,
             }),
             geometry: None,
+            geom_first_token: None,
+            geom_last_token: None,
             params_start: toks.get(pos).copied(),
             well_formed,
         });
@@ -389,6 +395,8 @@ pub(crate) fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
         .unwrap_or(toks.len());
     let geom_tokens = &toks[pos..geom_end];
     let params_start = toks.get(geom_end).copied();
+    let geom_first_token = geom_tokens.first().copied();
+    let geom_last_token = geom_tokens.last().copied();
 
     let (geometry, geom_ok) = if geom_tokens.is_empty() {
         (None, false)
@@ -414,6 +422,8 @@ pub(crate) fn parse_cell(tree: &GreenTree, card_index: usize) -> Option<Cell> {
         density_token,
         like: None,
         geometry,
+        geom_first_token,
+        geom_last_token,
         params_start,
         well_formed: geom_ok,
     })
@@ -433,6 +443,12 @@ pub struct CellParam {
     pub key: String,
     /// The value tokens (numbers, colons, parens, …) belonging to this keyword.
     pub(crate) value_tokens: Vec<u32>,
+    /// First CST token of the whole entry (the `*` prefix or the keyword).
+    pub(crate) start_token: u32,
+    /// Last CST token of the whole entry (the last value token, or the keyword
+    /// itself for a value-less flag). Together with `start_token` this is the
+    /// span a splice deletes to remove the parameter.
+    pub(crate) end_token: u32,
 }
 
 /// True if `toks[j]` starts a new cell parameter keyword: an `IDENT` followed by
@@ -473,6 +489,7 @@ pub(crate) fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam>
     let n = toks.len();
     let mut params = Vec::new();
     while j < n {
+        let start_token = toks[j];
         // A keyword may be prefixed with `*` (e.g. `*fill`, `*trcl`).
         if tree.token_kind(toks[j]) == SyntaxKind::STAR {
             j += 1;
@@ -508,6 +525,8 @@ pub(crate) fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam>
         params.push(CellParam {
             key,
             value_tokens: toks[vstart..j].to_vec(),
+            start_token,
+            end_token: toks[j - 1],
         });
     }
     params

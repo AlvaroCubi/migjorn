@@ -8,7 +8,9 @@
 use crunchy_syntax::{Diagnostic, GreenTree, Parsed, SyntaxKind};
 use rustc_hash::FxHashMap;
 
-use crate::cell::{cell_id, cells, parse_cell, promote_cell, Cell, GeomExpr, OwnedCell};
+use crate::cell::{
+    cell_id, cell_params, cells, parse_cell, promote_cell, Cell, GeomExpr, OwnedCell,
+};
 use crate::datacard::{data_cards, DataCard};
 use crate::emit::emit_cell;
 use crate::material::{materials, parse_material, Material};
@@ -341,33 +343,49 @@ impl Model {
     /// loop. A `LIKE n BUT` cell has no material field ([`EditError::NoMaterialField`]),
     /// and a void cell whose geometry did not parse cleanly cannot be re-emitted
     /// ([`EditError::NotEditableGeometry`]).
+    ///
+    /// Both same-voidness and void-crossing edits are lossless: the material
+    /// field (and, when crossing, the density field) is spliced against the
+    /// original tokens, so every other byte of the card — geometry spacing,
+    /// continuation lines, inline comments, the parameter tail — is preserved.
     pub fn set_cell_material(&mut self, card_index: usize, material: i64) -> Result<(), EditError> {
         let slot = self.tree.card_slot(card_index);
-        if self.owned_cells.contains_key(&slot) {
-            let oc = self.owned_cells.get_mut(&slot).unwrap();
-            if oc.material.is_none() {
-                return Err(EditError::NoMaterialField); // a LIKE n BUT cell
-            }
-            set_owned_material(oc, material);
-            let text = emit_cell(oc);
-            self.tree.replace_card_content(card_index, text);
-            return Ok(());
-        }
         let cell = parse_cell(&self.tree, card_index).ok_or(EditError::NotACell)?;
-        let tok = cell.material_token.ok_or(EditError::NoMaterialField)?;
-        if (cell.material == Some(0)) == (material == 0) {
-            // Voidness unchanged: replace the material token in place, preserving
-            // the card's formatting.
-            self.tree.set_token_int(tok, material);
+        let mat_tok = cell.material_token.ok_or(EditError::NoMaterialField)?;
+        let orig_void = cell.material == Some(0);
+        let density_token = cell.density_token;
+
+        if self.owned_cells.contains_key(&slot) {
+            // Structurally-edited cell: update the read model, then re-express the
+            // header against the original tokens.
+            {
+                let oc = self.owned_cells.get_mut(&slot).unwrap();
+                if oc.material.is_none() {
+                    return Err(EditError::NoMaterialField); // a LIKE n BUT cell
+                }
+                set_owned_material(oc, material);
+            }
+            if self.tree.card_has_replacement(card_index) {
+                self.replace_from_owned(card_index);
+            } else {
+                self.write_header_emit(slot, mat_tok, orig_void, density_token);
+            }
             return Ok(());
         }
-        // Voidness changes: the density field must be added or removed, which the
-        // token overlay cannot express, so promote the cell and re-emit it.
+
+        let cur_void = orig_void;
+        let new_void = material == 0;
+        if cur_void == new_void {
+            // Voidness unchanged: rewrite the material token in place.
+            self.tree.set_token_int(mat_tok, material);
+            return Ok(());
+        }
+        // Voidness changes: promote for reads (density field is added/removed),
+        // then splice the new header in.
         let mut oc = promote_cell(&self.tree, card_index).ok_or(EditError::NotEditableGeometry)?;
         set_owned_material(&mut oc, material);
-        let text = emit_cell(&oc);
-        self.tree.replace_card_content(card_index, text);
         self.owned_cells.insert(slot, oc);
+        self.write_header_emit(slot, mat_tok, orig_void, density_token);
         Ok(())
     }
 
@@ -378,26 +396,58 @@ impl Model {
     /// placeholder density) and then set the real density.
     pub fn set_cell_density(&mut self, card_index: usize, density: f64) -> Result<(), EditError> {
         let slot = self.tree.card_slot(card_index);
+        let cell = parse_cell(&self.tree, card_index).ok_or(EditError::NotACell)?;
+
         if self.owned_cells.contains_key(&slot) {
-            let oc = self.owned_cells.get_mut(&slot).unwrap();
-            if oc.material == Some(0) || oc.density.is_none() {
-                return Err(EditError::NoDensityField);
+            let material = {
+                let oc = self.owned_cells.get_mut(&slot).unwrap();
+                if oc.material == Some(0) || oc.density.is_none() {
+                    return Err(EditError::NoDensityField);
+                }
+                oc.density = Some(density);
+                oc.material.unwrap_or(0)
+            };
+            if self.tree.card_has_replacement(card_index) {
+                self.replace_from_owned(card_index);
+            } else if let Some(dt) = cell.density_token {
+                // Originally-real cell: rewrite its density token in place.
+                self.tree.set_token_text(dt, format!("{density}"));
+            } else {
+                // Void-originated cell: the density lives in the spliced header.
+                let mat_tok = cell.material_token.ok_or(EditError::NoDensityField)?;
+                self.tree
+                    .set_insertion_before(mat_tok, format!("{material} {density}"));
             }
-            oc.density = Some(density);
-            let text = emit_cell(oc);
-            self.tree.replace_card_content(card_index, text);
             return Ok(());
         }
-        let cell = parse_cell(&self.tree, card_index).ok_or(EditError::NotACell)?;
         let tok = cell.density_token.ok_or(EditError::NoDensityField)?;
         self.tree.set_token_text(tok, format!("{density}"));
         Ok(())
     }
 
+    /// Set a cell's material **and** density together (positive = atom, negative
+    /// = mass density). This is the lossless path for making a void cell real:
+    /// the header is spliced against the original tokens, so the geometry,
+    /// continuation lines, and parameter tail stay byte-for-byte. Passing
+    /// `material == 0` makes the cell void and ignores `density`.
+    pub fn set_cell_material_density(
+        &mut self,
+        card_index: usize,
+        material: i64,
+        density: f64,
+    ) -> Result<(), EditError> {
+        self.set_cell_material(card_index, material)?;
+        if material != 0 {
+            self.set_cell_density(card_index, density)?;
+        }
+        Ok(())
+    }
+
     /// Set the transform number of the surface at `card_index`, in place. The
     /// sign of `transform` encodes periodicity (negative = periodic). Adding a
-    /// transform to a surface that has none, or removing an existing one, is a
-    /// structural edit and returns [`EditError::StructuralEdit`].
+    /// transform to a surface that has none (or removing an existing one) is a
+    /// lossless splice: the number is inserted after the id / deleted with its
+    /// separator, and every other byte of the card is preserved.
     pub fn set_surface_transform(
         &mut self,
         card_index: usize,
@@ -405,13 +455,21 @@ impl Model {
     ) -> Result<(), EditError> {
         let s = parse_surface(&self.tree, card_index).ok_or(EditError::NotASurface)?;
         match (s.transform_token, transform) {
-            (Some(tok), Some(v)) => {
-                self.tree.set_token_int(tok, v);
-                Ok(())
+            (Some(tok), Some(v)) => self.tree.set_token_int(tok, v),
+            (None, None) => {}
+            (Some(tok), None) => {
+                // Remove the transform: delete it and one preceding separator.
+                self.tree.delete_token(tok);
+                if tok > 0 && self.tree.token_kind(tok - 1) == SyntaxKind::WHITESPACE {
+                    self.tree.delete_token(tok - 1);
+                }
             }
-            (None, None) => Ok(()),
-            _ => Err(EditError::StructuralEdit),
+            (None, Some(v)) => {
+                // Insert the transform number between the id and the mnemonic.
+                self.tree.insert_after(s.id_token, format!(" {v}"));
+            }
         }
+        Ok(())
     }
 
     /// Set the `i`-th coefficient of the surface at `card_index`, in place.
@@ -459,55 +517,114 @@ impl Model {
     }
 
     /// Set the displacement vector of the transform at `card_index`, in place.
-    /// A component not written in the source (defaulted to 0) has no token to
-    /// rewrite, so setting it is a structural edit → [`EditError::StructuralEdit`].
+    /// Components already written are rewritten; components that defaulted to 0
+    /// (and so have no token) are spliced in after the last present displacement
+    /// value — a lossless edit. Missing components are always trailing, so this
+    /// never disturbs rotation entries (which require a full displacement).
     pub fn set_transform_displacement(
         &mut self,
         card_index: usize,
         displacement: [f64; 3],
     ) -> Result<(), EditError> {
         let t = parse_transform(&self.tree, card_index).ok_or(EditError::NotATransform)?;
-        for (i, &value) in displacement.iter().enumerate() {
-            let tok = t.displacement_tokens[i].ok_or(EditError::StructuralEdit)?;
-            self.tree.set_token_text(tok, format!("{}", value));
+        let present = t
+            .displacement_tokens
+            .iter()
+            .take_while(|x| x.is_some())
+            .count();
+        for (slot, &v) in t
+            .displacement_tokens
+            .iter()
+            .zip(&displacement)
+            .take(present)
+        {
+            self.tree.set_token_text(slot.unwrap(), format!("{v}"));
+        }
+        if present < 3 {
+            let anchor = if present > 0 {
+                t.displacement_tokens[present - 1].unwrap()
+            } else {
+                t.id_token
+            };
+            let mut s = String::new();
+            for &v in &displacement[present..] {
+                s.push_str(&format!(" {v}"));
+            }
+            self.tree.insert_after(anchor, s);
         }
         Ok(())
     }
 
     /// Set the rotation entries of the transform at `card_index`, in place.
-    /// `rotation.len()` must equal the number of rotation entries already
-    /// present; changing the count is a structural edit →
-    /// [`EditError::StructuralEdit`].
+    /// Shared entries are rewritten; extra entries are spliced in after the last
+    /// numeric token, and surplus entries are deleted — all lossless. Adding
+    /// rotation to a transform whose displacement is incomplete is ambiguous
+    /// (the new numbers would read as displacement) → [`EditError::StructuralEdit`].
     pub fn set_transform_rotation(
         &mut self,
         card_index: usize,
         rotation: &[f64],
     ) -> Result<(), EditError> {
         let t = parse_transform(&self.tree, card_index).ok_or(EditError::NotATransform)?;
-        if rotation.len() != t.rotation_tokens.len() {
-            return Err(EditError::StructuralEdit);
-        }
+        let old = t.rotation_tokens.len();
+        let new = rotation.len();
         for (&tok, &v) in t.rotation_tokens.iter().zip(rotation) {
             self.tree.set_token_text(tok, format!("{v}"));
+        }
+        if new < old {
+            for i in new..old {
+                let tok = t.rotation_tokens[i];
+                self.tree.delete_token(tok);
+                if tok > 0 && self.tree.token_kind(tok - 1) == SyntaxKind::WHITESPACE {
+                    self.tree.delete_token(tok - 1);
+                }
+            }
+        } else if new > old {
+            let present_disp = t
+                .displacement_tokens
+                .iter()
+                .take_while(|x| x.is_some())
+                .count();
+            let anchor = if old > 0 {
+                t.rotation_tokens[old - 1]
+            } else if present_disp == 3 {
+                t.displacement_tokens[2].unwrap()
+            } else {
+                return Err(EditError::StructuralEdit);
+            };
+            let mut s = String::new();
+            for &v in &rotation[old..] {
+                s.push_str(&format!(" {v}"));
+            }
+            self.tree.insert_after(anchor, s);
         }
         Ok(())
     }
 
     /// Intersect the cell's geometry with a signed surface (`id` magnitude,
-    /// `negative` sense). Promotes the cell to an editable node on first use and
-    /// re-emits it; every other card stays byte-for-byte.
+    /// `negative` sense). The new sense is spliced in after the last geometry
+    /// token, so the card's formatting — continuation lines, inline comments,
+    /// the parameter tail — is preserved byte-for-byte; only the added surface
+    /// appears.
     pub fn add_cell_surface(
         &mut self,
         card_index: usize,
         id: i64,
         negative: bool,
     ) -> Result<(), EditError> {
-        self.edit_geometry(card_index, |g| g.intersect_surface(id, negative))
+        let ref_text = if negative {
+            format!("-{id}")
+        } else {
+            id.to_string()
+        };
+        self.splice_add(card_index, &ref_text, |g| g.intersect_surface(id, negative))
     }
 
-    /// Intersect the cell's geometry with a `#n` cell complement.
+    /// Intersect the cell's geometry with a `#n` cell complement. Formatting is
+    /// preserved as in [`Model::add_cell_surface`].
     pub fn add_cell_complement(&mut self, card_index: usize, id: i64) -> Result<(), EditError> {
-        self.edit_geometry(card_index, |g| g.intersect_cell_complement(id))
+        let ref_text = format!("#{id}");
+        self.splice_add(card_index, &ref_text, |g| g.intersect_cell_complement(id))
     }
 
     /// Remove every surface reference of magnitude `id` from the cell's
@@ -515,6 +632,9 @@ impl Model {
     /// [`EditError::WouldEmptyGeometry`]) an edit that would leave the cell with
     /// no geometry.
     pub fn remove_cell_surface(&mut self, card_index: usize, id: i64) -> Result<bool, EditError> {
+        if let Some(res) = self.try_splice_remove(card_index, id, true) {
+            return res;
+        }
         self.remove_geometry(card_index, &move |g| g.remove_surface(id))
     }
 
@@ -524,10 +644,235 @@ impl Model {
         card_index: usize,
         id: i64,
     ) -> Result<bool, EditError> {
+        if let Some(res) = self.try_splice_remove(card_index, id, false) {
+            return res;
+        }
         self.remove_geometry(card_index, &move |g| g.remove_cell_complement(id))
     }
 
-    /// Ensure the cell is promoted, apply `f` to its geometry, and re-emit.
+    /// Try to remove surface `id` (or the `#id` complement when `is_surface` is
+    /// false) as a lossless token splice. Eligible only when the geometry is
+    /// *flat* — a top-level intersection or single factor with no unions or
+    /// parentheses — and the cell has not already been structurally edited (so
+    /// the CST tokens still mirror the logical geometry). Deletes each matching
+    /// leaf's tokens plus one separator, preserving all other bytes.
+    ///
+    /// Returns `None` to fall back to the whole-card re-emit (nested unions,
+    /// parenthesised regions, or an already-edited cell); `Some(Ok(false))` when
+    /// nothing matched; `Some(Err(_))` when the removal would empty the cell.
+    fn try_splice_remove(
+        &mut self,
+        card_index: usize,
+        id: i64,
+        is_surface: bool,
+    ) -> Option<Result<bool, EditError>> {
+        let slot = self.tree.card_slot(card_index);
+        if self.owned_cells.contains_key(&slot) {
+            return None; // a prior structural edit owns this card; keep it consistent
+        }
+        let cell = parse_cell(&self.tree, card_index)?;
+        if !cell.well_formed {
+            return None;
+        }
+        let geometry = cell.geometry.as_ref()?;
+        let first = cell.geom_first_token?;
+        let last = cell.geom_last_token?;
+        // Flatness: bail on any union or parenthesis in the geometry region.
+        for t in first..=last {
+            match self.tree.token_kind(t) {
+                SyntaxKind::COLON | SyntaxKind::L_PAREN | SyntaxKind::R_PAREN => return None,
+                _ => {}
+            }
+        }
+        // Determine the tokens to delete: the (first, last) CST span of each
+        // matching leaf. A surface is one NUMBER; a `#id` complement is the HASH
+        // plus the NUMBER, which we require to be adjacent (else fall back).
+        let mut spans: Vec<(u32, u32)> = Vec::new();
+        if is_surface {
+            geometry.for_each_surface_ref(&mut |s| {
+                if s.id == id {
+                    spans.push((s.token, s.token));
+                }
+            });
+        } else {
+            let mut ok = true;
+            geometry.for_each_cell_ref(&mut |c| {
+                if c.id == id {
+                    if c.token > first && self.tree.token_kind(c.token - 1) == SyntaxKind::HASH {
+                        spans.push((c.token - 1, c.token));
+                    } else {
+                        ok = false;
+                    }
+                }
+            });
+            if !ok {
+                return None;
+            }
+        }
+        if spans.is_empty() {
+            return Some(Ok(false));
+        }
+        // Guard against emptying the geometry on a trial copy.
+        let mut trial = geometry.clone();
+        let removed = if is_surface {
+            trial.remove_surface(id)
+        } else {
+            trial.remove_cell_complement(id)
+        };
+        debug_assert!(removed);
+        if trial.is_empty() {
+            return Some(Err(EditError::WouldEmptyGeometry));
+        }
+        // Apply the deletions, each with one separator (prefer the preceding
+        // whitespace; for the first geometry leaf take the following one so no
+        // leading separator is left behind).
+        for &(ls, le) in &spans {
+            for t in ls..=le {
+                self.tree.delete_token(t);
+            }
+            if ls > first {
+                self.tree.delete_token(ls - 1);
+            } else {
+                self.tree.delete_token(le + 1);
+            }
+        }
+        // Promote for reads and mirror the removal in the owned model (the tree
+        // deletions are emit-only, so `promote_cell` still sees full geometry).
+        let mut oc = promote_cell(&self.tree, card_index)?;
+        if is_surface {
+            oc.geometry.remove_surface(id);
+        } else {
+            oc.geometry.remove_cell_complement(id);
+        }
+        self.owned_cells.insert(slot, oc);
+        Some(Ok(true))
+    }
+
+    /// Intersect a cell's geometry with a new term (`ref_text`, e.g. `-5` or
+    /// `#7`) as a lossless token splice, keeping the owned read model in sync.
+    ///
+    /// The term is emitted after the last geometry token (before the
+    /// geometry→parameter trivia), so continuation lines and the parameter tail
+    /// stay byte-for-byte. If the current top-level region is a union, the
+    /// existing geometry is wrapped in parentheses first so the new intersection
+    /// term does not bind inside the union (`a:b` + `-3` → `(a:b) -3`).
+    fn splice_add(
+        &mut self,
+        card_index: usize,
+        ref_text: &str,
+        mutate: impl FnOnce(&mut GeomExpr),
+    ) -> Result<(), EditError> {
+        let slot = self.tree.card_slot(card_index);
+        if self.tree.card_has_replacement(card_index) {
+            // Card is already emitted wholesale; keep it in that (lossy) mode.
+            return self.edit_geometry(card_index, mutate);
+        }
+        let cell = parse_cell(&self.tree, card_index).ok_or(EditError::NotEditableGeometry)?;
+        if !cell.well_formed {
+            return Err(EditError::NotEditableGeometry);
+        }
+        let first = cell
+            .geom_first_token
+            .ok_or(EditError::NotEditableGeometry)?;
+        let last = cell.geom_last_token.ok_or(EditError::NotEditableGeometry)?;
+        // Whether the *current* logical region is a top-level union decides
+        // parenthesisation. Prefer the owned view (reflects earlier edits).
+        let is_union = match self.owned_cells.get(&slot) {
+            Some(oc) => matches!(oc.geometry, GeomExpr::Union(_)),
+            None => matches!(cell.geometry, Some(GeomExpr::Union(_))),
+        };
+        if is_union {
+            self.tree.insert_before(first, "(");
+            self.tree.insert_after(last, format!(") {ref_text}"));
+        } else {
+            self.tree.insert_after(last, format!(" {ref_text}"));
+        }
+        // Keep the owned read model consistent (promote on first structural edit;
+        // reads go through it, emit goes through the splice above).
+        if !self.owned_cells.contains_key(&slot) {
+            let oc = promote_cell(&self.tree, card_index).ok_or(EditError::NotEditableGeometry)?;
+            self.owned_cells.insert(slot, oc);
+        }
+        mutate(&mut self.owned_cells.get_mut(&slot).unwrap().geometry);
+        Ok(())
+    }
+
+    /// Append a parameter to a cell's parameter section (`text`, e.g.
+    /// `"imp:n=1"` or `"u=5"`). It is spliced in after the cell's last token and
+    /// before any trailing inline `$` comment, so the rest of the card — geometry
+    /// spacing, continuation lines, existing parameters — stays byte-for-byte.
+    /// `text` must be non-empty and single-line.
+    pub fn add_cell_param(&mut self, card_index: usize, text: &str) -> Result<(), EditError> {
+        let text = text.trim();
+        if text.is_empty() || text.contains(['\n', '\r']) {
+            return Err(EditError::InvalidCardText);
+        }
+        let card = *self
+            .tree
+            .cards()
+            .get(card_index)
+            .ok_or(EditError::NotACell)?;
+        if card.kind != SyntaxKind::CELL_CARD {
+            return Err(EditError::NotACell);
+        }
+        let last = self
+            .tree
+            .card_content_tokens(&card)
+            .last()
+            .ok_or(EditError::NotACell)?;
+        if self.tree.card_has_replacement(card_index) {
+            // Replace-mode card: fold into the owned tail and re-emit.
+            let slot = self.tree.card_slot(card_index);
+            let oc = self.owned_cells.get_mut(&slot).unwrap();
+            if oc.params_text.is_empty() {
+                oc.params_text = text.to_string();
+            } else {
+                oc.params_text.push(' ');
+                oc.params_text.push_str(text);
+            }
+            self.replace_from_owned(card_index);
+        } else {
+            self.tree.insert_after(last, format!(" {text}"));
+        }
+        Ok(())
+    }
+
+    /// Remove the first parameter whose keyword equals `key` (case-insensitive,
+    /// ignoring any `:particle` designator — `"imp"` matches `imp:n`). Returns
+    /// whether one was removed. Lossless for a cell that has not been
+    /// structurally re-emitted.
+    pub fn remove_cell_param(&mut self, card_index: usize, key: &str) -> Result<bool, EditError> {
+        let want = key.to_ascii_uppercase();
+        let params = cell_params(&self.tree, card_index);
+        let Some(p) = params.iter().find(|p| p.key == want) else {
+            return Ok(false);
+        };
+        let (start, end) = (p.start_token, p.end_token);
+        if self.tree.card_has_replacement(card_index) {
+            // Replace-mode card: rebuild the owned tail without this parameter.
+            let slot = self.tree.card_slot(card_index);
+            let oc = self.owned_cells.get_mut(&slot).unwrap();
+            if let Some(rebuilt) = remove_param_from_text(&oc.params_text, &want) {
+                oc.params_text = rebuilt;
+                self.replace_from_owned(card_index);
+            }
+            return Ok(true);
+        }
+        for t in start..=end {
+            self.tree.delete_token(t);
+        }
+        // Drop one preceding whitespace separator (params always follow geometry,
+        // so there is one) to avoid leaving a doubled space.
+        let card = self.tree.cards()[card_index];
+        if start > card.first_tok && self.tree.token_kind(start - 1) == SyntaxKind::WHITESPACE {
+            self.tree.delete_token(start - 1);
+        }
+        Ok(true)
+    }
+
+    /// Ensure the cell is promoted, apply `f` to its geometry, and re-emit the
+    /// whole card body (a lossy fallback; used only where a lossless splice is
+    /// not available, e.g. removing a surface from a nested union).
     fn edit_geometry<R>(
         &mut self,
         card_index: usize,
@@ -540,9 +885,32 @@ impl Model {
         }
         let oc = self.owned_cells.get_mut(&slot).unwrap();
         let r = f(&mut oc.geometry);
-        let text = emit_cell(oc);
-        self.tree.replace_card_content(card_index, text);
+        self.replace_from_owned(card_index);
         Ok(r)
+    }
+
+    /// Re-emit the whole card body from the owned read model (the lossy
+    /// fallback). Clears any token splices on the card first so the splice and
+    /// replacement emit mechanisms never overlap on the same card.
+    fn replace_from_owned(&mut self, card_index: usize) {
+        let slot = self.tree.card_slot(card_index);
+        // Before dropping the token splices, fold any spliced parameters into the
+        // owned tail (only meaningful the first time the card enters replace mode;
+        // afterwards the splices are already gone).
+        if !self.tree.card_has_replacement(card_index) {
+            if let Some(cell) = parse_cell(&self.tree, card_index) {
+                let card = self.tree.cards()[card_index];
+                if let Some(last) = self.tree.card_content_tokens(&card).last() {
+                    let pt = self.tree.params_effective_text(cell.params_start, last);
+                    if let Some(oc) = self.owned_cells.get_mut(&slot) {
+                        oc.params_text = pt;
+                    }
+                }
+            }
+        }
+        self.tree.clear_card_overlay(card_index);
+        let text = emit_cell(&self.owned_cells[&slot]);
+        self.tree.replace_card_content(card_index, text);
     }
 
     /// Apply a removal `op` to the cell's geometry, guarding against emptying it
@@ -578,10 +946,8 @@ impl Model {
             let oc = promote_cell(&self.tree, card_index).ok_or(EditError::NotEditableGeometry)?;
             self.owned_cells.insert(slot, oc);
         }
-        let oc = self.owned_cells.get_mut(&slot).unwrap();
-        oc.geometry = trial;
-        let text = emit_cell(oc);
-        self.tree.replace_card_content(card_index, text);
+        self.owned_cells.get_mut(&slot).unwrap().geometry = trial;
+        self.replace_from_owned(card_index);
         Ok(true)
     }
 }
@@ -592,6 +958,86 @@ enum Change {
     Insert(usize),
     /// The card at this position was removed.
     Delete(usize),
+}
+
+impl Model {
+    /// Re-express a structurally-edited cell's header (`material [density]`) on
+    /// the CST overlay, from the owned read model against the *original* tokens.
+    ///
+    /// When the new voidness matches the original card's, the material token is
+    /// rewritten in place (the density token, if any, is left untouched so an
+    /// unrelated material change never reformats it). When voidness differs from
+    /// the original, the original material/density value tokens are deleted and a
+    /// single `material [density]` string is spliced in their place. Idempotent:
+    /// any prior header splice is cleared first, so repeated edits compose.
+    fn write_header_emit(
+        &mut self,
+        slot: u32,
+        mat_tok: u32,
+        orig_void: bool,
+        density_token: Option<u32>,
+    ) {
+        let (material, density) = {
+            let oc = &self.owned_cells[&slot];
+            (oc.material.unwrap_or(0), oc.density)
+        };
+        let new_void = material == 0;
+
+        // Clear any header splice from an earlier voidness change so this is a
+        // clean re-expression.
+        self.tree.clear_insertion_before(mat_tok);
+        self.tree.undelete_token(mat_tok);
+        if let Some(dt) = density_token {
+            for t in (mat_tok + 1)..=dt {
+                self.tree.undelete_token(t);
+            }
+        }
+
+        if orig_void == new_void {
+            // Same shape as the original card: a plain value rewrite.
+            self.tree.set_token_int(mat_tok, material);
+        } else {
+            // Voidness differs: replace the original header value tokens wholesale.
+            let text = if new_void {
+                "0".to_string()
+            } else {
+                format!("{} {}", material, density.unwrap_or(0.0))
+            };
+            self.tree.set_insertion_before(mat_tok, text);
+            self.tree.delete_token(mat_tok);
+            if let Some(dt) = density_token {
+                for t in (mat_tok + 1)..=dt {
+                    self.tree.delete_token(t);
+                }
+            }
+        }
+    }
+}
+
+/// Remove the parameter whose (uppercased) keyword is `want` from a raw
+/// parameter tail, returning the rebuilt tail — or `None` if it is not present.
+/// Used only for the rare replace-mode path, where the tail is an opaque string;
+/// it re-parses the tail in a minimal wrapper to locate the entry's byte span.
+fn remove_param_from_text(params_text: &str, want: &str) -> Option<String> {
+    const PREFIX: &str = "t\n1 0 -1 ";
+    let wrapped = format!("{PREFIX}{params_text}\n\n1 PX 0\n\nm1 1001 1\n");
+    let tree = crunchy_syntax::parse(wrapped).tree;
+    let ci = (0..tree.cards().len()).find(|&i| tree.cards()[i].kind == SyntaxKind::CELL_CARD)?;
+    let params = cell_params(&tree, ci);
+    let p = params.iter().find(|p| p.key == want)?;
+    let base = PREFIX.len();
+    let s = tree.token_span(p.start_token).start as usize - base;
+    let e = tree.token_span(p.end_token).end as usize - base;
+    // Drop one preceding space separator if present.
+    let cut = if s > 0 && params_text.as_bytes()[s - 1] == b' ' {
+        s - 1
+    } else {
+        s
+    };
+    let mut out = String::with_capacity(params_text.len());
+    out.push_str(&params_text[..cut]);
+    out.push_str(&params_text[e..]);
+    Some(out.trim().to_string())
 }
 
 /// Set an owned cell's material, keeping its density field consistent with
@@ -1047,7 +1493,8 @@ sdef pos=0 0 0
                                                   // Read view reflects the edit immediately.
         assert_eq!(m.read_cell(ci).unwrap().signed_surfaces(), vec![-1, -5]);
         let out = m.to_source();
-        assert!(out.contains("1 1 -1 -1 -5 imp:n=1"), "got: {out}");
+        // Lossless: the untouched density `-1.0` is preserved (not reformatted).
+        assert!(out.contains("1 1 -1.0 -1 -5 imp:n=1"), "got: {out}");
         // Other cards untouched.
         assert!(out.contains("2 0 1 imp:n=0"));
         assert!(out.contains("1 SO 5"));
@@ -1069,13 +1516,191 @@ sdef pos=0 0 0
     }
 
     #[test]
+    fn void_to_real_preserves_continuation_lines() {
+        // The reported bug: a void cell whose params sit on a continuation line.
+        // Giving it a material+density must not pull `imp`/`u` onto the geom line.
+        let src = "title\n\
+                   1 0      -1 -2 -3\n\
+                   \x20         imp:n=1.0   u=7\n\
+                   \x20         $ a comment\n\
+                   \n1 SO 5\n2 PX 0\n3 PY 0\n\nm1 1001 1\n";
+        let mut m = Model::parse(src);
+        let ci = m.index().cell(1).unwrap();
+        m.set_cell_material_density(ci, 200, 2.2875).unwrap();
+        let out = m.to_source();
+        let expected = "title\n\
+                        1 200 2.2875      -1 -2 -3\n\
+                        \x20         imp:n=1.0   u=7\n\
+                        \x20         $ a comment\n\
+                        \n1 SO 5\n2 PX 0\n3 PY 0\n\nm1 1001 1\n";
+        assert_eq!(out, expected, "got:\n{out}");
+        // Read model reflects the edit.
+        let read = m.read_cell(ci).unwrap();
+        assert_eq!(read.material(), Some(200));
+        assert_eq!(read.density(), Some(2.2875));
+    }
+
+    #[test]
+    fn add_surface_preserves_multiline_and_inline_comment() {
+        let src = "title\n\
+                   10 5 -2.0 -1 2  $ inner\n\
+                   \x20         -3 4\n\
+                   \n1 PX 0\n2 PY 0\n3 PZ 0\n4 SO 9\n\nm1 1001 1\n";
+        let mut m = Model::parse(src);
+        let ci = m.index().cell(10).unwrap();
+        m.add_cell_surface(ci, 99, true).unwrap();
+        let out = m.to_source();
+        // Multi-line geometry, the inline `$ inner` comment, and the density
+        // `-2.0` are all preserved; the new `-99` lands after the last geom token.
+        let expected = "title\n\
+                        10 5 -2.0 -1 2  $ inner\n\
+                        \x20         -3 4 -99\n\
+                        \n1 PX 0\n2 PY 0\n3 PZ 0\n4 SO 9\n\nm1 1001 1\n";
+        assert_eq!(out, expected, "got:\n{out}");
+    }
+
+    #[test]
+    fn add_surface_into_union_parenthesises() {
+        let mut m = Model::parse("t\n1 0 -1 : 2 imp:n=1\n\n1 SO 5\n2 PX 0\n\nm1 1001 1\n");
+        let ci = m.index().cell(1).unwrap();
+        m.add_cell_surface(ci, 3, true).unwrap();
+        assert!(
+            m.to_source().contains("1 0 (-1 : 2) -3 imp:n=1"),
+            "got: {}",
+            m.to_source()
+        );
+        // A second add composes without double-wrapping.
+        m.add_cell_surface(ci, 4, false).unwrap();
+        assert!(
+            m.to_source().contains("1 0 (-1 : 2) -3 4 imp:n=1"),
+            "got: {}",
+            m.to_source()
+        );
+        assert!(Model::parse(m.to_source()).diagnostics().is_empty());
+    }
+
+    #[test]
+    fn add_cell_param_is_lossless_and_before_trailing_comment() {
+        let src = "title\n\
+                   1 1 -1.0 -1 imp:n=1  $ fuel\n\
+                   \n1 SO 5\n\nm1 1001 1\n";
+        let mut m = Model::parse(src);
+        let ci = m.index().cell(1).unwrap();
+        m.add_cell_param(ci, "u=5").unwrap();
+        // New param lands after `imp:n=1` and before the inline `$ fuel` comment.
+        assert_eq!(
+            m.to_source(),
+            "title\n1 1 -1.0 -1 imp:n=1 u=5  $ fuel\n\n1 SO 5\n\nm1 1001 1\n",
+            "got:\n{}",
+            m.to_source()
+        );
+        assert!(Model::parse(m.to_source()).diagnostics().is_empty());
+    }
+
+    #[test]
+    fn add_cell_param_to_cell_without_params() {
+        let mut m = Model::parse("t\n1 0 -1\n\n1 SO 5\n\nm1 1001 1\n");
+        let ci = m.index().cell(1).unwrap();
+        m.add_cell_param(ci, "imp:n=1").unwrap();
+        assert_eq!(m.to_source(), "t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        assert_eq!(m.add_cell_param(ci, ""), Err(EditError::InvalidCardText));
+    }
+
+    #[test]
+    fn remove_cell_param_is_lossless() {
+        let src = "title\n1 1 -1.0 -1 imp:n=1 u=5 vol=3  $ c\n\n1 SO 5\n\nm1 1001 1\n";
+        let mut m = Model::parse(src);
+        let ci = m.index().cell(1).unwrap();
+        // Remove a middle param.
+        assert!(m.remove_cell_param(ci, "u").unwrap());
+        assert_eq!(
+            m.to_source(),
+            "title\n1 1 -1.0 -1 imp:n=1 vol=3  $ c\n\n1 SO 5\n\nm1 1001 1\n",
+            "got:\n{}",
+            m.to_source()
+        );
+        // Case-insensitive keyword, ignoring the :particle designator.
+        assert!(m.remove_cell_param(ci, "IMP").unwrap());
+        assert!(
+            m.to_source().contains("1 1 -1.0 -1 vol=3  $ c"),
+            "got: {}",
+            m.to_source()
+        );
+        // A missing keyword is a no-op false.
+        assert!(!m.remove_cell_param(ci, "fill").unwrap());
+        assert!(Model::parse(m.to_source()).diagnostics().is_empty());
+    }
+
+    #[test]
+    fn remove_surface_flat_is_lossless() {
+        // Flat intersection across a continuation line, with an inline comment.
+        let src = "title\n\
+                   10 5 -2.0 -1 2 3  $ region\n\
+                   \x20         4 imp:n=1\n\
+                   \n1 PX 0\n2 PY 0\n3 PZ 0\n4 SO 9\n\nm1 1001 1\n";
+        let mut m = Model::parse(src);
+        let ci = m.index().cell(10).unwrap();
+        assert!(m.remove_cell_surface(ci, 2).unwrap());
+        // Only surface `2` (and its separator) is gone; everything else stays.
+        let expected = "title\n\
+                        10 5 -2.0 -1 3  $ region\n\
+                        \x20         4 imp:n=1\n\
+                        \n1 PX 0\n2 PY 0\n3 PZ 0\n4 SO 9\n\nm1 1001 1\n";
+        assert_eq!(m.to_source(), expected, "got:\n{}", m.to_source());
+        assert_eq!(m.read_cell(ci).unwrap().signed_surfaces(), vec![-1, 3, 4]);
+    }
+
+    #[test]
+    fn remove_first_surface_leaves_no_leading_separator() {
+        let mut m = Model::parse("t\n1 0 -1 2 3 imp:n=1\n\n1 SO 5\n2 PX 0\n3 PY 0\n\nm1 1001 1\n");
+        let ci = m.index().cell(1).unwrap();
+        assert!(m.remove_cell_surface(ci, 1).unwrap());
+        assert!(
+            m.to_source().contains("1 0 2 3 imp:n=1"),
+            "got: {}",
+            m.to_source()
+        );
+    }
+
+    #[test]
+    fn remove_complement_flat_is_lossless() {
+        let mut m = Model::parse(
+            "t\n1 0 -1 #7 2 imp:n=1\n7 0 -3 imp:n=1\n\n1 SO 5\n2 PX 0\n3 PZ 0\n\nm1 1001 1\n",
+        );
+        let ci = m.index().cell(1).unwrap();
+        assert!(m.remove_cell_complement(ci, 7).unwrap());
+        assert!(
+            m.to_source().contains("1 0 -1 2 imp:n=1"),
+            "got: {}",
+            m.to_source()
+        );
+        assert_eq!(m.read_cell(ci).unwrap().cell_refs(), Vec::<i64>::new());
+        assert!(Model::parse(m.to_source()).diagnostics().is_empty());
+    }
+
+    #[test]
+    fn remove_from_union_falls_back_but_stays_correct() {
+        // A union isn't splice-eligible; the fallback re-emits the card (lossy
+        // formatting) but the result is correct and re-parses cleanly.
+        let mut m =
+            Model::parse("t\n1 0 (-1 : 2) -3 imp:n=1\n\n1 SO 5\n2 PX 0\n3 PY 0\n\nm1 1001 1\n");
+        let ci = m.index().cell(1).unwrap();
+        assert!(m.remove_cell_surface(ci, 3).unwrap());
+        assert_eq!(m.read_cell(ci).unwrap().signed_surfaces(), vec![-1, 2]);
+        let out = m.to_source();
+        assert!(out.contains("imp:n=1"), "params kept: {out}");
+        assert!(Model::parse(&out).diagnostics().is_empty());
+    }
+
+    #[test]
     fn material_edit_after_geometry_edit_is_consistent() {
         let mut m = Model::parse(MODEL);
         let ci = cell_pos(&m, 1);
         m.add_cell_surface(ci, 9, false).unwrap(); // promotes the cell
         m.set_cell_material(ci, 3).unwrap(); // must route through the owned node
         let out = m.to_source();
-        assert!(out.contains("1 3 -1 -1 9 imp:n=1"), "got: {out}");
+        // Lossless: only the material changes; density `-1.0` stays byte-for-byte.
+        assert!(out.contains("1 3 -1.0 -1 9 imp:n=1"), "got: {out}");
         assert_eq!(m.read_cell(ci).unwrap().material(), Some(3));
     }
 
@@ -1104,9 +1729,9 @@ sdef pos=0 0 0
         assert_eq!(m.slot_at(ci), slot);
         m.add_cell_surface(ci, 1, false).unwrap(); // surface 1 exists in MODEL
         assert_eq!(m.read_cell(ci).unwrap().signed_surfaces(), vec![-1, 1]);
-        // (Emitting a restructured cell reformats the density -2.0 as -2.)
+        // Lossless splice: the density `-2.0` of the freshly-added cell is kept.
         assert!(
-            m.to_source().contains("10 1 -2 -1 1 imp:n=1"),
+            m.to_source().contains("10 1 -2.0 -1 1 imp:n=1"),
             "got:\n{}",
             m.to_source()
         );
@@ -1180,12 +1805,13 @@ sdef pos=0 0 0
         // An existing transform can be changed in place.
         m.set_surface_transform(si, Some(13)).unwrap();
         assert!(m.to_source().contains("1 13 SO 7.5"), "{}", m.to_source());
-        // Adding a transform to a surface that has none is structural.
+        // An existing transform can be removed (lossless splice delete).
+        m.set_surface_transform(si, None).unwrap();
+        assert!(m.to_source().contains("1 SO 7.5"), "{}", m.to_source());
+        // Adding a transform to a surface that has none is a lossless splice.
         let s2 = m.index().surface(2).unwrap();
-        assert_eq!(
-            m.set_surface_transform(s2, Some(3)),
-            Err(EditError::StructuralEdit)
-        );
+        m.set_surface_transform(s2, Some(3)).unwrap();
+        assert!(m.to_source().contains("2 3 SO 9"), "{}", m.to_source());
     }
 
     #[test]
@@ -1213,14 +1839,10 @@ sdef pos=0 0 0
         let t1 = m.index().transform(1).unwrap();
         m.set_transform_displacement(t1, [1.0, 2.0, 3.0]).unwrap();
         assert!(m.to_source().contains("tr1 1 2 3"), "{}", m.to_source());
-        // tr1 has no rotation entries: an empty set is a no-op, a non-empty one
-        // would add tokens (structural).
-        m.set_transform_rotation(t1, &[]).unwrap();
-        assert_eq!(
-            m.set_transform_rotation(t1, &[90.0]),
-            Err(EditError::StructuralEdit)
-        );
-        // A same-arity rotation rewrite succeeds.
+        // A full-displacement transform can gain rotation entries (splice).
+        m.set_transform_rotation(t1, &[90.0]).unwrap();
+        assert!(m.to_source().contains("tr1 1 2 3 90"), "{}", m.to_source());
+        // A same-arity rotation rewrite succeeds (tr2 has 9 entries).
         let t2 = m.index().transform(2).unwrap();
         m.set_transform_rotation(t2, &[2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0])
             .unwrap();
@@ -1229,6 +1851,22 @@ sdef pos=0 0 0
             "{}",
             m.to_source()
         );
+        // Surplus rotation entries on tr2 are deleted losslessly (keep 3).
+        let t2 = m.index().transform(2).unwrap();
+        m.set_transform_rotation(t2, &[7.0, 0.0, 0.0]).unwrap();
+        assert!(
+            m.to_source().contains("*tr2 0 0 0 7 0 0\n"),
+            "{}",
+            m.to_source()
+        );
+    }
+
+    #[test]
+    fn set_transform_fills_missing_displacement_component() {
+        let mut m = Model::parse("t\n1 0 -1\n\n1 SO 5\n\nm1 1001 1\ntr3 1\n");
+        let t3 = m.index().transform(3).unwrap();
+        m.set_transform_displacement(t3, [1.0, 2.0, 3.0]).unwrap();
+        assert!(m.to_source().contains("tr3 1 2 3\n"), "{}", m.to_source());
     }
 
     #[test]

@@ -86,7 +86,7 @@ class Cell:
 
     def add_surface(self, surface: int) -> None:
         """Intersect the geometry with a signed surface (negative int = negative
-        sense). Restructures the card; other cards stay byte-for-byte."""
+        sense). Spliced in losslessly; the rest of the card stays byte-for-byte."""
         ...
 
     def remove_surface(self, id: int) -> bool:
@@ -101,6 +101,23 @@ class Cell:
 
     def remove_complement(self, id: int) -> bool:
         """Remove every ``#n`` complement of cell ``id`` from the geometry."""
+        ...
+
+    def set_material_density(self, material: int, density: float) -> None:
+        """Set material and density together (positive = atom, negative = mass).
+        The lossless way to make a void cell real. ``material=0`` makes it void
+        and ignores ``density``."""
+        ...
+
+    def add_param(self, text: str) -> None:
+        """Append a parameter (e.g. ``"imp:n=1"``) to the cell's parameter
+        section, spliced in before any trailing inline ``$`` comment."""
+        ...
+
+    def remove_param(self, key: str) -> bool:
+        """Remove the first parameter whose keyword equals ``key`` (case-
+        insensitive, ignoring any ``:particle``). Returns whether one was
+        removed."""
         ...
 
     def __repr__(self) -> str: ...

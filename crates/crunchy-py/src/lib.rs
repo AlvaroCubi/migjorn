@@ -147,7 +147,7 @@ impl Cell {
     }
 
     /// Intersect the geometry with a signed surface (negative int = negative
-    /// sense). Restructures the card in place.
+    /// sense). Spliced in losslessly; the rest of the card stays byte-for-byte.
     fn add_surface(&self, py: Python<'_>, surface: i64) -> PyResult<()> {
         self.edit(py, |m, ci| {
             m.add_cell_surface(ci, surface.abs(), surface < 0)
@@ -168,6 +168,30 @@ impl Cell {
     /// Remove every `#n` complement of cell `id` from the geometry.
     fn remove_complement(&self, py: Python<'_>, id: i64) -> PyResult<bool> {
         self.edit(py, |m, ci| m.remove_cell_complement(ci, id))
+    }
+
+    /// Set the material and density together (positive = atom, negative = mass).
+    /// The lossless way to make a void cell real: only the header changes, the
+    /// geometry and parameter tail stay byte-for-byte. ``material=0`` makes the
+    /// cell void and ignores ``density``.
+    fn set_material_density(&self, py: Python<'_>, material: i64, density: f64) -> PyResult<()> {
+        self.edit(py, |m, ci| {
+            m.set_cell_material_density(ci, material, density)
+        })
+    }
+
+    /// Append a parameter (e.g. ``"imp:n=1"`` or ``"u=5"``) to the cell's
+    /// parameter section. Spliced in after the cell's last token and before any
+    /// trailing inline ``$`` comment, so the rest of the card is preserved.
+    fn add_param(&self, py: Python<'_>, text: &str) -> PyResult<()> {
+        self.edit(py, |m, ci| m.add_cell_param(ci, text))
+    }
+
+    /// Remove the first parameter whose keyword equals ``key`` (case-insensitive,
+    /// ignoring any ``:particle`` designator — ``"imp"`` matches ``imp:n``).
+    /// Returns whether one was removed.
+    fn remove_param(&self, py: Python<'_>, key: &str) -> PyResult<bool> {
+        self.edit(py, |m, ci| m.remove_cell_param(ci, key))
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -271,8 +295,8 @@ impl Surface {
         self.read(py, |s| s.transform)
     }
     /// Change the transformation number in place (negative => periodic). Adding
-    /// or removing the transform field entirely is a structural edit and raises
-    /// ``ValueError``.
+    /// a transform to a surface that has none, or removing an existing one, is a
+    /// lossless splice; every other byte of the card is preserved.
     #[setter]
     fn set_transform(&self, py: Python<'_>, value: Option<i64>) -> PyResult<()> {
         self.edit(py, |m, ci| m.set_surface_transform(ci, value))
@@ -471,9 +495,9 @@ impl Transform {
             (t.displacement[0], t.displacement[1], t.displacement[2])
         })
     }
-    /// Set the displacement vector in place. A component that was not written in
-    /// the source (defaulted to 0) has no token to rewrite, so setting it is a
-    /// structural edit and raises ``ValueError``.
+    /// Set the displacement vector in place. Components already written are
+    /// rewritten; a component that defaulted to 0 (no token) is spliced in
+    /// losslessly after the last present value.
     #[setter]
     fn set_displacement(&self, py: Python<'_>, value: (f64, f64, f64)) -> PyResult<()> {
         let d = [value.0, value.1, value.2];
@@ -493,8 +517,9 @@ impl Transform {
         Ok(m.inner.card_source(ci))
     }
 
-    /// Rewrite the rotation entries in place. The number of values must match
-    /// the current rotation-entry count (changing it is a structural edit).
+    /// Rewrite the rotation entries in place. Extra entries are spliced in and
+    /// surplus entries deleted losslessly; adding rotation to a transform whose
+    /// displacement is incomplete is ambiguous and raises ``ValueError``.
     fn set_rotation(&self, py: Python<'_>, rotation: Vec<f64>) -> PyResult<()> {
         self.edit(py, |m, ci| m.set_transform_rotation(ci, &rotation))
     }

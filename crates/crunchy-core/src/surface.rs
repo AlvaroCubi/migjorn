@@ -171,6 +171,8 @@ pub struct Surface {
     pub card_index: usize,
     /// Surface number.
     pub id: i64,
+    /// Token index of the surface id (anchor for adding a transform number).
+    pub(crate) id_token: u32,
     /// Optional transformation number; negative denotes a periodic surface.
     pub transform: Option<i64>,
     /// Token index of the transform number, if present (for renumbering).
@@ -257,6 +259,7 @@ pub(crate) fn parse_surface(tree: &GreenTree, card_index: usize) -> Option<Surfa
     Some(Surface {
         card_index,
         id,
+        id_token: id_tok,
         transform,
         transform_token,
         reflective,

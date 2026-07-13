@@ -27,7 +27,7 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::diagnostics::{Diagnostic, Span};
 use crate::lexer::lex;
@@ -69,6 +69,16 @@ pub struct GreenTree {
     /// re-emission the card's meaningful token span is replaced by this text,
     /// while surrounding trivia is preserved (see `replace_card_content`).
     card_replacements: FxHashMap<u32, Box<str>>,
+    /// Sparse token *insertions* keyed by a "gap" index: the text in
+    /// `insertions[g]` is emitted immediately **before** token `g` (a gap equal
+    /// to `token_count` means "at end of stream"). A `Vec` preserves the order
+    /// of multiple inserts at the same gap. This is the token-splice complement
+    /// to `overrides` (which can only rewrite an existing token in place): it
+    /// lets an edit add tokens while every untouched byte stays a source span.
+    insertions: FxHashMap<u32, Vec<Box<str>>>,
+    /// Token indices skipped entirely on re-emission (the deletion half of the
+    /// splice overlay). Empty until the first structural edit.
+    deletions: FxHashSet<u32>,
 }
 
 /// A replacement value for a token. `Int` avoids allocating a string per edit,
@@ -177,10 +187,55 @@ impl GreenTree {
         self.overrides.insert(i, Override::Int(value));
     }
 
+    /// Splice `text` into the stream so it is emitted immediately **before**
+    /// token `i` (i.e. at the gap on `i`'s left). Multiple inserts at the same
+    /// gap are emitted in call order. The caller owns separator whitespace: the
+    /// text is emitted verbatim, so include a leading/trailing space where MCNP
+    /// needs one. Every other byte stays a source span.
+    pub fn insert_before(&mut self, i: u32, text: impl Into<Box<str>>) {
+        self.insertions.entry(i).or_default().push(text.into());
+    }
+
+    /// Splice `text` in so it is emitted immediately **after** token `i` (the
+    /// gap on `i`'s right, i.e. before token `i + 1`). See [`insert_before`] for
+    /// separator ownership.
+    ///
+    /// [`insert_before`]: Self::insert_before
+    pub fn insert_after(&mut self, i: u32, text: impl Into<Box<str>>) {
+        self.insertions.entry(i + 1).or_default().push(text.into());
+    }
+
+    /// Replace *all* insertions at the gap before token `i` with a single
+    /// `text`. Used when a value spliced in earlier (e.g. a void→real density
+    /// placeholder) is later revised, so the edit stays idempotent.
+    pub fn set_insertion_before(&mut self, i: u32, text: impl Into<Box<str>>) {
+        self.insertions.insert(i, vec![text.into()]);
+    }
+
+    /// Drop any insertions at the gap before token `i` (undo an `insert_before`).
+    pub fn clear_insertion_before(&mut self, i: u32) {
+        self.insertions.remove(&i);
+    }
+
+    /// Delete token `i`: it is skipped entirely on re-emission. Trivia around it
+    /// is preserved, so callers removing a meaningful token usually delete one
+    /// adjacent whitespace token too (to avoid a doubled or dangling separator).
+    pub fn delete_token(&mut self, i: u32) {
+        self.deletions.insert(i);
+    }
+
+    /// Un-delete token `i` (undo a `delete_token`), restoring it on re-emission.
+    pub fn undelete_token(&mut self, i: u32) {
+        self.deletions.remove(&i);
+    }
+
     /// Whether any edits have been applied.
     #[inline]
     pub fn is_edited(&self) -> bool {
         !self.overrides.is_empty()
+            || !self.card_replacements.is_empty()
+            || !self.insertions.is_empty()
+            || !self.deletions.is_empty()
     }
 
     /// Iterate the *meaningful* (non-trivia) token indices of a card.
@@ -194,7 +249,11 @@ impl GreenTree {
         // Capacity: source length is exact when unedited and a good estimate
         // otherwise.
         let mut out = String::with_capacity(self.src.len());
-        if self.overrides.is_empty() && self.card_replacements.is_empty() {
+        if self.overrides.is_empty()
+            && self.card_replacements.is_empty()
+            && self.insertions.is_empty()
+            && self.deletions.is_empty()
+        {
             out.push_str(&self.src);
             return out;
         }
@@ -227,6 +286,51 @@ impl GreenTree {
         self.card_replacements.insert(slot, text.into());
     }
 
+    /// Whether the card at `card_index` has a whole-content replacement (the
+    /// lossy fallback emit). A card in this mode must not also carry token
+    /// splices for the same content, or they would double-apply; callers switch
+    /// such a card fully into replace mode via [`clear_card_overlay`].
+    ///
+    /// [`clear_card_overlay`]: Self::clear_card_overlay
+    pub fn card_has_replacement(&self, card_index: usize) -> bool {
+        self.card_replacements
+            .contains_key(&self.card_slots[card_index])
+    }
+
+    /// Drop every token override and splice (insertion/deletion) anchored within
+    /// the card at `card_index`. Used before a whole-card replacement so the two
+    /// emit mechanisms never overlap on one card.
+    pub fn clear_card_overlay(&mut self, card_index: usize) {
+        let card = self.cards[card_index];
+        for i in card.first_tok..card.tok_end {
+            self.overrides.remove(&i);
+            self.insertions.remove(&i);
+            self.deletions.remove(&i);
+        }
+    }
+
+    /// Effective source text of a cell's parameter region — the tokens from
+    /// `params_start` through `last_content`, with overrides and splices applied,
+    /// **plus** any parameters spliced in immediately after the last content
+    /// token. Used when promoting or re-emitting a cell so splice-added/removed
+    /// parameters are reflected. Returns an empty string when there is no
+    /// parameter section and none was spliced in.
+    pub fn params_effective_text(&self, params_start: Option<u32>, last_content: u32) -> String {
+        let ranges = self.replaced_ranges();
+        let mut out = String::new();
+        if let Some(ps) = params_start {
+            self.emit_range(ps, last_content + 1, &ranges, &mut out);
+        }
+        // Parameters appended after the last content token live at this gap.
+        self.emit_insertions(last_content + 1, &mut out);
+        if params_start.is_none() {
+            // A param spliced onto a previously param-less cell carries a leading
+            // separator; drop it so the tail matches `params_text` conventions.
+            return out.trim_start().to_string();
+        }
+        out
+    }
+
     /// First and last meaningful (non-trivia) token indices of a card, if any.
     fn content_bounds(&self, card: &Card) -> Option<(u32, u32)> {
         let mut first = None;
@@ -257,20 +361,40 @@ impl GreenTree {
         v
     }
 
-    /// Emit tokens `[from, to)`, applying overrides and substituting the emitted
-    /// text for any replaced card whose content range begins within. `ranges`
-    /// must be sorted by start and non-overlapping (see `replaced_ranges`).
+    /// Emit tokens `[from, to)`, applying overrides, splice insertions/deletions,
+    /// and substituting the emitted text for any replaced card whose content
+    /// range begins within. `ranges` must be sorted by start and non-overlapping
+    /// (see `replaced_ranges`). A card is either replaced or spliced, never both.
     fn emit_range(&self, from: u32, to: u32, ranges: &[(u32, u32, &str)], out: &mut String) {
         let mut ri = ranges.partition_point(|r| r.0 < from);
         let mut i = from;
         while i < to {
+            self.emit_insertions(i, out);
             if ri < ranges.len() && ranges[ri].0 == i {
                 out.push_str(ranges[ri].2);
                 i = ranges[ri].1 + 1;
                 ri += 1;
             } else {
-                self.emit_token(i, out);
+                if !self.deletions.contains(&i) {
+                    self.emit_token(i, out);
+                }
                 i += 1;
+            }
+        }
+        // Insertions at the very end of the stream (gap == token_count) have no
+        // following token to hang before; emit them only for a whole-tree walk,
+        // not a sub-range (a card's trailing gap belongs to the next card).
+        if to as usize == self.tok_kind.len() {
+            self.emit_insertions(to, out);
+        }
+    }
+
+    /// Emit any splice insertions anchored at gap `g` (before token `g`).
+    #[inline]
+    fn emit_insertions(&self, g: u32, out: &mut String) {
+        if let Some(texts) = self.insertions.get(&g) {
+            for t in texts {
+                out.push_str(t);
             }
         }
     }
@@ -340,6 +464,8 @@ pub fn parse(src: impl Into<String>) -> Parsed {
         next_slot,
         overrides: FxHashMap::default(),
         card_replacements: FxHashMap::default(),
+        insertions: FxHashMap::default(),
+        deletions: FxHashSet::default(),
     };
     Parsed { tree, diagnostics }
 }
@@ -782,5 +908,127 @@ mod tests {
         let p = parse(src);
         assert!(!p.diagnostics.is_empty());
         assert_eq!(p.tree.to_source(), src);
+    }
+
+    /// Find the first token in `card` whose effective text equals `text`.
+    fn tok_with_text(tree: &GreenTree, card: &Card, text: &str) -> u32 {
+        (card.first_tok..card.tok_end)
+            .find(|&i| tree.token_text(i) == text)
+            .unwrap_or_else(|| panic!("no token {text:?} in card"))
+    }
+
+    fn first_cell(p: &Parsed) -> Card {
+        *p.tree
+            .cards()
+            .iter()
+            .find(|c| c.kind == SyntaxKind::CELL_CARD)
+            .unwrap()
+    }
+
+    #[test]
+    fn insert_after_splices_before_following_trivia() {
+        // Adding a surface lands after the last geometry token and before the
+        // newline, so anything on the continuation line stays put.
+        let src = "title\n1 0 -1\n\n1 PX 0\n\nm1 1001 1\n";
+        let mut p = parse(src);
+        let cell = first_cell(&p);
+        let neg1 = tok_with_text(&p.tree, &cell, "-1");
+        p.tree.insert_after(neg1, " -2");
+        assert_eq!(
+            p.tree.to_source(),
+            "title\n1 0 -1 -2\n\n1 PX 0\n\nm1 1001 1\n"
+        );
+    }
+
+    #[test]
+    fn insert_before_splices_at_left_gap() {
+        let src = "title\n1 0 -1\n\n1 PX 0\n\nm1 1001 1\n";
+        let mut p = parse(src);
+        let cell = first_cell(&p);
+        let neg1 = tok_with_text(&p.tree, &cell, "-1");
+        p.tree.insert_before(neg1, "2 ");
+        assert_eq!(
+            p.tree.to_source(),
+            "title\n1 0 2 -1\n\n1 PX 0\n\nm1 1001 1\n"
+        );
+    }
+
+    #[test]
+    fn delete_token_with_separator() {
+        let src = "title\n1 0 -1 2\n\n1 PX 0\n\nm1 1001 1\n";
+        let mut p = parse(src);
+        let cell = first_cell(&p);
+        let two = tok_with_text(&p.tree, &cell, "2");
+        p.tree.delete_token(two);
+        p.tree.delete_token(two - 1); // the whitespace before it
+        assert_eq!(p.tree.to_source(), "title\n1 0 -1\n\n1 PX 0\n\nm1 1001 1\n");
+    }
+
+    #[test]
+    fn override_insert_delete_compose_on_one_card() {
+        let src = "title\n1 0 -1 2 3\n\n1 PX 0\n\nm1 1001 1\n";
+        let mut p = parse(src);
+        let cell = first_cell(&p);
+        // Renumber the id (override), drop surface 2 (delete + its ws), append -4.
+        let id_tok = p.tree.card_content_tokens(&cell).next().unwrap();
+        p.tree.set_token_int(id_tok, 7);
+        let two = tok_with_text(&p.tree, &cell, "2");
+        p.tree.delete_token(two);
+        p.tree.delete_token(two - 1);
+        let three = tok_with_text(&p.tree, &cell, "3");
+        p.tree.insert_after(three, " -4");
+        assert_eq!(
+            p.tree.to_source(),
+            "title\n7 0 -1 3 -4\n\n1 PX 0\n\nm1 1001 1\n"
+        );
+    }
+
+    #[test]
+    fn insertion_is_adjacent_when_no_surrounding_whitespace() {
+        // `#(...)` tokens sit with zero whitespace between them; an insertion at
+        // that gap is emitted with exactly the bytes given, no implied spacing.
+        let src = "title\n1 0 #(4:2)\n\n1 PX 0\n\nm1 1001 1\n";
+        let mut p = parse(src);
+        let cell = first_cell(&p);
+        let four = tok_with_text(&p.tree, &cell, "4");
+        // insert before the "4" inside the parens (a zero-whitespace gap after `(`).
+        p.tree.insert_before(four, "3:");
+        assert_eq!(
+            p.tree.to_source(),
+            "title\n1 0 #(3:4:2)\n\n1 PX 0\n\nm1 1001 1\n"
+        );
+    }
+
+    #[test]
+    fn insertion_at_end_of_stream() {
+        // No trailing newline: the last token is the final "1"; insert_after must
+        // still emit (gap == token_count).
+        let src = "title\n1 0 -1\n\n1 PX 0\n\nm1 1001 1";
+        let mut p = parse(src);
+        let last = (p.tree.token_count() as u32) - 1;
+        assert_eq!(p.tree.token_text(last), "1");
+        p.tree.insert_after(last, " 2");
+        assert_eq!(p.tree.to_source(), "title\n1 0 -1\n\n1 PX 0\n\nm1 1001 1 2");
+    }
+
+    #[test]
+    fn card_source_excludes_next_cards_leading_insertion() {
+        // An insertion anchored at the next card's first token must not leak into
+        // this card's `card_source`.
+        let src = "title\n1 0 -1\n2 0 1\n\n1 PX 0\n\nm1 1001 1\n";
+        let mut p = parse(src);
+        let cells: Vec<usize> = p
+            .tree
+            .cards()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.kind == SyntaxKind::CELL_CARD)
+            .map(|(i, _)| i)
+            .collect();
+        let second = p.tree.cards()[cells[1]];
+        p.tree.insert_before(second.first_tok, "X");
+        // The first cell's source ends at the gap owned by the second card.
+        assert!(!p.tree.card_source(cells[0]).contains('X'));
+        assert!(p.tree.card_source(cells[1]).starts_with('X'));
     }
 }

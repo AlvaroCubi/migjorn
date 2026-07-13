@@ -183,13 +183,39 @@ def test_edit_surface_transform_field():
     assert s1.transform == 3
     s1.transform = 4
     assert "1 4 SO 5" in str(model)
-    # Surface 2 has no transform field: adding one is a structural edit.
-    try:
-        model.surface(2).transform = 3
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError adding a transform field")
+    # Surface 2 has no transform field: adding one is now a lossless splice.
+    model.surface(2).transform = 3
+    assert "2 3 SO 9" in str(model)
+    assert crunchy.parse(str(model)).diagnostics == []
+
+
+def test_void_to_real_is_lossless():
+    src = (
+        "t\n1 0      -1 -2  $ hollow\n          imp:n=1\n"
+        "\n1 SO 5\n2 PX 0\n\nm1 1001 1\n"
+    )
+    model = crunchy.parse(src)
+    c = model.cell(1)
+    c.set_material_density(200, 2.2875)
+    out = str(model)
+    # Only the header changes; the inline comment and continuation stay put.
+    assert "1 200 2.2875      -1 -2  $ hollow" in out
+    assert "          imp:n=1" in out
+    assert model.cell(1).material == 200
+    assert model.cell(1).density == 2.2875
+    assert crunchy.parse(out).diagnostics == []
+
+
+def test_add_and_remove_cell_param():
+    src = "t\n1 1 -1.0 -1 imp:n=1  $ fuel\n\n1 SO 5\n\nm1 1001 1\n"
+    model = crunchy.parse(src)
+    c = model.cell(1)
+    c.add_param("u=5")
+    assert "1 1 -1.0 -1 imp:n=1 u=5  $ fuel" in str(model)
+    assert c.remove_param("imp") is True
+    assert "1 1 -1.0 -1 u=5  $ fuel" in str(model)
+    assert c.remove_param("fill") is False
+    assert crunchy.parse(str(model)).diagnostics == []
 
 
 def test_edit_material_entries_in_place():
@@ -213,14 +239,10 @@ def test_edit_transform_displacement_and_rotation():
     tr.displacement = (1.0, 2.0, 3.0)
     assert "tr1 1 2 3" in str(model)
     assert model.transform(1).displacement == (1.0, 2.0, 3.0)
-    # No rotation entries: an empty set is a no-op; adding entries is structural.
-    tr.set_rotation([])
-    try:
-        tr.set_rotation([90.0])
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError adding rotation entries")
+    # With a full displacement, rotation entries can now be appended losslessly.
+    tr.set_rotation([90.0])
+    assert "tr1 1 2 3 90" in str(model)
+    assert crunchy.parse(str(model)).diagnostics == []
 
 
 def test_edit_transform_rotation_same_arity():

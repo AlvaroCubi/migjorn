@@ -9,6 +9,7 @@ __pycache__/
 *.pdb
 .pytest_cache/
 *.egg-info/
+*.so
 .venv/
 # uv writes this when it treats the package dir as a project; the example's
 # `uv run --with` commands resolve fresh and don't need a committed lock.

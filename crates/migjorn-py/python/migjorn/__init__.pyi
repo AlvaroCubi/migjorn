@@ -465,6 +465,8 @@ class Model:
         ...
 
     def validate(self) -> list[str]:
-        """Referential-integrity check: a list of human-readable problems
-        (dangling surface/cell/material references), empty when consistent."""
+        """Consistency check: a list of human-readable problems, empty when
+        consistent. Reports duplicate cell/surface/material/transform
+        definitions, dangling surface/cell/material references from cells, and a
+        surface whose transform (or periodic partner surface) is undefined."""
         ...

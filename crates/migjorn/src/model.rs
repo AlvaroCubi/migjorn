@@ -6,7 +6,7 @@
 //! leaked lifetimes.
 
 use migjorn_syntax::{Diagnostic, GreenTree, Parsed, SyntaxKind};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cell::{
     cell_id, cell_params, cells, parse_cell, promote_cell, Cell, GeomExpr, OwnedCell,
@@ -236,12 +236,35 @@ impl Model {
         self.remove_card(id, SyntaxKind::SURFACE_CARD)
     }
 
-    /// Check referential integrity of the model: every surface/cell/material a
-    /// cell references must exist. Returns a list of human-readable problems
-    /// (empty when the model is consistent).
+    /// Check the model's consistency and return a list of human-readable
+    /// problems (empty when the model is consistent). Two families of problem
+    /// are reported, in this order:
+    ///
+    /// - **Duplicate definitions** — a cell, surface, material, or transform
+    ///   number defined by more than one card (each offending number reported
+    ///   once, in source order).
+    /// - **Dangling references** — every surface, cell, or material a cell
+    ///   references must exist; a surface's transformation number must name a
+    ///   defined `TRn`, and a periodic surface (a negative transform field) must
+    ///   name a defined partner surface.
+    ///
+    /// This is a semantic check, not a syntactic one: malformed cards surface as
+    /// [`Model::diagnostics`] at parse time and are simply skipped here.
     pub fn validate(&self) -> Vec<String> {
         let idx = self.index();
         let mut problems = Vec::new();
+
+        // --- Duplicate definitions ------------------------------------------
+        // Ids are read straight from the typed iterators (source order), so a
+        // number redefined by a later card is reported exactly once.
+        report_duplicates(&mut problems, "cell", self.cells().map(|c| c.id));
+        report_duplicates(&mut problems, "surface", self.surfaces().map(|s| s.id));
+        report_duplicates(&mut problems, "material", self.materials().map(|m| m.id));
+        report_duplicates(&mut problems, "transform", self.transforms().map(|t| t.id));
+
+        // --- Dangling references from cells ---------------------------------
+        // Iterate every card position through `read_cell` so structurally-edited
+        // (owned) cells are validated against their current, edited state.
         for pos in 0..self.tree.cards().len() {
             let Some(cr) = self.read_cell(pos) else {
                 continue;
@@ -263,6 +286,30 @@ impl Model {
                 }
             }
         }
+
+        // --- Dangling references from surfaces ------------------------------
+        // A surface's optional field before the mnemonic is either a positive
+        // `TRn` number or, when negative, a periodic partner *surface* number.
+        for s in self.surfaces() {
+            match s.transform {
+                Some(n) if n > 0 => {
+                    if idx.transform(n).is_none() {
+                        problems.push(format!("surface {} references missing transform {n}", s.id));
+                    }
+                }
+                Some(n) if n < 0 => {
+                    let partner = -n;
+                    if idx.surface(partner).is_none() {
+                        problems.push(format!(
+                            "surface {} is periodic with missing surface {partner}",
+                            s.id
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+
         problems
     }
 
@@ -931,6 +978,22 @@ impl Model {
         self.owned_cells.get_mut(&slot).unwrap().geometry = trial;
         self.replace_from_owned(card_index);
         Ok(true)
+    }
+}
+
+/// Append a problem to `problems` for each id in `ids` that appears more than
+/// once. Each duplicated id is reported a single time, at the point its first
+/// repeat is seen, so the output is deterministic and free of noise when an id
+/// is defined three or more times.
+fn report_duplicates(problems: &mut Vec<String>, kind: &str, ids: impl Iterator<Item = i64>) {
+    let mut seen = FxHashSet::default();
+    let mut reported = FxHashSet::default();
+    for id in ids {
+        // `seen.insert` is false on a repeat; `reported.insert` then gates the
+        // message to the first repeat only.
+        if !seen.insert(id) && reported.insert(id) {
+            problems.push(format!("duplicate {kind} {id} defined more than once"));
+        }
     }
 }
 
@@ -1773,6 +1836,76 @@ sdef pos=0 0 0
         let problems = m.validate();
         assert!(
             problems.iter().any(|p| p.contains("missing cell 3")),
+            "got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn validate_flags_missing_surface_and_material() {
+        // Cell 1 references surface 9 (undefined) and material 5 (undefined).
+        let m = Model::parse("t\n1 5 -1.0 -9 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let problems = m.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("cell 1 references missing surface 9")),
+            "got: {problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("cell 1 references missing material 5")),
+            "got: {problems:?}"
+        );
+    }
+
+    #[test]
+    fn validate_flags_duplicate_definitions() {
+        // Cell 1, surface 1, material 1, and transform 1 are each defined twice.
+        let m = Model::parse(
+            "t\n\
+             1 0 -1 imp:n=1\n\
+             1 0 -2 imp:n=1\n\
+             \n1 SO 5\n1 SO 9\n2 PX 0\n\
+             \nm1 1001 1\nm1 8016 1\ntr1 0 0 0\ntr1 1 1 1\n",
+        );
+        let problems = m.validate();
+        for kind in ["cell", "surface", "material", "transform"] {
+            let want = format!("duplicate {kind} 1 defined more than once");
+            assert!(problems.contains(&want), "missing {want:?} in {problems:?}");
+        }
+        // A thrice-defined id is still reported exactly once.
+        let m = Model::parse("t\n1 0 -1\n\n5 SO 1\n5 SO 2\n5 SO 3\n\nm1 1001 1\n");
+        let dupes: Vec<_> = m
+            .validate()
+            .into_iter()
+            .filter(|p| p.contains("duplicate surface 5"))
+            .collect();
+        assert_eq!(dupes.len(), 1, "got: {dupes:?}");
+    }
+
+    #[test]
+    fn validate_flags_missing_transform_and_periodic_partner() {
+        // Surface 1 uses transform 9 (undefined); surface 2 is periodic with
+        // surface 8 (undefined). Surface 3 uses transform 4, which exists.
+        let m =
+            Model::parse("t\n1 0 -1\n\n1 9 SO 5\n2 -8 PX 0\n3 4 PY 0\n\nm1 1001 1\ntr4 0 0 0\n");
+        let problems = m.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("surface 1 references missing transform 9")),
+            "got: {problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("surface 2 is periodic with missing surface 8")),
+            "got: {problems:?}"
+        );
+        // The valid transform reference on surface 3 raises nothing.
+        assert!(
+            !problems.iter().any(|p| p.contains("surface 3")),
             "got: {problems:?}"
         );
     }

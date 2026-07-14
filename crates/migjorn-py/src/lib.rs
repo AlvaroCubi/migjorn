@@ -978,8 +978,10 @@ impl Model {
         Ok(removed)
     }
 
-    /// Check referential integrity: return a list of human-readable problems
-    /// (dangling surface/cell/material references), empty when consistent.
+    /// Check model consistency: return a list of human-readable problems,
+    /// empty when consistent. Reports duplicate cell/surface/material/transform
+    /// definitions, dangling surface/cell/material references from cells, and a
+    /// surface whose transform (or periodic partner surface) is undefined.
     fn validate(&self) -> Vec<String> {
         self.inner.validate()
     }

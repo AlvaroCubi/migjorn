@@ -10,7 +10,7 @@
 
 use crunchy_syntax::{GreenTree, SyntaxKind};
 
-use crate::cell::{cell_material, cell_params, scan_cell_refs, RefKind};
+use crate::cell::{cell_material, scan_cell_params, scan_cell_refs, RefKind};
 use crate::material::parse_material;
 use crate::num::parse_int;
 use crate::surface::{parse_surface, surface_id};
@@ -132,10 +132,13 @@ pub(crate) fn renumber_materials(tree: &mut GreenTree, mut map: impl FnMut(i64) 
 }
 
 /// Renumber every transform using `map` (old id → new id). Updates `TRn`/`*TRn`
-/// definitions and every surface's transform field (the periodic negative sign
-/// is preserved).
+/// definitions, every surface's transform field, a cell's `trcl=n`/`*trcl=n`
+/// reference, and each parenthesised single-number transform in a cell `fill=`
+/// value. Signs (periodic surface transform, negative `trcl`) are preserved;
+/// inline `trcl`/`fill` transform lists are left untouched.
 pub(crate) fn renumber_transforms(tree: &mut GreenTree, mut map: impl FnMut(i64) -> i64) {
     let ncards = tree.cards().len();
+    let mut edits: Vec<(u32, i64)> = Vec::new();
     for i in 0..ncards {
         // `TRn` / `*TRn` definition.
         if let Some(t) = parse_transform(tree, i) {
@@ -149,8 +152,78 @@ pub(crate) fn renumber_transforms(tree: &mut GreenTree, mut map: impl FnMut(i64)
                 let new = map(val.abs());
                 tree.set_token_int(tok, if val < 0 { -new } else { new });
             }
+            continue;
+        }
+        // Cell parameters that reference a transform: a bare `trcl=n`/`*trcl=n`
+        // and each parenthesised single-number transform group in a `fill=`
+        // value (`fill= u (n)` or a lattice entry `(n)`).
+        edits.clear();
+        scan_cell_params(tree, i, |p| {
+            let key = tree.token_text(p.keyword);
+            if key.eq_ignore_ascii_case("trcl") {
+                if let Some(tok) = trcl_transform_token(tree, p.value_tokens) {
+                    push_signed_ref_edit(tree, tok, &mut map, &mut edits);
+                }
+            } else if key.eq_ignore_ascii_case("fill") {
+                for tok in fill_transform_tokens(tree, p.value_tokens) {
+                    push_signed_ref_edit(tree, tok, &mut map, &mut edits);
+                }
+            }
+        });
+        for &(tok, val) in &edits {
+            tree.set_token_int(tok, val);
         }
     }
+}
+
+/// The transform-number token referenced by a `trcl=` value, or `None` when the
+/// value is an inline transform (a parenthesised or multi-number list) rather
+/// than a bare `TRn` reference.
+fn trcl_transform_token(tree: &GreenTree, values: &[u32]) -> Option<u32> {
+    let mut num = None;
+    for &t in values {
+        match tree.token_kind(t) {
+            SyntaxKind::NUMBER => {
+                if num.is_some() {
+                    return None; // more than one number => inline transform list
+                }
+                num = Some(t);
+            }
+            SyntaxKind::L_PAREN | SyntaxKind::R_PAREN => return None, // inline
+            _ => {}
+        }
+    }
+    num
+}
+
+/// The transform-number tokens inside a `fill=` value: each parenthesised group
+/// holding exactly one number (`fill= u (n)`, or a lattice entry `(n)`) is a
+/// `TRn` reference. Multi-number parens are inline transforms and are skipped.
+fn fill_transform_tokens(tree: &GreenTree, values: &[u32]) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < values.len() {
+        if tree.token_kind(values[i]) != SyntaxKind::L_PAREN {
+            i += 1;
+            continue;
+        }
+        // Collect the numbers up to the matching `)`.
+        let mut j = i + 1;
+        let mut only = None;
+        let mut count = 0u32;
+        while j < values.len() && tree.token_kind(values[j]) != SyntaxKind::R_PAREN {
+            if tree.token_kind(values[j]) == SyntaxKind::NUMBER {
+                count += 1;
+                only = Some(values[j]);
+            }
+            j += 1;
+        }
+        if count == 1 {
+            out.push(only.unwrap());
+        }
+        i = j + 1;
+    }
+    out
 }
 
 /// The universe-number tokens inside a `fill=` value list. Handles a simple
@@ -204,33 +277,32 @@ pub(crate) fn renumber_universes(tree: &mut GreenTree, mut map: impl FnMut(i64) 
     let mut edits: Vec<(u32, i64)> = Vec::new();
     for i in 0..ncards {
         edits.clear();
-        for p in cell_params(tree, i) {
-            let toks: &[u32] = match p.key.as_str() {
-                "U" => &p.value_tokens,
-                "FILL" => {
-                    for tok in fill_universe_tokens(tree, &p.value_tokens) {
-                        push_universe_edit(tree, tok, &mut map, &mut edits);
-                    }
-                    continue;
+        scan_cell_params(tree, i, |p| {
+            let key = tree.token_text(p.keyword);
+            if key.eq_ignore_ascii_case("u") {
+                // `u=` takes the first number (with sign preserved).
+                if let Some(&tok) = p
+                    .value_tokens
+                    .iter()
+                    .find(|&&t| tree.token_kind(t) == SyntaxKind::NUMBER)
+                {
+                    push_signed_ref_edit(tree, tok, &mut map, &mut edits);
                 }
-                _ => continue,
-            };
-            // `u=` takes the first number (with sign preserved).
-            if let Some(&tok) = toks
-                .iter()
-                .find(|&&t| tree.token_kind(t) == SyntaxKind::NUMBER)
-            {
-                push_universe_edit(tree, tok, &mut map, &mut edits);
+            } else if key.eq_ignore_ascii_case("fill") {
+                for tok in fill_universe_tokens(tree, p.value_tokens) {
+                    push_signed_ref_edit(tree, tok, &mut map, &mut edits);
+                }
             }
-        }
+        });
         for &(tok, val) in &edits {
             tree.set_token_int(tok, val);
         }
     }
 }
 
-/// Queue a renumber of the universe number at `tok` (sign preserved, 0 skipped).
-fn push_universe_edit(
+/// Queue a renumber of the signed reference number at `tok` (magnitude mapped,
+/// sign preserved, 0 skipped). Shared by universe and transform reference edits.
+fn push_signed_ref_edit(
     tree: &GreenTree,
     tok: u32,
     map: &mut impl FnMut(i64) -> i64,
@@ -465,6 +537,88 @@ mod tests {
         assert!(out.contains("*tr17 0 0 0")); // *TR definition, star preserved
         assert!(out.contains("1 13 PZ 50")); // surface transform field
         assert!(out.contains("2 -13 SO 5")); // periodic sign preserved
+    }
+
+    #[test]
+    fn renumber_transforms_updates_cell_trcl() {
+        // A bare `trcl=n` (and `*trcl=n`) references TR n; a negative sign is kept.
+        let src = "title\n1 0 -1 trcl=3 imp:n=1\n2 0 -2 *trcl=-3 imp:n=1\n\n1 SO 5\n2 SO 9\n\nm1 1001 1\ntr3 0 0 5\n";
+        let mut tree = parse(src).tree;
+        renumber_transforms(&mut tree, |id| id + 10);
+        let out = tree.to_source();
+        assert!(out.contains("tr13 0 0 5"), "def: {out}"); // definition
+        assert!(out.contains("1 0 -1 trcl=13 imp:n=1"), "trcl: {out}");
+        assert!(
+            out.contains("2 0 -2 *trcl=-13 imp:n=1"),
+            "*trcl sign: {out}"
+        );
+    }
+
+    #[test]
+    fn renumber_transforms_skips_inline_trcl() {
+        // An inline `trcl=(...)` is a transform *list*, not a reference: untouched.
+        let src = "title\n1 0 -1 trcl=(1 0 0) imp:n=1\n\n1 SO 5\n\nm1 1001 1\ntr1 0 0 5\n";
+        let mut tree = parse(src).tree;
+        renumber_transforms(&mut tree, |id| id + 10);
+        let out = tree.to_source();
+        assert!(out.contains("tr11 0 0 5")); // definition still renumbered
+        assert!(
+            out.contains("1 0 -1 trcl=(1 0 0) imp:n=1"),
+            "inline kept: {out}"
+        );
+    }
+
+    #[test]
+    fn renumber_transforms_updates_fill_transform() {
+        // A parenthesised single number after a fill universe is a TR reference;
+        // the universe itself must not be touched by the transform pass.
+        let src = "title\n1 0 -1 fill=5 (3) imp:n=1\n\n1 SO 5\n\nm1 1001 1\ntr3 0 0 5\n";
+        let mut tree = parse(src).tree;
+        renumber_transforms(&mut tree, |id| id + 10);
+        let out = tree.to_source();
+        assert!(out.contains("tr13 0 0 5")); // definition
+        assert!(
+            out.contains("1 0 -1 fill=5 (13) imp:n=1"),
+            "fill trcl: {out}"
+        );
+    }
+
+    #[test]
+    fn renumber_transforms_skips_inline_fill_transform() {
+        // A multi-number parenthesised group in fill is an inline transform: kept.
+        let src = "title\n1 0 -1 fill=5 (0 0 5) imp:n=1\n\n1 SO 5\n\nm1 1001 1\ntr1 0 0 5\n";
+        let mut tree = parse(src).tree;
+        renumber_transforms(&mut tree, |id| id + 10);
+        let out = tree.to_source();
+        assert!(out.contains("tr11 0 0 5")); // definition
+        assert!(
+            out.contains("1 0 -1 fill=5 (0 0 5) imp:n=1"),
+            "inline kept: {out}"
+        );
+    }
+
+    #[test]
+    fn renumber_transforms_lattice_fill_per_entry() {
+        // Lattice fill with a per-entry transform `(3)`: universe entries stay,
+        // only the transform reference is renumbered.
+        let src = "title\n1 0 -1 lat=1 fill=0:1 0:0 0:0 5 6 (3) imp:n=1\n\n1 SO 5\n\nm1 1001 1\ntr3 0 0 5\n";
+        let mut tree = parse(src).tree;
+        renumber_transforms(&mut tree, |id| id + 10);
+        let out = tree.to_source();
+        assert!(out.contains("tr13 0 0 5")); // definition
+                                             // Universes 5, 6 untouched; transform 3 -> 13.
+        assert!(
+            out.contains("fill=0:1 0:0 0:0 5 6 (13) imp:n=1"),
+            "lattice: {out}"
+        );
+    }
+
+    #[test]
+    fn renumber_transforms_is_otherwise_lossless() {
+        let src = "title\n1 0 -1 trcl=3 fill=5 (3) imp:n=1\n\n1 3 SO 5\n\nm1 1001 1\ntr3 0 0 5\n";
+        let mut tree = parse(src).tree;
+        renumber_transforms(&mut tree, |id| id);
+        assert_eq!(tree.to_source(), src);
     }
 
     #[test]

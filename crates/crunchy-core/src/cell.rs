@@ -441,8 +441,6 @@ pub(crate) fn cells(tree: &GreenTree) -> impl Iterator<Item = Cell> + '_ {
 pub struct CellParam {
     /// Uppercased keyword without any `:particle` designator (e.g. `"U"`).
     pub key: String,
-    /// The value tokens (numbers, colons, parens, …) belonging to this keyword.
-    pub(crate) value_tokens: Vec<u32>,
     /// First CST token of the whole entry (the `*` prefix or the keyword).
     pub(crate) start_token: u32,
     /// Last CST token of the whole entry (the last value token, or the keyword
@@ -467,37 +465,77 @@ fn is_keyword_start(tree: &GreenTree, toks: &[u32], j: usize) -> bool {
     k < toks.len() && tree.token_kind(toks[k]) == SyntaxKind::EQ
 }
 
-/// Parse the parameter section (after the geometry) of the cell at `card_index`
-/// into `keyword=value…` entries. Empty for non-cells, `LIKE n BUT` cells, or
-/// cells without parameters. Keywords may carry a `*` prefix (`*fill`, `*trcl`)
-/// and a `:particle` designator (`imp:n`); both are handled.
-pub(crate) fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam> {
-    let Some(cell) = parse_cell(tree, card_index) else {
-        return Vec::new();
-    };
-    let Some(params_start) = cell.params_start else {
-        return Vec::new();
-    };
+/// One cell parameter entry as borrowed CST token spans, yielded by
+/// [`scan_cell_params`] without allocation.
+pub(crate) struct ParamSpan<'a> {
+    /// The `*` prefix token (`*fill`, `*trcl`), if present.
+    pub(crate) star: Option<u32>,
+    /// The keyword IDENT token. Its text is the un-uppercased key (`fill`),
+    /// excluding any `*` prefix and `:particle` designator.
+    pub(crate) keyword: u32,
+    /// The value tokens (numbers, colons, parens, …) after `key[:particle]=`.
+    pub(crate) value_tokens: &'a [u32],
+    /// Last token of the whole entry (last value token, or the keyword/particle
+    /// for a value-less flag).
+    pub(crate) end: u32,
+}
+
+/// Scan the parameter section of the cell at `card_index`, invoking
+/// `visit(ParamSpan)` once per `keyword=value…` entry. Does nothing for
+/// non-cells, `LIKE n BUT` cells without params, or cells without parameters.
+///
+/// Allocation-light and, crucially, **override-free while locating the params**:
+/// it skips the header and geometry using [`GreenTree::token_kind`] (a plain
+/// array index) alone, touching [`GreenTree::token_text`] only inside `visit`.
+/// This matters for bulk passes over a model whose override overlay is large —
+/// `token_text` is the only reader that probes that map. Keywords may carry a
+/// `*` prefix (`*fill`, `*trcl`) and a `:particle` designator (`imp:n`).
+pub(crate) fn scan_cell_params(
+    tree: &GreenTree,
+    card_index: usize,
+    mut visit: impl FnMut(ParamSpan<'_>),
+) {
     let card = tree.cards()[card_index];
+    if card.kind != SyntaxKind::CELL_CARD {
+        return;
+    }
     let toks: Vec<u32> = tree
         .card_content_tokens(&card)
         .filter(|&i| tree.token_kind(i) != SyntaxKind::AMP)
         .collect();
-    let Some(mut j) = toks.iter().position(|&t| t == params_start) else {
-        return Vec::new();
-    };
     let n = toks.len();
-    let mut params = Vec::new();
+
+    // Params begin at the first keyword start (optionally `*`-prefixed). The
+    // header (id/material/density) and geometry contain no IDENTs, and a
+    // `LIKE n BUT` cell's `LIKE`/`BUT` IDENTs are not keyword starts, so the
+    // first keyword start is unambiguously where parameters begin — found with
+    // token kinds alone, no `token_text`.
+    let mut j = 0;
     while j < n {
-        let start_token = toks[j];
-        // A keyword may be prefixed with `*` (e.g. `*fill`, `*trcl`).
-        if tree.token_kind(toks[j]) == SyntaxKind::STAR {
-            j += 1;
+        let is_start = match tree.token_kind(toks[j]) {
+            SyntaxKind::STAR => j + 1 < n && is_keyword_start(tree, &toks, j + 1),
+            SyntaxKind::IDENT => is_keyword_start(tree, &toks, j),
+            _ => false,
+        };
+        if is_start {
+            break;
         }
+        j += 1;
+    }
+
+    while j < n {
+        // A keyword may be prefixed with `*` (e.g. `*fill`, `*trcl`).
+        let star = if tree.token_kind(toks[j]) == SyntaxKind::STAR {
+            let s = toks[j];
+            j += 1;
+            Some(s)
+        } else {
+            None
+        };
         if j >= n || tree.token_kind(toks[j]) != SyntaxKind::IDENT {
             break;
         }
-        let key = tree.token_text(toks[j]).to_ascii_uppercase();
+        let keyword = toks[j];
         j += 1;
         // Optional `:particle`.
         if j < n && tree.token_kind(toks[j]) == SyntaxKind::COLON {
@@ -522,13 +560,28 @@ pub(crate) fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam>
             }
             j += 1;
         }
-        params.push(CellParam {
-            key,
-            value_tokens: toks[vstart..j].to_vec(),
-            start_token,
-            end_token: toks[j - 1],
+        visit(ParamSpan {
+            star,
+            keyword,
+            value_tokens: &toks[vstart..j],
+            end: toks[j - 1],
         });
     }
+}
+
+/// Parse the parameter section (after the geometry) of the cell at `card_index`
+/// into owned `keyword=value…` entries. Empty for non-cells, `LIKE n BUT` cells,
+/// or cells without parameters. Built on [`scan_cell_params`]; prefer that
+/// directly in bulk passes where the owned `Vec` is not needed.
+pub(crate) fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam> {
+    let mut params = Vec::new();
+    scan_cell_params(tree, card_index, |p| {
+        params.push(CellParam {
+            key: tree.token_text(p.keyword).to_ascii_uppercase(),
+            start_token: p.star.unwrap_or(p.keyword),
+            end_token: p.end,
+        });
+    });
     params
 }
 

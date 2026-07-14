@@ -1,21 +1,28 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/crunchy-syntax",
-    "crates/crunchy-core",
-    "crates/crunchy-py",
+    "crates/migjorn-syntax",
+    "crates/migjorn",
+    "crates/migjorn-py",
 ]
 
 [workspace.package]
 edition = "2021"
-version = "0.0.0"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/AlvaroCubi/crunchy"
+version = "0.2.0"
+license = "EUPL-1.2"
+authors = ["Alvaro Cubi <alvaro.cubi.ricart@gmail.com>"]
+repository = "https://github.com/Fusion4Energy/migjorn"
+
+[workspace.dependencies]
+# Versioned path dep so `cargo publish -p migjorn` resolves it on crates.io
+# (path is used locally; version is used when published). Keep the version in
+# lockstep with workspace.package.version — the release workflow bumps both.
+migjorn-syntax = { path = "crates/migjorn-syntax", version = "0.2.0" }
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-# NB: no `panic = "abort"` — the Python extension (crunchy-py) needs panics to
+# NB: no `panic = "abort"` — the Python extension (migjorn-py) needs panics to
 # unwind so PyO3 can turn them into Python exceptions at the FFI boundary rather
 # than aborting the host process.

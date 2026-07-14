@@ -1,0 +1,19 @@
+---
+source: crates/migjorn-syntax/tests/corpus.rs
+expression: summary(&src)
+input_file: crates/migjorn-syntax/tests/corpus/data/materials_and_tallies.mcnp
+---
+TITLE_CARD   | Data cards : materials with options, thermal scattering, tallies with particles
+CELL_CARD    | 1 1 -1.0 -1 imp : n = 1 imp : p = 1
+CELL_CARD    | 2 0 1 imp : n = 0 imp : p = 0
+SURFACE_CARD | 1 SO 5
+DATA_CARD    | m1 1001.31c 0.667 8016.31c 0.333 gas = 0
+DATA_CARD    | mt1 lwtr.10t
+DATA_CARD    | m2 6000.31c -0.5 26000.55c -0.5
+DATA_CARD    | tr1 0 0 5
+DATA_CARD    | mode n p
+DATA_CARD    | f4 : n 1
+DATA_CARD    | * f1 : p 1
+DATA_CARD    | sdef pos = 0 0 0 erg = 14
+--
+diagnostics: none

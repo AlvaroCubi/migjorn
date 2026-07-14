@@ -8,7 +8,7 @@ byte — comments, spacing, continuations — is re-emitted exactly. Overrides u
 `i64` values where possible, so bulk numeric edits allocate nothing per token
 (digits are written straight into the output on `to_source`).
 
-`crunchy-core::renumber_surfaces` / `renumber_cells` take a mapping
+`migjorn::renumber_surfaces` / `renumber_cells` take a mapping
 `old id -> new id` and update **definitions and every reference** consistently:
 
 - surfaces: each surface card id, and every signed surface in cell geometry

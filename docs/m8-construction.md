@@ -3,7 +3,7 @@
 ## Capability
 
 Whole cards can now be created and removed. New cards are given as MCNP text;
-crunchy validates, appends them to the right block, and returns a **live handle**
+migjorn validates, appends them to the right block, and returns a **live handle**
 that behaves like any other (readable and editable). Removal deletes a card by
 number, preserving the surrounding structure.
 

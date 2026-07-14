@@ -1,9 +1,0 @@
-[package]
-name = "crunchy-core"
-edition.workspace = true
-version.workspace = true
-license.workspace = true
-
-[dependencies]
-crunchy-syntax = { path = "../crunchy-syntax" }
-rustc-hash = "2"

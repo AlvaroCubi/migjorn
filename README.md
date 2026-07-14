@@ -1,4 +1,8 @@
-# crunchy
+# Migjorn
+
+<p align="center">
+  <img src="assets/logo.png" alt="Migjorn logo" width="200">
+</p>
 
 A fast, **lossless**, general-purpose MCNP input parser in Rust, with Python
 bindings.
@@ -18,14 +22,14 @@ bindings.
 
 | Crate | Purpose |
 |---|---|
-| `crunchy-syntax` | Lexer + lossless concrete syntax tree (CST) + edit overlay |
-| `crunchy-core` | Typed AST (`Model`, `Cell`, `Surface`, …) + renumbering |
-| `crunchy-py` | Python bindings (PyO3 + maturin, `abi3` wheels) |
+| `migjorn-syntax` | Lexer + lossless concrete syntax tree (CST) + edit overlay |
+| `migjorn` | Typed AST (`Model`, `Cell`, `Surface`, …) + renumbering |
+| `migjorn-py` | Python bindings (PyO3 + maturin, `abi3` wheels) |
 
 ## Rust
 
 ```rust
-use crunchy_core::Model;
+use migjorn::Model;
 
 let mut model = Model::parse(std::fs::read_to_string("model.mcnp")?);
 for s in model.surfaces() {
@@ -38,8 +42,8 @@ std::fs::write("out.mcnp", model.to_source())?;
 ## Python
 
 ```python
-import crunchy
-model = crunchy.Model.from_file("model.mcnp")
+import migjorn
+model = migjorn.Model.from_file("model.mcnp")
 print(model.surface(113).coeffs)
 model.offset_surfaces(1_000_000)     # or model.renumber_surfaces({1: 100, ...})
 model.save("out.mcnp")
@@ -49,16 +53,16 @@ Run the example with [uv](https://docs.astral.sh/uv/) — it builds the extensio
 for you:
 
 ```bash
-uv run crates/crunchy-py/examples/crunchy_demo.py
+uv run crates/migjorn-py/examples/migjorn_demo.py
 ```
 
 Or build/install manually with maturin:
 
 ```bash
-pip install maturin && (cd crates/crunchy-py && maturin develop --release)
+pip install maturin && (cd crates/migjorn-py && maturin develop --release)
 ```
 
-See `crates/crunchy-py/README.md` for the full Python API and more uv commands.
+See `crates/migjorn-py/README.md` for the full Python API and more uv commands.
 
 ## Testing
 
@@ -67,7 +71,7 @@ cargo test                      # Rust unit + corpus snapshot tests
 ```
 
 Regression corpus: drop any `.mcnp` file (or a one-card snippet) into
-`crates/crunchy-syntax/tests/corpus/` and run `cargo insta review` — it is
+`crates/migjorn-syntax/tests/corpus/` and run `cargo insta review` — it is
 asserted lossless and snapshotted automatically, no test code required.
 
 Design notes and benchmark results: `docs/`.

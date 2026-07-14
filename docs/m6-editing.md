@@ -8,8 +8,8 @@ snapshots. Each `Cell`/`Surface`/`Material`/`Transform` holds a reference to its
 setters write straight through the lossless override overlay.
 
 ```python
-import crunchy
-model = crunchy.parse(text)
+import migjorn
+model = migjorn.parse(text)
 
 for cell in model.cells:
     if "$ vacuum vessel" in cell.text:   # raw card source, incl. inline $ comments

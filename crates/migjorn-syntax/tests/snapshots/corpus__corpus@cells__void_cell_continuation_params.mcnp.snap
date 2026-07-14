@@ -1,0 +1,14 @@
+---
+source: crates/migjorn-syntax/tests/corpus.rs
+expression: summary(&src)
+input_file: crates/migjorn-syntax/tests/corpus/cells/void_cell_continuation_params.mcnp
+---
+TITLE_CARD   | GEOUNED-style void cell
+CELL_CARD    | 57000001 0 57000001 -57000006 -57000005 -57000004 imp : n = 1.0 imp : p = 1.0 U = 57000001
+SURFACE_CARD | 57000001 SO 5
+SURFACE_CARD | 57000004 PX 0
+SURFACE_CARD | 57000005 PY 0
+SURFACE_CARD | 57000006 PZ 0
+DATA_CARD    | m1 1001 1
+--
+diagnostics: none

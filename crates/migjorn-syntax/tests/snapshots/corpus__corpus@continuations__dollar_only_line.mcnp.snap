@@ -1,0 +1,13 @@
+---
+source: crates/migjorn-syntax/tests/corpus.rs
+expression: summary(&src)
+input_file: crates/migjorn-syntax/tests/corpus/continuations/dollar_only_line.mcnp
+---
+TITLE_CARD   | Regression : an indented
+CELL_CARD    | 427004 0 ( 427015 -427001 ) imp : n = 1 imp : p = 1 427018 427022 ( -428634 : 428635 : 428629 )
+CELL_CARD    | 427005 0 -427001 imp : n = 1
+SURFACE_CARD | 1 PX 0
+SURFACE_CARD | 2 SO 5
+DATA_CARD    | m1 1001.31c 1
+--
+diagnostics: none

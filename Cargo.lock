@@ -61,31 +61,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crunchy-core"
-version = "0.0.0"
-dependencies = [
- "crunchy-syntax",
- "rustc-hash",
-]
-
-[[package]]
-name = "crunchy-py"
-version = "0.0.0"
-dependencies = [
- "crunchy-core",
- "pyo3",
- "rustc-hash",
-]
-
-[[package]]
-name = "crunchy-syntax"
-version = "0.0.0"
-dependencies = [
- "insta",
- "rustc-hash",
-]
-
-[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -197,6 +172,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "migjorn"
+version = "0.2.0"
+dependencies = [
+ "migjorn-syntax",
+ "rustc-hash",
+]
+
+[[package]]
+name = "migjorn-py"
+version = "0.2.0"
+dependencies = [
+ "migjorn",
+ "pyo3",
+ "rustc-hash",
+]
+
+[[package]]
+name = "migjorn-syntax"
+version = "0.2.0"
+dependencies = [
+ "insta",
+ "rustc-hash",
 ]
 
 [[package]]

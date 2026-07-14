@@ -1,0 +1,13 @@
+---
+source: crates/migjorn-syntax/tests/corpus.rs
+expression: summary(&src)
+input_file: crates/migjorn-syntax/tests/corpus/surfaces/macrobody_ampersand.mcnp
+---
+TITLE_CARD   | Surfaces : an RPP macrobody continued with trailing ampersands, then comments
+CELL_CARD    | 1 0 -158214 imp : n = 1
+CELL_CARD    | 2 0 158214 imp : n = 0
+SURFACE_CARD | 158214 RPP +558.36 +902.00 & -428.58 -105.42 & +438.70 +662.54
+SURFACE_CARD | 159000 PZ 1808
+DATA_CARD    | m1 1001 1
+--
+diagnostics: none

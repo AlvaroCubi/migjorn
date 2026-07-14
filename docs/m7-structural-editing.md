@@ -23,12 +23,12 @@ The lossless engine still can't insert or delete tokens, so structural edits use
 a second overlay at **card granularity**:
 
 - On first structural edit a cell is **promoted** to an owned, typed node
-  (`OwnedCell` in `crunchy-core`): `{ id, material, density, geometry, params_text }`.
+  (`OwnedCell` in `migjorn`): `{ id, material, density, geometry, params_text }`.
   `geometry` is the editable `GeomExpr` boolean tree; `params_text` is the
   verbatim tail (`imp`, `u`, `fill`, ...) captured from the source so editing the
   geometry never drops it.
 - Editing mutates the `GeomExpr` tree and re-emits the card body via the
-  **card emitter** (`crunchy-core::emit`), which honours MCNP precedence
+  **card emitter** (`migjorn::emit`), which honours MCNP precedence
   (`#` tightest, juxtaposition intersection, `:` union) and parenthesises where
   needed.
 - The emitted text is stored in the CST as a `slot -> text` **card replacement**

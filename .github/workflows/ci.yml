@@ -25,11 +25,11 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
-        # crunchy-py is a Python extension; it is built and linted in the Python
+        # migjorn-py is a Python extension; it is built and linted in the Python
         # job (it needs a Python toolchain). Everything else is pure Rust.
-        run: cargo clippy --workspace --exclude crunchy-py --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude migjorn-py --all-targets -- -D warnings
       - name: test
-        run: cargo test --workspace --exclude crunchy-py
+        run: cargo test --workspace --exclude migjorn-py
 
   ruff:
     name: Python lint (ruff)
@@ -39,9 +39,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       # Pinned so a new ruff release can't fail CI unexpectedly; bump deliberately.
       - name: ruff lint
-        run: uvx ruff@0.15.21 check crates/crunchy-py
+        run: uvx ruff@0.15.21 check crates/migjorn-py
       - name: ruff format
-        run: uvx ruff@0.15.21 format --check crates/crunchy-py
+        run: uvx ruff@0.15.21 format --check crates/migjorn-py
 
   python:
     name: Python (bindings + stub drift)
@@ -53,7 +53,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       # Builds the extension via maturin and installs it non-editably (so the
       # type stubs land on disk), then runs the binding tests and the stub-drift
-      # check (tests/test_stubs.py) which fails if crunchy/__init__.pyi and the
+      # check (tests/test_stubs.py) which fails if migjorn/__init__.pyi and the
       # runtime API disagree.
       - name: Build, install & test
-        run: uv run --no-project --with ./crates/crunchy-py --with pytest pytest crates/crunchy-py/tests -q
+        run: uv run --no-project --with ./crates/migjorn-py --with pytest pytest crates/migjorn-py/tests -q

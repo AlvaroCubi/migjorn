@@ -1,0 +1,52 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "migjorn"
+description = "A fast, lossless MCNP input parser with whole-geometry editing."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "EUPL-1.2" }
+license-files = ["LICENSE"]
+authors = [{ name = "Alvaro Cubi", email = "alvaro.cubi.ricart@gmail.com" }]
+keywords = ["mcnp", "parser", "monte-carlo", "neutronics"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+# Everything needed to run the example notebook:
+#   uv run --with "./crates/migjorn-py[notebook]" jupyter lab ...
+notebook = ["jupyterlab", "ipykernel", "nbconvert"]
+
+[project.urls]
+Repository = "https://github.com/Fusion4Energy/migjorn"
+
+[dependency-groups]
+# Installed by `uv sync` / `uv run` by default (alongside the migjorn
+# build itself), so a plain `uv run pytest` works out of the box.
+dev = ["pytest"]
+
+[tool.maturin]
+# The compiled extension is the private `migjorn._migjorn` submodule; the public
+# `migjorn` package lives in python/migjorn and carries the type stubs. Build
+# stable abi3 wheels so one wheel serves CPython 3.9+.
+module-name = "migjorn._migjorn"
+features = ["pyo3/extension-module"]
+python-source = "python"
+
+[tool.ruff]
+target-version = "py39"
+# Notebooks are demo artifacts with pre-computed outputs; don't format them.
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+# Keep the re-export imports (`X as X`) in a single combined block.
+combine-as-imports = true

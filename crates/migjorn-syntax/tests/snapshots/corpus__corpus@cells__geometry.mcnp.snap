@@ -1,0 +1,20 @@
+---
+source: crates/migjorn-syntax/tests/corpus.rs
+expression: summary(&src)
+input_file: crates/migjorn-syntax/tests/corpus/cells/geometry.mcnp
+---
+TITLE_CARD   | Cell geometry : unions, intersections, complements, nested parens, LIKE
+CELL_CARD    | 1 1 -2.0 ( -1 : -2 ) 3 # 4 # ( 5 -6 ) imp : n = 1 imp : p = 1
+CELL_CARD    | 2 0 -3 imp : n = 0
+CELL_CARD    | 4 1 -2.0 -5 6 -7
+CELL_CARD    | 10 LIKE 1 BUT mat = 2 rho = -3.5
+SURFACE_CARD | 1 SO 5
+SURFACE_CARD | 2 PX 0
+SURFACE_CARD | 3 PY 0
+SURFACE_CARD | 5 CZ 2
+SURFACE_CARD | 6 CZ 4
+SURFACE_CARD | 7 PZ 10
+DATA_CARD    | m1 1001 1
+DATA_CARD    | m2 6000 1
+--
+diagnostics: none

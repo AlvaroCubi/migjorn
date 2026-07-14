@@ -1,0 +1,14 @@
+[package]
+name = "migjorn"
+description = "A fast, lossless MCNP input parser with whole-geometry editing."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords = ["mcnp", "parser", "nuclear", "simulation"]
+categories = ["parser-implementations", "science"]
+
+[dependencies]
+migjorn-syntax = { workspace = true }
+rustc-hash = "2"

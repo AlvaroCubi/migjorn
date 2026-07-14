@@ -23,7 +23,7 @@ model.renumber_tallies({4: 24})        # the tally ids themselves
 ## How
 
 All of these follow the existing pass-over-cards + token-override pattern
-(`crunchy-core/src/renumber.rs`), so untouched bytes stay exact and re-emission
+(`migjorn/src/renumber.rs`), so untouched bytes stay exact and re-emission
 is a single linear pass.
 
 - **Mnemonic numbers** (`m6`, `MT6`, `tr3`, `f4`, `e4`, …) are rewritten

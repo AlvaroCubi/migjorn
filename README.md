@@ -41,6 +41,10 @@ std::fs::write("out.mcnp", model.to_source())?;
 
 ## Python
 
+```bash
+pip install migjorn
+```
+
 ```python
 import migjorn
 model = migjorn.Model.from_file("model.mcnp")
@@ -49,17 +53,11 @@ model.offset_surfaces(1_000_000)     # or model.renumber_surfaces({1: 100, ...})
 model.save("out.mcnp")
 ```
 
-Run the example with [uv](https://docs.astral.sh/uv/) — it builds the extension
-for you:
+To build from source instead, run the example with
+[uv](https://docs.astral.sh/uv/) — it builds the extension for you:
 
 ```bash
 uv run crates/migjorn-py/examples/migjorn_demo.py
-```
-
-Or build/install manually with maturin:
-
-```bash
-pip install maturin && (cd crates/migjorn-py && maturin develop --release)
 ```
 
 See `crates/migjorn-py/README.md` for the full Python API and more uv commands.

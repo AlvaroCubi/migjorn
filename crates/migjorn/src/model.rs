@@ -1821,7 +1821,8 @@ sdef pos=0 0 0
         assert_eq!(m.add_cell("10 0"), Err(EditError::InvalidCardText)); // no geometry
         assert_eq!(m.add_cell("10 0 -5 :"), Err(EditError::InvalidCardText)); // dangling op
         assert_eq!(m.add_surface("10 SO abc"), Err(EditError::InvalidCardText)); // bad coeff
-        assert_eq!(m.add_data_card("m7 1001"), Err(EditError::InvalidCardText)); // no fraction
+        assert_eq!(m.add_data_card("m7 1001"), Err(EditError::InvalidCardText));
+        // no fraction
     }
 
     #[test]

@@ -1158,14 +1158,18 @@ fn validate_snippet(text: &str, kind: SyntaxKind) -> Result<(), EditError> {
         return Err(EditError::InvalidCardText);
     }
     let i = of_kind[0];
+    // A typed projection returns `Some` even for malformed-but-recognizable
+    // input (empty/garbage geometry, non-numeric coefficients, a dangling
+    // ZAID), flagging it via `well_formed`. Reject anything not well-formed so
+    // we never splice a card that would not round-trip through its typed view.
     let ok = match kind {
-        SyntaxKind::CELL_CARD => parse_cell(&tree, i).is_some(),
-        SyntaxKind::SURFACE_CARD => parse_surface(&tree, i).is_some(),
+        SyntaxKind::CELL_CARD => parse_cell(&tree, i).is_some_and(|c| c.well_formed),
+        SyntaxKind::SURFACE_CARD => parse_surface(&tree, i).is_some_and(|s| s.well_formed),
         // Materials must parse as such; other data cards are accepted as-is.
         SyntaxKind::DATA_CARD => {
             let looks_material = text.trim_start().to_ascii_uppercase().starts_with('M')
                 && !text.trim_start().to_ascii_uppercase().starts_with("MODE");
-            !looks_material || parse_material(&tree, i).is_some()
+            !looks_material || parse_material(&tree, i).is_some_and(|m| m.well_formed)
         }
         _ => false,
     };
@@ -1807,6 +1811,17 @@ sdef pos=0 0 0
             m.add_surface("10 1 -2.0 -1"),
             Err(EditError::InvalidCardText)
         );
+    }
+
+    #[test]
+    fn add_rejects_malformed_but_recognizable_cards() {
+        // These parse into a typed view but with `well_formed == false`; they
+        // must be rejected rather than spliced in (see validate_snippet).
+        let mut m = Model::parse(MODEL);
+        assert_eq!(m.add_cell("10 0"), Err(EditError::InvalidCardText)); // no geometry
+        assert_eq!(m.add_cell("10 0 -5 :"), Err(EditError::InvalidCardText)); // dangling op
+        assert_eq!(m.add_surface("10 SO abc"), Err(EditError::InvalidCardText)); // bad coeff
+        assert_eq!(m.add_data_card("m7 1001"), Err(EditError::InvalidCardText)); // no fraction
     }
 
     #[test]

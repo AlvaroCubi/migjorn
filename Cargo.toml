@@ -11,7 +11,7 @@ edition = "2021"
 version = "0.2.0"
 license = "EUPL-1.2"
 authors = ["Alvaro Cubi <alvaro.cubi.ricart@gmail.com>"]
-repository = "https://github.com/Fusion4Energy/migjorn"
+repository = "https://github.com/AlvaroCubi/migjorn"
 
 [workspace.dependencies]
 # Versioned path dep so `cargo publish -p migjorn` resolves it on crates.io

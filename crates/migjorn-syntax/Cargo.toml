@@ -1,5 +1,6 @@
 [package]
 name = "migjorn-syntax"
+description = "Lossless syntax layer (lexer + concrete syntax tree) for the migjorn MCNP parser."
 edition.workspace = true
 version.workspace = true
 license.workspace = true

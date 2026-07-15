@@ -434,6 +434,133 @@ pub(crate) fn cells(tree: &GreenTree) -> impl Iterator<Item = Cell> + '_ {
     (0..tree.cards().len()).filter_map(move |i| parse_cell(tree, i))
 }
 
+/// A parsed `fill=` parameter of a cell (the simple, single-universe form).
+///
+/// Lattice fills (`fill= i:j …`) are not modelled here; [`parse_fill`] reports
+/// their first universe entry and no transform.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fill {
+    /// The universe number that fills the cell.
+    pub universe: i64,
+    /// True when written as `*fill` (transform angles given in degrees).
+    pub starred: bool,
+    /// The raw text inside the `fill= u (…)` parentheses, if any — either a
+    /// `TRn` reference number or an inline transform list, tokens joined by
+    /// single spaces. `None` when the fill carries no transform.
+    pub transform: Option<String>,
+}
+
+/// Read the `u=` universe of the cell at `card_index` (the first `u=` value,
+/// sign preserved), or `None` if the cell has no `u=` parameter.
+pub(crate) fn cell_universe(tree: &GreenTree, card_index: usize) -> Option<i64> {
+    let mut result = None;
+    scan_cell_params(tree, card_index, |p| {
+        if result.is_some() {
+            return;
+        }
+        if tree.token_text(p.keyword).eq_ignore_ascii_case("u") {
+            if let Some(&tok) = p
+                .value_tokens
+                .iter()
+                .find(|&&t| tree.token_kind(t) == SyntaxKind::NUMBER)
+            {
+                result = parse_int(&tree.token_text(tok));
+            }
+        }
+    });
+    result
+}
+
+/// Read a `trcl=` transform *reference* of the cell at `card_index`: the `TRn`
+/// number when the parameter is a bare reference (`trcl=3`), or `None` when the
+/// cell has no `trcl`, or when `trcl` carries an inline transform list
+/// (`trcl=(...)`) rather than a reference. The sign is dropped.
+pub(crate) fn cell_trcl_transform(tree: &GreenTree, card_index: usize) -> Option<i64> {
+    let mut result = None;
+    scan_cell_params(tree, card_index, |p| {
+        if result.is_some() || !tree.token_text(p.keyword).eq_ignore_ascii_case("trcl") {
+            return;
+        }
+        // A bare `TRn` reference is a single NUMBER value with no `(` group.
+        let has_paren = p
+            .value_tokens
+            .iter()
+            .any(|&t| tree.token_kind(t) == SyntaxKind::L_PAREN);
+        let nums: Vec<u32> = p
+            .value_tokens
+            .iter()
+            .copied()
+            .filter(|&t| tree.token_kind(t) == SyntaxKind::NUMBER)
+            .collect();
+        if !has_paren && nums.len() == 1 {
+            result = parse_int(&tree.token_text(nums[0])).map(i64::abs);
+        }
+    });
+    result
+}
+
+/// Read the `fill=`/`*fill=` of the cell at `card_index` (simple single-universe
+/// form), or `None` if the cell has no `fill=` parameter.
+pub(crate) fn parse_fill(tree: &GreenTree, card_index: usize) -> Option<Fill> {
+    let mut fill = None;
+    scan_cell_params(tree, card_index, |p| {
+        if fill.is_some() || !tree.token_text(p.keyword).eq_ignore_ascii_case("fill") {
+            return;
+        }
+        // Universe: the first NUMBER before any parenthesised group.
+        let mut universe = None;
+        for &t in p.value_tokens {
+            match tree.token_kind(t) {
+                SyntaxKind::NUMBER => {
+                    universe = parse_int(&tree.token_text(t));
+                    break;
+                }
+                SyntaxKind::L_PAREN => break,
+                _ => {}
+            }
+        }
+        let Some(universe) = universe else {
+            return;
+        };
+        fill = Some(Fill {
+            universe,
+            starred: p.star.is_some(),
+            transform: paren_group_text(tree, p.value_tokens),
+        });
+    });
+    fill
+}
+
+/// The text inside the first parenthesised group of a value token list, tokens
+/// joined by single spaces (e.g. `u (0 0 5)` → `"0 0 5"`, `u (3)` → `"3"`), or
+/// `None` when there is no `(`.
+fn paren_group_text(tree: &GreenTree, values: &[u32]) -> Option<String> {
+    let start = values
+        .iter()
+        .position(|&t| tree.token_kind(t) == SyntaxKind::L_PAREN)?;
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    for &t in &values[start..] {
+        match tree.token_kind(t) {
+            SyntaxKind::L_PAREN => {
+                depth += 1;
+                if depth == 1 {
+                    continue; // skip the opening paren of the outer group
+                }
+            }
+            SyntaxKind::R_PAREN => {
+                depth -= 1;
+                if depth == 0 {
+                    break; // closed the outer group
+                }
+            }
+            _ => {}
+        }
+        parts.push(tree.token_text(t).into_owned());
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
 /// One `keyword=value…` entry from a cell's parameter section (`imp`, `vol`,
 /// `u`, `fill`, `trcl`, …). The value tokens are the meaningful tokens up to the
 /// next keyword; interpretation is left to callers (e.g. universe renumbering).
@@ -999,5 +1126,58 @@ mod tests {
         assert_eq!(oc.cell_refs(), vec![7]);
         assert!(oc.geometry.remove_cell_complement(7));
         assert_eq!(oc.cell_refs(), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn reads_universe() {
+        let t = model("1 0 -1 u=5 imp:n=1");
+        let ci = first_cell(&t).card_index;
+        assert_eq!(cell_universe(&t, ci), Some(5));
+
+        let t = model("1 0 -1 imp:n=1");
+        let ci = first_cell(&t).card_index;
+        assert_eq!(cell_universe(&t, ci), None);
+    }
+
+    #[test]
+    fn reads_simple_fill_without_transform() {
+        let t = model("1 0 -1 fill=7 imp:n=1");
+        let ci = first_cell(&t).card_index;
+        let f = parse_fill(&t, ci).unwrap();
+        assert_eq!(
+            f,
+            Fill {
+                universe: 7,
+                starred: false,
+                transform: None
+            }
+        );
+    }
+
+    #[test]
+    fn reads_fill_with_tr_reference() {
+        let t = model("1 0 -1 fill=7 (40) imp:n=1");
+        let ci = first_cell(&t).card_index;
+        let f = parse_fill(&t, ci).unwrap();
+        assert_eq!(f.universe, 7);
+        assert!(!f.starred);
+        assert_eq!(f.transform.as_deref(), Some("40"));
+    }
+
+    #[test]
+    fn reads_starred_fill_with_inline_transform() {
+        let t = model("1 0 -1 *fill=7 (0 0 5 90 90 0) imp:n=1");
+        let ci = first_cell(&t).card_index;
+        let f = parse_fill(&t, ci).unwrap();
+        assert_eq!(f.universe, 7);
+        assert!(f.starred);
+        assert_eq!(f.transform.as_deref(), Some("0 0 5 90 90 0"));
+    }
+
+    #[test]
+    fn no_fill_reads_none() {
+        let t = model("1 0 -1 u=5 imp:n=1");
+        let ci = first_cell(&t).card_index;
+        assert!(parse_fill(&t, ci).is_none());
     }
 }

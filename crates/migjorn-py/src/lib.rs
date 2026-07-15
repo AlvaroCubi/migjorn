@@ -31,6 +31,24 @@ fn edit_error(e: core::EditError) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
+pyo3::create_exception!(
+    _migjorn,
+    MergeError,
+    PyValueError,
+    "Raised by `Model.merge` when the merged models share a cell, surface, \
+     material, or transform id. A subclass of `ValueError`."
+);
+
+/// Map merge id-collisions to a `MergeError` whose message lists every conflict.
+fn merge_error(conflicts: &[core::MergeConflict]) -> PyErr {
+    let msg = conflicts
+        .iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    MergeError::new_err(format!("cannot merge: {msg}"))
+}
+
 /// A cell card (a live handle onto its model).
 ///
 /// Attributes:
@@ -46,6 +64,8 @@ fn edit_error(e: core::EditError) -> PyErr {
 ///     surface_ids (list[int]): Referenced surface numbers (magnitudes).
 ///     signed_surfaces (list[int]): Referenced surfaces with sense (sign).
 ///     cell_refs (list[int]): Referenced cells (``#n`` complements, ``LIKE n``).
+///     universe (int | None): The cell's ``u=`` universe, or None if unset.
+///     fill (Fill | None): The cell's ``fill=`` parameter (simple form), or None.
 ///     well_formed (bool): False if the geometry could not be fully parsed.
 ///     text (str): The card's exact source (incl. inline ``$`` comments),
 ///         reflecting any edits.
@@ -133,6 +153,24 @@ impl Cell {
         self.read(py, |c| c.cell_refs())
     }
     #[getter]
+    fn universe(&self, py: Python<'_>) -> PyResult<Option<i64>> {
+        let m = self.model.bind(py).borrow();
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        Ok(m.inner.cell_universe(ci))
+    }
+    #[getter]
+    fn fill(&self, py: Python<'_>) -> PyResult<Option<Fill>> {
+        let m = self.model.bind(py).borrow();
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        Ok(m.inner.cell_fill(ci).map(Fill::from))
+    }
+    #[getter]
     fn well_formed(&self, py: Python<'_>) -> PyResult<bool> {
         self.read(py, |c| c.well_formed())
     }
@@ -182,6 +220,12 @@ impl Cell {
     /// Returns whether one was removed.
     fn remove_param(&self, py: Python<'_>, key: &str) -> PyResult<bool> {
         self.edit(py, |m, ci| m.remove_cell_param(ci, key))
+    }
+
+    /// Append ``$ text`` as an inline comment after the cell's last token.
+    /// Lossless: every other byte of the card is preserved.
+    fn append_comment(&self, py: Python<'_>, text: &str) -> PyResult<()> {
+        self.edit(py, |m, ci| m.append_inline_comment(ci, text))
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -518,6 +562,43 @@ impl Transform {
         self.read(py, |t| {
             format!("Transform(id={}, degrees={})", t.id, t.degrees)
         })
+    }
+}
+
+/// A cell's ``fill=`` parameter (simple single-universe form).
+///
+/// Attributes:
+///     universe (int): The universe number filling the cell.
+///     starred (bool): True when written ``*fill`` (transform angles in degrees).
+///     transform (str | None): Raw text inside the ``fill= u (...)`` parentheses
+///         -- a ``TRn`` reference or an inline transform list -- or None.
+#[pyclass(frozen, module = "migjorn")]
+struct Fill {
+    #[pyo3(get)]
+    universe: i64,
+    #[pyo3(get)]
+    starred: bool,
+    #[pyo3(get)]
+    transform: Option<String>,
+}
+
+impl From<core::Fill> for Fill {
+    fn from(f: core::Fill) -> Self {
+        Fill {
+            universe: f.universe,
+            starred: f.starred,
+            transform: f.transform,
+        }
+    }
+}
+
+#[pymethods]
+impl Fill {
+    fn __repr__(&self) -> String {
+        format!(
+            "Fill(universe={}, starred={}, transform={:?})",
+            self.universe, self.starred, self.transform
+        )
     }
 }
 
@@ -985,6 +1066,54 @@ impl Model {
     fn validate(&self) -> Vec<String> {
         self.inner.validate()
     }
+
+    /// Every universe defined by a ``u=`` in the model, sorted ascending and
+    /// deduplicated. Universe 0 (the real world) is not reported.
+    fn universe_ids(&self) -> Vec<i64> {
+        self.inner.universe_ids()
+    }
+
+    /// Carve universe ``u`` into a new :class:`Model`: its cells plus everything
+    /// they reference -- surfaces, the cells reached through ``#n`` complements
+    /// and ``LIKE n`` bases (followed transitively), and the materials and
+    /// transforms those use. Only the data cards those references need are
+    /// carried; global cards (the source, physics, ...) pass through, so the
+    /// result runs on its own. Call :meth:`clear_data_cards` for a geometry-only
+    /// sub-model instead.
+    fn extract_universe(&self, u: i64) -> Model {
+        Model::build(self.inner.extract_universe(u))
+    }
+
+    /// Carve the level-0 shell (every cell with no ``u=``) plus everything it
+    /// references into a new :class:`Model`, following the same rules as
+    /// :meth:`extract_universe`.
+    fn extract_level0(&self) -> Model {
+        Model::build(self.inner.extract_level0())
+    }
+
+    /// Drop every data card, keeping the title, cells, and surfaces. The model is
+    /// re-parsed from the reduced source (live handles into it become stale).
+    fn clear_data_cards(&mut self) {
+        self.inner.clear_data_cards();
+        self.invalidate();
+    }
+
+    /// Merge other models into this one, appending their cells, surfaces, and
+    /// data cards. Honors the disjoint-range convention: if any cell, surface,
+    /// material, or transform id is defined by more than one of the merged
+    /// models, **nothing changes** and :class:`MergeError` is raised listing
+    /// every conflict. On success the model is re-parsed from the combined
+    /// source (live handles into it become stale).
+    fn merge(&mut self, others: Vec<PyRef<'_, Model>>) -> PyResult<()> {
+        let refs: Vec<&core::Model> = others.iter().map(|m| &m.inner).collect();
+        match self.inner.merge(&refs) {
+            Ok(()) => {
+                self.invalidate();
+                Ok(())
+            }
+            Err(conflicts) => Err(merge_error(&conflicts)),
+        }
+    }
 }
 
 /// A number-mapping supplied from Python: either a dict or a callable.
@@ -1066,7 +1195,9 @@ fn _migjorn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Cell>()?;
     m.add_class::<Material>()?;
     m.add_class::<Transform>()?;
+    m.add_class::<Fill>()?;
     m.add_class::<DataCard>()?;
     m.add_class::<Diagnostic>()?;
+    m.add("MergeError", m.py().get_type::<MergeError>())?;
     Ok(())
 }

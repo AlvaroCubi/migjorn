@@ -148,6 +148,17 @@ class Cell:
         ...
 
     @property
+    def universe(self) -> int | None:
+        """The cell's ``u=`` universe, or ``None`` if it has none."""
+        ...
+
+    @property
+    def fill(self) -> Fill | None:
+        """The cell's ``fill=``/``*fill=`` parameter (simple single-universe
+        form), or ``None`` if the cell is not filled."""
+        ...
+
+    @property
     def well_formed(self) -> bool:
         """``False`` if the geometry could not be fully parsed."""
         ...
@@ -186,6 +197,11 @@ class Cell:
         """Remove the first parameter whose keyword equals ``key`` (case-
         insensitive, ignoring any ``:particle``). Returns whether one was
         removed."""
+        ...
+
+    def append_comment(self, text: str) -> None:
+        """Append ``$ text`` as an inline comment after the cell's last token.
+        Lossless: every other byte of the card is preserved."""
         ...
 
     def __repr__(self) -> str: ...
@@ -268,6 +284,27 @@ class Transform:
         """Rewrite the rotation entries in place. Extra entries are spliced in
         and surplus entries deleted losslessly; adding rotation to a transform
         whose displacement is incomplete raises ``ValueError``."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+class Fill:
+    """A cell's ``fill=`` parameter (simple single-universe form)."""
+
+    @property
+    def universe(self) -> int:
+        """The universe number filling the cell."""
+        ...
+
+    @property
+    def starred(self) -> bool:
+        """``True`` when written ``*fill`` (transform angles in degrees)."""
+        ...
+
+    @property
+    def transform(self) -> str | None:
+        """Raw text inside the ``fill= u (...)`` parentheses -- a ``TRn``
+        reference or an inline transform list -- or ``None``."""
         ...
 
     def __repr__(self) -> str: ...
@@ -470,3 +507,39 @@ class Model:
         definitions, dangling surface/cell/material references from cells, and a
         surface whose transform (or periodic partner surface) is undefined."""
         ...
+
+    def universe_ids(self) -> list[int]:
+        """Every universe defined by a ``u=``, sorted ascending and deduplicated.
+        Universe 0 (the real world) is not reported."""
+        ...
+
+    def extract_universe(self, u: int) -> Model:
+        """Carve universe ``u`` into a new model: its cells plus everything they
+        reference -- surfaces, the cells reached through ``#n`` complements and
+        ``LIKE n`` bases (transitively), and the materials and transforms those
+        use. Only the needed data cards are carried; global cards (source,
+        physics, ...) pass through, so the result runs on its own."""
+        ...
+
+    def extract_level0(self) -> Model:
+        """Carve the level-0 shell (every cell with no ``u=``) plus everything it
+        references into a new model, following the same rules as
+        :meth:`extract_universe`."""
+        ...
+
+    def clear_data_cards(self) -> None:
+        """Drop every data card, keeping the title, cells, and surfaces. The
+        model is re-parsed (live handles into it become stale)."""
+        ...
+
+    def merge(self, others: list[Model]) -> None:
+        """Merge ``others`` into this model, appending their cells, surfaces, and
+        data cards. If any cell/surface/material/transform id is defined by more
+        than one merged model, nothing changes and :class:`MergeError` is raised
+        listing every conflict. On success the model is re-parsed (live handles
+        into it become stale)."""
+        ...
+
+class MergeError(ValueError):
+    """Raised by :meth:`Model.merge` when the merged models share a cell,
+    surface, material, or transform id. A subclass of ``ValueError``."""

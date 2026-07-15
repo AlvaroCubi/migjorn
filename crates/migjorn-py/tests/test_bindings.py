@@ -391,6 +391,81 @@ def test_renumber_tallies_and_bins():
     assert "f24:n" in out and "e24 1 10" in out
 
 
+LATTICE = """\
+title
+1 0 -1 fill=10
+2 1 -1.0 -2 3 u=10
+3 0 2 -3 u=10
+
+1 SO 5
+2 PX -1
+3 PX 1
+
+m1 1001 1
+"""
+
+
+def test_cell_universe_and_fill():
+    model = migjorn.parse(LATTICE)
+    assert model.universe_ids() == [10]
+    # The shell cell carries fill=10 and no u=.
+    shell = model.cell(1)
+    assert shell.universe is None
+    assert shell.fill.universe == 10
+    assert shell.fill.starred is False
+    assert shell.fill.transform is None
+    # A universe-10 cell has a u= and no fill.
+    inner = model.cell(2)
+    assert inner.universe == 10
+    assert inner.fill is None
+
+
+def test_extract_universe_and_level0():
+    model = migjorn.parse(LATTICE)
+    u = model.extract_universe(10)
+    assert sorted(c.id for c in u.cells) == [2, 3]
+    assert sorted(s.id for s in u.surfaces) == [2, 3]
+    assert [m.id for m in u.materials] == [1]  # material used by cell 2 carried
+    assert u.diagnostics == []
+    shell = model.extract_level0()
+    assert [c.id for c in shell.cells] == [1]
+    assert [s.id for s in shell.surfaces] == [1]
+
+
+def test_merge_and_conflict():
+    shell = migjorn.parse("title\n1 0 -1 fill=10\n\n1 SO 5\n\nm1 1001 1\n")
+    filler = migjorn.parse("f\n2 0 -2 u=10\n\n2 SO 3\n")
+    shell.merge([filler])
+    assert shell.num_cells == 2
+    assert shell.num_surfaces == 2
+    assert shell.validate() == []
+    # A shared id makes the merge fail and leaves the model untouched.
+    before = str(shell)
+    clash = migjorn.parse("g\n1 0 -3\n\n3 SO 1\n")
+    try:
+        shell.merge([clash])
+    except migjorn.MergeError as e:
+        assert "cell 1" in str(e)
+    else:
+        raise AssertionError("expected MergeError")
+    assert str(shell) == before
+
+
+def test_append_comment_is_lossless():
+    model = migjorn.parse("title\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
+    model.cell(1).append_comment("@env:main")
+    assert "1 0 -1 imp:n=1 $ @env:main" in str(model)
+
+
+def test_clear_data_cards():
+    model = migjorn.parse(LATTICE)
+    assert len(model.data_cards) == 1
+    model.clear_data_cards()
+    assert len(model.data_cards) == 0
+    assert model.num_cells == 3
+    assert model.diagnostics == []
+
+
 if __name__ == "__main__":
     test_parse_and_lossless()
     test_typed_access()
@@ -417,4 +492,9 @@ if __name__ == "__main__":
     test_renumber_materials_and_transforms()
     test_renumber_universes()
     test_renumber_tallies_and_bins()
+    test_cell_universe_and_fill()
+    test_extract_universe_and_level0()
+    test_merge_and_conflict()
+    test_append_comment_is_lossless()
+    test_clear_data_cards()
     print("all migjorn binding smoke tests passed")

@@ -8,7 +8,9 @@ from migjorn._migjorn import (
     Cell as Cell,
     DataCard as DataCard,
     Diagnostic as Diagnostic,
+    Fill as Fill,
     Material as Material,
+    MergeError as MergeError,
     Model as Model,
     Surface as Surface,
     Transform as Transform,
@@ -23,6 +25,8 @@ __all__ = [
     "Cell",
     "Material",
     "Transform",
+    "Fill",
     "DataCard",
     "Diagnostic",
+    "MergeError",
 ]

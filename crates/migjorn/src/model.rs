@@ -23,7 +23,7 @@ use crate::transform::{parse_transform, transforms, Transform};
 
 /// A parsed MCNP model: the lossless tree, diagnostics, and typed access.
 pub struct Model {
-    tree: GreenTree,
+    pub(crate) tree: GreenTree,
     diagnostics: Vec<Diagnostic>,
     /// Cards that have been structurally edited, keyed by stable slot. Once a
     /// cell is here it is the source of truth for reads (`read_cell`) and is

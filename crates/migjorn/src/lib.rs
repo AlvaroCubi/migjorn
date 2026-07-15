@@ -6,6 +6,7 @@
 //! rest of the model byte-for-byte intact.
 
 mod cell;
+mod compose;
 mod datacard;
 mod emit;
 mod material;
@@ -20,7 +21,8 @@ mod transform;
 // the emitter, numeric parsing, renumbering internals, and the whole CST layer
 // are implementation details and are intentionally *not* re-exported here — all
 // capability is reached through `Model`'s methods.
-pub use cell::{Cell, CellRef, GeomExpr, OwnedCell, SurfaceRef};
+pub use cell::{Cell, CellRef, Fill, GeomExpr, OwnedCell, SurfaceRef};
+pub use compose::{ConflictKind, MergeConflict};
 pub use datacard::DataCard;
 pub use material::{Material, MaterialEntry};
 pub use model::{CellRead, EditError, Model, ModelIndex};

@@ -455,17 +455,15 @@ pub struct Fill {
 pub(crate) fn cell_universe(tree: &GreenTree, card_index: usize) -> Option<i64> {
     let mut result = None;
     scan_cell_params(tree, card_index, |p| {
-        if result.is_some() {
+        if result.is_some() || !p.matches(tree, "u", None) {
             return;
         }
-        if tree.token_text(p.keyword).eq_ignore_ascii_case("u") {
-            if let Some(&tok) = p
-                .value_tokens
-                .iter()
-                .find(|&&t| tree.token_kind(t) == SyntaxKind::NUMBER)
-            {
-                result = parse_int(&tree.token_text(tok));
-            }
+        if let Some(&tok) = p
+            .value_tokens
+            .iter()
+            .find(|&&t| tree.token_kind(t) == SyntaxKind::NUMBER)
+        {
+            result = parse_int(&tree.token_text(tok));
         }
     });
     result
@@ -478,7 +476,7 @@ pub(crate) fn cell_universe(tree: &GreenTree, card_index: usize) -> Option<i64> 
 pub(crate) fn cell_trcl_transform(tree: &GreenTree, card_index: usize) -> Option<i64> {
     let mut result = None;
     scan_cell_params(tree, card_index, |p| {
-        if result.is_some() || !tree.token_text(p.keyword).eq_ignore_ascii_case("trcl") {
+        if result.is_some() || !p.matches(tree, "trcl", None) {
             return;
         }
         // A bare `TRn` reference is a single NUMBER value with no `(` group.
@@ -504,7 +502,7 @@ pub(crate) fn cell_trcl_transform(tree: &GreenTree, card_index: usize) -> Option
 pub(crate) fn parse_fill(tree: &GreenTree, card_index: usize) -> Option<Fill> {
     let mut fill = None;
     scan_cell_params(tree, card_index, |p| {
-        if fill.is_some() || !tree.token_text(p.keyword).eq_ignore_ascii_case("fill") {
+        if fill.is_some() || !p.matches(tree, "fill", None) {
             return;
         }
         // Universe: the first NUMBER before any parenthesised group.

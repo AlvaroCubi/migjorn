@@ -9,7 +9,8 @@ use migjorn_syntax::{Diagnostic, GreenTree, Parsed, SyntaxKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cell::{
-    cell_id, cell_params, cells, parse_cell, promote_cell, Cell, GeomExpr, OwnedCell,
+    cell_id, cell_param_ranges, cell_param_views, cells, parse_cell, parse_param_key, promote_cell,
+    scan_cell_params, Cell, CellParam, GeomExpr, OwnedCell,
 };
 use crate::datacard::{data_cards, DataCard};
 use crate::emit::emit_cell;
@@ -826,6 +827,97 @@ impl Model {
         Ok(())
     }
 
+    /// Read every cell parameter (`imp:n`, `vol`, `fill`, `trcl`, …) of the cell
+    /// at `card_index` as [`CellParam`] views, in source order. Empty for a
+    /// non-cell, a `LIKE n BUT` cell, or a cell with no parameter section.
+    pub fn cell_params(&self, card_index: usize) -> Vec<CellParam> {
+        // Read from the owned tail only when the card is fully in replace mode
+        // (emitted from `emit_cell`); a card merely promoted for geometry reads
+        // still emits its parameters from the CST, overrides and all — so match
+        // whatever `add`/`remove`/`set_cell_param` write to.
+        if self.tree.card_has_replacement(card_index) {
+            let slot = self.tree.card_slot(card_index);
+            if let Some(oc) = self.owned_cells.get(&slot) {
+                return params_from_text(&oc.params_text);
+            }
+        }
+        cell_param_views(&self.tree, card_index)
+    }
+
+    /// Read the first parameter matching `key` (`"vol"`, or a particle-qualified
+    /// `"imp:n"`; see [`Model::remove_cell_param`] for the match rules), or `None`.
+    pub fn cell_param(&self, card_index: usize, key: &str) -> Option<CellParam> {
+        let (want_key, want_particle) = parse_param_key(key);
+        self.cell_params(card_index).into_iter().find(|v| {
+            v.key == want_key
+                && want_particle
+                    .as_deref()
+                    .is_none_or(|p| v.particle.as_deref() == Some(p))
+        })
+    }
+
+    /// Rewrite the value of the first parameter matching `key` in place (e.g.
+    /// `set_cell_param(ci, "imp:n", "2")`), returning whether one matched. The
+    /// keyword and its position are untouched — only the value is replaced — so
+    /// unlike remove-then-add the parameter order is preserved and the rest of
+    /// the card stays byte-for-byte. See [`Model::remove_cell_param`] for the
+    /// `key`/`imp:n` match rules.
+    pub fn set_cell_param(
+        &mut self,
+        card_index: usize,
+        key: &str,
+        value: &str,
+    ) -> Result<bool, EditError> {
+        let card = *self
+            .tree
+            .cards()
+            .get(card_index)
+            .ok_or(EditError::NotACell)?;
+        if card.kind != SyntaxKind::CELL_CARD {
+            return Err(EditError::NotACell);
+        }
+        let (want_key, want_particle) = parse_param_key(key);
+        if self.tree.card_has_replacement(card_index) {
+            // Replace-mode card: rewrite the value in the owned tail string.
+            let slot = self.tree.card_slot(card_index);
+            let oc = self.owned_cells.get_mut(&slot).unwrap();
+            match set_param_in_text(&oc.params_text, &want_key, want_particle.as_deref(), value) {
+                Some(rebuilt) => {
+                    oc.params_text = rebuilt;
+                    self.replace_from_owned(card_index);
+                    return Ok(true);
+                }
+                None => return Ok(false),
+            }
+        }
+        // CST-backed card: locate the matching entry's value tokens.
+        let mut target = None;
+        scan_cell_params(&self.tree, card_index, |p| {
+            if target.is_some() || !p.matches(&self.tree, &want_key, want_particle.as_deref()) {
+                return;
+            }
+            target = Some((p.value_tokens.first().copied(), p.end));
+        });
+        let Some((first, end)) = target else {
+            return Ok(false);
+        };
+        match first {
+            // Overwrite the first value token and delete every token after it,
+            // through the end of the value region (trivia included), collapsing
+            // the value to `value` while leaving the `keyword=` prefix intact.
+            Some(first) => {
+                self.tree.set_token_text(first, value.to_string());
+                for t in (first + 1)..=end {
+                    self.tree.delete_token(t);
+                }
+            }
+            // A value-less entry (`key=` with nothing after): splice the value in
+            // right after the `=`.
+            None => self.tree.insert_after(end, value.to_string()),
+        }
+        Ok(true)
+    }
+
     /// Append a parameter to a cell's parameter section (`text`, e.g.
     /// `"imp:n=1"` or `"u=5"`). It is spliced in after the cell's last token and
     /// before any trailing inline `$` comment, so the rest of the card — geometry
@@ -866,14 +958,18 @@ impl Model {
         Ok(())
     }
 
-    /// Remove the first parameter whose keyword equals `key` (case-insensitive,
-    /// ignoring any `:particle` designator — `"imp"` matches `imp:n`). Returns
-    /// whether one was removed. Lossless for a cell that has not been
-    /// structurally re-emitted.
+    /// Remove the first parameter matching `key`. A bare keyword (`"imp"`) matches
+    /// the first entry with that keyword regardless of designator; a qualified key
+    /// (`"imp:n"`) matches only that particle, so `imp:n` and `imp:p` on one cell
+    /// are individually removable. Case-insensitive. Returns whether one was
+    /// removed. Lossless for a cell that has not been structurally re-emitted.
     pub fn remove_cell_param(&mut self, card_index: usize, key: &str) -> Result<bool, EditError> {
-        let want = key.to_ascii_uppercase();
-        let params = cell_params(&self.tree, card_index);
-        let Some(p) = params.iter().find(|p| p.key == want) else {
+        let (want_key, want_particle) = parse_param_key(key);
+        let params = cell_param_ranges(&self.tree, card_index);
+        let Some(p) = params
+            .iter()
+            .find(|p| p.matches(&want_key, want_particle.as_deref()))
+        else {
             return Ok(false);
         };
         let (start, end) = (p.start_token, p.end_token);
@@ -881,7 +977,9 @@ impl Model {
             // Replace-mode card: rebuild the owned tail without this parameter.
             let slot = self.tree.card_slot(card_index);
             let oc = self.owned_cells.get_mut(&slot).unwrap();
-            if let Some(rebuilt) = remove_param_from_text(&oc.params_text, &want) {
+            if let Some(rebuilt) =
+                remove_param_from_text(&oc.params_text, &want_key, want_particle.as_deref())
+            {
                 oc.params_text = rebuilt;
                 self.replace_from_owned(card_index);
             }
@@ -1059,18 +1157,40 @@ impl Model {
     }
 }
 
-/// Remove the parameter whose (uppercased) keyword is `want` from a raw
+/// The wrapper header prepended to an opaque replace-mode parameter tail so it
+/// re-parses as the parameter section of a cell. Its byte length is the offset
+/// to subtract to map wrapped token spans back onto `params_text`.
+const PARAM_TAIL_PREFIX: &str = "t\n1 0 -1 ";
+
+/// Re-parse an opaque replace-mode parameter tail in a minimal wrapper cell,
+/// returning the parsed tree and the wrapper cell's card index. The tail is an
+/// opaque string only for structurally re-emitted cells; every other path reads
+/// parameters straight off the model's CST.
+fn parse_param_tail(params_text: &str) -> Option<(GreenTree, usize)> {
+    let wrapped = format!("{PARAM_TAIL_PREFIX}{params_text}\n\n1 PX 0\n\nm1 1001 1\n");
+    let tree = migjorn_syntax::parse(wrapped).tree;
+    let ci = (0..tree.cards().len()).find(|&i| tree.cards()[i].kind == SyntaxKind::CELL_CARD)?;
+    Some((tree, ci))
+}
+
+/// Read the parameters of an opaque replace-mode tail as public [`CellParam`]
+/// views.
+fn params_from_text(params_text: &str) -> Vec<CellParam> {
+    match parse_param_tail(params_text) {
+        Some((tree, ci)) => cell_param_views(&tree, ci),
+        None => Vec::new(),
+    }
+}
+
+/// Remove the parameter matching the uppercased `(key, particle)` from a raw
 /// parameter tail, returning the rebuilt tail — or `None` if it is not present.
 /// Used only for the rare replace-mode path, where the tail is an opaque string;
 /// it re-parses the tail in a minimal wrapper to locate the entry's byte span.
-fn remove_param_from_text(params_text: &str, want: &str) -> Option<String> {
-    const PREFIX: &str = "t\n1 0 -1 ";
-    let wrapped = format!("{PREFIX}{params_text}\n\n1 PX 0\n\nm1 1001 1\n");
-    let tree = migjorn_syntax::parse(wrapped).tree;
-    let ci = (0..tree.cards().len()).find(|&i| tree.cards()[i].kind == SyntaxKind::CELL_CARD)?;
-    let params = cell_params(&tree, ci);
-    let p = params.iter().find(|p| p.key == want)?;
-    let base = PREFIX.len();
+fn remove_param_from_text(params_text: &str, key: &str, particle: Option<&str>) -> Option<String> {
+    let (tree, ci) = parse_param_tail(params_text)?;
+    let params = cell_param_ranges(&tree, ci);
+    let p = params.iter().find(|p| p.matches(key, particle))?;
+    let base = PARAM_TAIL_PREFIX.len();
     let s = tree.token_span(p.start_token).start as usize - base;
     let e = tree.token_span(p.end_token).end as usize - base;
     // Drop one preceding space separator if present.
@@ -1083,6 +1203,45 @@ fn remove_param_from_text(params_text: &str, want: &str) -> Option<String> {
     out.push_str(&params_text[..cut]);
     out.push_str(&params_text[e..]);
     Some(out.trim().to_string())
+}
+
+/// Rewrite the value of the parameter matching the uppercased `(key, particle)`
+/// in a raw parameter tail, returning the rebuilt tail — or `None` if it is not
+/// present. The replace-mode counterpart of the CST value splice in
+/// [`Model::set_cell_param`].
+fn set_param_in_text(
+    params_text: &str,
+    key: &str,
+    particle: Option<&str>,
+    value: &str,
+) -> Option<String> {
+    let (tree, ci) = parse_param_tail(params_text)?;
+    let base = PARAM_TAIL_PREFIX.len();
+    let mut span = None;
+    scan_cell_params(&tree, ci, |p| {
+        if span.is_some() || !p.matches(&tree, key, particle) {
+            return;
+        }
+        // Byte range of the value region: from the first value token to the last,
+        // or the empty gap just after the entry's `=` when it has no value.
+        let (s, e) = match (p.value_tokens.first(), p.value_tokens.last()) {
+            (Some(&f), Some(&l)) => (
+                tree.token_span(f).start as usize - base,
+                tree.token_span(l).end as usize - base,
+            ),
+            _ => {
+                let at = tree.token_span(p.end).end as usize - base;
+                (at, at)
+            }
+        };
+        span = Some((s, e));
+    });
+    let (s, e) = span?;
+    let mut out = String::with_capacity(params_text.len() - (e - s) + value.len());
+    out.push_str(&params_text[..s]);
+    out.push_str(value);
+    out.push_str(&params_text[e..]);
+    Some(out)
 }
 
 /// Set an owned cell's material, keeping its density field consistent with
@@ -1681,6 +1840,135 @@ sdef pos=0 0 0
         );
         // A missing keyword is a no-op false.
         assert!(!m.remove_cell_param(ci, "fill").unwrap());
+        assert!(Model::parse(m.to_source()).diagnostics().is_empty());
+    }
+
+    #[test]
+    fn cell_params_reads_all_params() {
+        let m = Model::parse(
+            "t\n1 1 -1.0 -1 imp:n=1 imp:p=0 vol=3 *fill=7 (0 0 5)  $ c\n\n1 SO 5\n\nm1 1001 1\n",
+        );
+        let ci = m.index().cell(1).unwrap();
+        let params = m.cell_params(ci);
+        assert_eq!(
+            params,
+            vec![
+                CellParam {
+                    key: "IMP".into(),
+                    particle: Some("N".into()),
+                    starred: false,
+                    value: "1".into(),
+                },
+                CellParam {
+                    key: "IMP".into(),
+                    particle: Some("P".into()),
+                    starred: false,
+                    value: "0".into(),
+                },
+                CellParam {
+                    key: "VOL".into(),
+                    particle: None,
+                    starred: false,
+                    value: "3".into(),
+                },
+                CellParam {
+                    key: "FILL".into(),
+                    particle: None,
+                    starred: true,
+                    value: "7 ( 0 0 5 )".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cell_param_is_particle_qualified() {
+        let m = Model::parse("t\n1 0 -1 imp:n=1 imp:p=0\n\n1 SO 5\n\nm1 1001 1\n");
+        let ci = m.index().cell(1).unwrap();
+        // A bare keyword takes the first matching entry.
+        assert_eq!(m.cell_param(ci, "imp").unwrap().value, "1");
+        // A qualified key selects the specific particle.
+        assert_eq!(m.cell_param(ci, "imp:p").unwrap().value, "0");
+        assert_eq!(m.cell_param(ci, "imp:n").unwrap().value, "1");
+        assert!(m.cell_param(ci, "vol").is_none());
+    }
+
+    #[test]
+    fn set_cell_param_rewrites_value_in_place() {
+        let src = "title\n1 1 -1.0 -1 imp:n=1 vol=3  $ c\n\n1 SO 5\n\nm1 1001 1\n";
+        let mut m = Model::parse(src);
+        let ci = m.index().cell(1).unwrap();
+        assert!(m.set_cell_param(ci, "imp:n", "2").unwrap());
+        // Value changes in place; order and every other byte are preserved.
+        assert_eq!(
+            m.to_source(),
+            "title\n1 1 -1.0 -1 imp:n=2 vol=3  $ c\n\n1 SO 5\n\nm1 1001 1\n",
+            "got:\n{}",
+            m.to_source()
+        );
+        assert!(Model::parse(m.to_source()).diagnostics().is_empty());
+    }
+
+    #[test]
+    fn set_cell_param_collapses_multi_token_value() {
+        let src = "t\n1 0 -1 fill=7 (0 0 5) vol=3\n\n1 SO 5\n\nm1 1001 1\n";
+        let mut m = Model::parse(src);
+        let ci = m.index().cell(1).unwrap();
+        assert!(m.set_cell_param(ci, "fill", "8 (1 0 0)").unwrap());
+        assert_eq!(
+            m.to_source(),
+            "t\n1 0 -1 fill=8 (1 0 0) vol=3\n\n1 SO 5\n\nm1 1001 1\n",
+            "got:\n{}",
+            m.to_source()
+        );
+        // A missing parameter is a no-op false.
+        assert!(!m.set_cell_param(ci, "trcl", "9").unwrap());
+    }
+
+    #[test]
+    fn remove_cell_param_particle_qualified() {
+        let src = "t\n1 0 -1 imp:n=1 imp:p=0 vol=3\n\n1 SO 5\n\nm1 1001 1\n";
+        let mut m = Model::parse(src);
+        let ci = m.index().cell(1).unwrap();
+        // A qualified key removes only that particle's entry.
+        assert!(m.remove_cell_param(ci, "imp:p").unwrap());
+        assert_eq!(
+            m.to_source(),
+            "t\n1 0 -1 imp:n=1 vol=3\n\n1 SO 5\n\nm1 1001 1\n",
+            "got:\n{}",
+            m.to_source()
+        );
+        assert!(m.cell_param(ci, "imp:n").is_some());
+    }
+
+    #[test]
+    fn cell_params_read_and_set_after_splice_promote() {
+        // A flat geometry removal promotes the cell for reads but keeps emitting
+        // from the CST (no replacement); parameters must still read/write through
+        // the tree, consistent with `add`/`remove`/`set_cell_param`.
+        let mut m = Model::parse("t\n1 0 -1 2 imp:n=1 vol=3\n\n1 SO 5\n2 SO 9\n\nm1 1001 1\n");
+        let ci = m.index().cell(1).unwrap();
+        m.remove_cell_surface(ci, 2).unwrap();
+        assert_eq!(m.cell_param(ci, "imp:n").unwrap().value, "1");
+        assert!(m.set_cell_param(ci, "vol", "42").unwrap());
+        assert!(m.to_source().contains("vol=42"), "got:\n{}", m.to_source());
+        assert_eq!(m.cell_param(ci, "vol").unwrap().value, "42");
+        assert!(Model::parse(m.to_source()).diagnostics().is_empty());
+    }
+
+    #[test]
+    fn cell_params_read_and_set_in_replace_mode() {
+        // A union geometry removal forces a whole-card re-emit (replace mode),
+        // where the parameter tail is an opaque owned string; exercise that path.
+        let mut m =
+            Model::parse("t\n1 0 (-1:2) 3 imp:n=1 vol=3\n\n1 SO 5\n2 SO 9\n3 SO 7\n\nm1 1001 1\n");
+        let ci = m.index().cell(1).unwrap();
+        m.remove_cell_surface(ci, 3).unwrap();
+        assert!(m.tree.card_has_replacement(ci), "expected replace mode");
+        assert_eq!(m.cell_param(ci, "imp:n").unwrap().value, "1");
+        assert!(m.set_cell_param(ci, "vol", "42").unwrap());
+        assert_eq!(m.cell_param(ci, "vol").unwrap().value, "42");
+        assert!(m.to_source().contains("vol=42"), "got:\n{}", m.to_source());
         assert!(Model::parse(m.to_source()).diagnostics().is_empty());
     }
 

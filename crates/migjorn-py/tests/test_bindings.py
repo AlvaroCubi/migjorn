@@ -220,6 +220,38 @@ def test_add_and_remove_cell_param():
     assert migjorn.parse(str(model)).diagnostics == []
 
 
+def test_read_cell_params():
+    src = "t\n1 0 -1 imp:n=1 imp:p=0 vol=3.0 *fill=7 (0 0 5)\n\n1 SO 5\n\nm1 1001 1\n"
+    c = migjorn.parse(src).cell(1)
+    params = c.params
+    assert [(p.key, p.particle, p.starred, p.value) for p in params] == [
+        ("IMP", "N", False, "1"),
+        ("IMP", "P", False, "0"),
+        ("VOL", None, False, "3.0"),
+        ("FILL", None, True, "7 ( 0 0 5 )"),
+    ]
+    # A bare keyword takes the first match; a qualified key selects the particle.
+    assert c.param("imp").value == "1"
+    assert c.param("imp:p").value == "0"
+    assert c.param("trcl") is None
+
+
+def test_set_and_remove_cell_param_particle_qualified():
+    src = "t\n1 0 -1 imp:n=1 imp:p=0 vol=3\n\n1 SO 5\n\nm1 1001 1\n"
+    model = migjorn.parse(src)
+    c = model.cell(1)
+    # Set rewrites the value in place, preserving order and the rest of the card.
+    assert c.set_param("imp:n", "2") is True
+    assert c.param("imp:n").value == "2"
+    assert "1 0 -1 imp:n=2 imp:p=0 vol=3" in str(model)
+    assert c.set_param("trcl", "9") is False
+    # A qualified remove reaches only that particle's entry.
+    assert c.remove_param("imp:p") is True
+    assert "1 0 -1 imp:n=2 vol=3" in str(model)
+    assert c.param("imp:n") is not None
+    assert migjorn.parse(str(model)).diagnostics == []
+
+
 def test_edit_material_entries_in_place():
     model = migjorn.parse(MODEL)  # m1 1001.31c 0.667 8016.31c 0.333
     m = model.material(1)

@@ -561,19 +561,61 @@ fn paren_group_text(tree: &GreenTree, values: &[u32]) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-/// One `keyword=value…` entry from a cell's parameter section (`imp`, `vol`,
-/// `u`, `fill`, `trcl`, …). The value tokens are the meaningful tokens up to the
-/// next keyword; interpretation is left to callers (e.g. universe renumbering).
+/// The token span of one `keyword=value…` entry in a cell's parameter section
+/// (`imp`, `vol`, `u`, `fill`, `trcl`, …), used to locate an entry for splice
+/// edits. The value tokens are the meaningful tokens up to the next keyword;
+/// interpretation is left to callers (e.g. universe renumbering).
 #[derive(Debug, Clone)]
-pub struct CellParam {
+pub struct ParamRange {
     /// Uppercased keyword without any `:particle` designator (e.g. `"U"`).
     pub key: String,
+    /// Uppercased `:particle` designator when present (e.g. `Some("N")` for
+    /// `imp:n`), else `None`.
+    pub particle: Option<String>,
     /// First CST token of the whole entry (the `*` prefix or the keyword).
     pub(crate) start_token: u32,
     /// Last CST token of the whole entry (the last value token, or the keyword
     /// itself for a value-less flag). Together with `start_token` this is the
     /// span a splice deletes to remove the parameter.
     pub(crate) end_token: u32,
+}
+
+impl ParamRange {
+    /// True if this entry matches a lookup key: keyword compared case-insensitively
+    /// (both already uppercased), and — only when `particle` is `Some` — the
+    /// `:designator` too. A `None` `particle` matches any (or no) designator, so
+    /// `"imp"` matches the first `imp:*`, while `"imp:n"` matches only `imp:n`.
+    pub(crate) fn matches(&self, key: &str, particle: Option<&str>) -> bool {
+        self.key == key && particle.is_none_or(|p| self.particle.as_deref() == Some(p))
+    }
+}
+
+/// A public, value-carrying view of one cell parameter, as read from a card.
+///
+/// `particle` and `starred` are only meaningful for the parameters whose grammar
+/// uses them (`:designator` on `imp`/`ext`/`wwn`/…; `*` on `fill`/`trcl`); for
+/// every other parameter they are `None`/`false`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellParam {
+    /// Uppercased keyword without any `:particle` designator (e.g. `"IMP"`).
+    pub key: String,
+    /// Uppercased `:particle` designator when present (e.g. `Some("N")`), else
+    /// `None`.
+    pub particle: Option<String>,
+    /// True when the keyword was written with a `*` prefix (`*fill`, `*trcl`).
+    pub starred: bool,
+    /// The value text — the entry's value tokens joined by single spaces (e.g.
+    /// `"1"`, `"7 (0 0 5)"`). Empty for a value-less parameter.
+    pub value: String,
+}
+
+/// Split a lookup key such as `"imp"` or `"imp:n"` into an uppercased
+/// `(keyword, particle)` pair for matching against [`ParamRange`]/[`ParamSpan`].
+pub(crate) fn parse_param_key(want: &str) -> (String, Option<String>) {
+    match want.split_once(':') {
+        Some((k, p)) => (k.to_ascii_uppercase(), Some(p.to_ascii_uppercase())),
+        None => (want.to_ascii_uppercase(), None),
+    }
 }
 
 /// True if `toks[j]` starts a new cell parameter keyword: an `IDENT` followed by
@@ -600,11 +642,25 @@ pub(crate) struct ParamSpan<'a> {
     /// The keyword IDENT token. Its text is the un-uppercased key (`fill`),
     /// excluding any `*` prefix and `:particle` designator.
     pub(crate) keyword: u32,
+    /// The `:particle` designator IDENT token (`imp:n` → the `n`), if present.
+    pub(crate) particle: Option<u32>,
     /// The value tokens (numbers, colons, parens, …) after `key[:particle]=`.
     pub(crate) value_tokens: &'a [u32],
     /// Last token of the whole entry (last value token, or the keyword/particle
     /// for a value-less flag).
     pub(crate) end: u32,
+}
+
+impl ParamSpan<'_> {
+    /// True if this entry matches an uppercased `(key, particle)` lookup, with
+    /// the same rules as [`ParamRange::matches`].
+    pub(crate) fn matches(&self, tree: &GreenTree, key: &str, particle: Option<&str>) -> bool {
+        tree.token_text(self.keyword).eq_ignore_ascii_case(key)
+            && particle.is_none_or(|p| {
+                self.particle
+                    .is_some_and(|t| tree.token_text(t).eq_ignore_ascii_case(p))
+            })
+    }
 }
 
 /// Scan the parameter section of the cell at `card_index`, invoking
@@ -665,9 +721,11 @@ pub(crate) fn scan_cell_params(
         let keyword = toks[j];
         j += 1;
         // Optional `:particle`.
+        let mut particle = None;
         if j < n && tree.token_kind(toks[j]) == SyntaxKind::COLON {
             j += 1;
             if j < n && tree.token_kind(toks[j]) == SyntaxKind::IDENT {
+                particle = Some(toks[j]);
                 j += 1;
             }
         }
@@ -690,6 +748,7 @@ pub(crate) fn scan_cell_params(
         visit(ParamSpan {
             star,
             keyword,
+            particle,
             value_tokens: &toks[vstart..j],
             end: toks[j - 1],
         });
@@ -697,19 +756,49 @@ pub(crate) fn scan_cell_params(
 }
 
 /// Parse the parameter section (after the geometry) of the cell at `card_index`
-/// into owned `keyword=value…` entries. Empty for non-cells, `LIKE n BUT` cells,
-/// or cells without parameters. Built on [`scan_cell_params`]; prefer that
-/// directly in bulk passes where the owned `Vec` is not needed.
-pub(crate) fn cell_params(tree: &GreenTree, card_index: usize) -> Vec<CellParam> {
+/// into owned [`ParamRange`] entries (keyword + token span). Empty for non-cells,
+/// `LIKE n BUT` cells, or cells without parameters. Built on [`scan_cell_params`];
+/// prefer that directly in bulk passes where the owned `Vec` is not needed.
+pub(crate) fn cell_param_ranges(tree: &GreenTree, card_index: usize) -> Vec<ParamRange> {
     let mut params = Vec::new();
     scan_cell_params(tree, card_index, |p| {
-        params.push(CellParam {
+        params.push(ParamRange {
             key: tree.token_text(p.keyword).to_ascii_uppercase(),
+            particle: p.particle.map(|t| tree.token_text(t).to_ascii_uppercase()),
             start_token: p.star.unwrap_or(p.keyword),
             end_token: p.end,
         });
     });
     params
+}
+
+/// The value text of a parameter entry: its value tokens joined by single
+/// spaces (e.g. `7 (0 0 5)`). Empty when the entry is a value-less flag.
+fn value_text(tree: &GreenTree, value_tokens: &[u32]) -> String {
+    value_tokens
+        .iter()
+        .map(|&t| tree.token_text(t))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Build the public [`CellParam`] view of one scanned entry.
+fn param_view(tree: &GreenTree, p: &ParamSpan<'_>) -> CellParam {
+    CellParam {
+        key: tree.token_text(p.keyword).to_ascii_uppercase(),
+        particle: p.particle.map(|t| tree.token_text(t).to_ascii_uppercase()),
+        starred: p.star.is_some(),
+        value: value_text(tree, p.value_tokens),
+    }
+}
+
+/// Read every cell parameter of the card at `card_index` as public
+/// [`CellParam`] views, in source order. Empty for non-cells or cells with no
+/// parameter section.
+pub(crate) fn cell_param_views(tree: &GreenTree, card_index: usize) -> Vec<CellParam> {
+    let mut out = Vec::new();
+    scan_cell_params(tree, card_index, |p| out.push(param_view(tree, &p)));
+    out
 }
 
 /// Minimal read of a cell's material field: `(material_token, material)`, or

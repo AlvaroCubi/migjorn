@@ -1,0 +1,11 @@
+Cell cards exercising a mix of keyword parameters
+1 1 -1.0 -1 imp:n=1 imp:p=0 vol=3.0 u=5 $ per-particle imp + vol + universe
+2 0 -2 trcl=4 *fill=7 (0 0 5 90 90 0)  $ inline transform fill
+3 0 -3 fill=8 (40) ext:n=0.7 pwt=-1
+
+1 SO 5
+2 SO 9
+3 SO 7
+
+m1 1001 1
+tr4 0 0 0

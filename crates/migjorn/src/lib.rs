@@ -21,7 +21,7 @@ mod transform;
 // the emitter, numeric parsing, renumbering internals, and the whole CST layer
 // are implementation details and are intentionally *not* re-exported here — all
 // capability is reached through `Model`'s methods.
-pub use cell::{Cell, CellRef, Fill, GeomExpr, OwnedCell, SurfaceRef};
+pub use cell::{Cell, CellParam, CellRef, Fill, GeomExpr, OwnedCell, SurfaceRef};
 pub use compose::{ConflictKind, MergeConflict};
 pub use datacard::DataCard;
 pub use material::{Material, MaterialEntry};

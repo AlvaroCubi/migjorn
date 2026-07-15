@@ -159,6 +159,12 @@ class Cell:
         ...
 
     @property
+    def params(self) -> list[CellParam]:
+        """Every keyword parameter (``imp:n``, ``vol``, ``fill``, ``trcl``, ...)
+        of the cell, in source order."""
+        ...
+
+    @property
     def well_formed(self) -> bool:
         """``False`` if the geometry could not be fully parsed."""
         ...
@@ -167,6 +173,17 @@ class Cell:
     def text(self) -> str:
         """The card's exact source text, including inline ``$`` comments and
         continuations, reflecting any edits."""
+        ...
+
+    def param(self, key: str) -> CellParam | None:
+        """Read the first parameter matching ``key`` — a bare keyword (``"vol"``)
+        or a particle-qualified one (``"imp:n"``) — or ``None`` if absent."""
+        ...
+
+    def set_param(self, key: str, value: str) -> bool:
+        """Rewrite the value of the first parameter matching ``key`` in place
+        (e.g. ``set_param("imp:n", "2")``), returning whether one matched. Only
+        the value changes; the keyword and its position are preserved."""
         ...
 
     def add_surface(self, surface: int) -> None:
@@ -194,9 +211,10 @@ class Cell:
         ...
 
     def remove_param(self, key: str) -> bool:
-        """Remove the first parameter whose keyword equals ``key`` (case-
-        insensitive, ignoring any ``:particle``). Returns whether one was
-        removed."""
+        """Remove the first parameter matching ``key``. A bare keyword (``"imp"``)
+        matches the first entry with that keyword regardless of designator; a
+        qualified key (``"imp:n"``) matches only that particle. Case-insensitive.
+        Returns whether one was removed."""
         ...
 
     def append_comment(self, text: str) -> None:
@@ -305,6 +323,35 @@ class Fill:
     def transform(self) -> str | None:
         """Raw text inside the ``fill= u (...)`` parentheses -- a ``TRn``
         reference or an inline transform list -- or ``None``."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+class CellParam:
+    """One cell keyword parameter (``imp:n``, ``vol``, ``fill``, ``trcl``, ...).
+
+    ``particle`` and ``starred`` are only meaningful for the parameters whose
+    grammar uses them; for every other parameter they are ``None``/``False``.
+    """
+
+    @property
+    def key(self) -> str:
+        """Uppercased keyword without the designator (``"IMP"``, ``"VOL"``)."""
+        ...
+
+    @property
+    def particle(self) -> str | None:
+        """Uppercased ``:particle`` designator (``"N"``), or ``None``."""
+        ...
+
+    @property
+    def starred(self) -> bool:
+        """``True`` when written with a ``*`` prefix (``*fill``, ``*trcl``)."""
+        ...
+
+    @property
+    def value(self) -> str:
+        """Value text, tokens joined by single spaces (``"7 ( 0 0 5 )"``)."""
         ...
 
     def __repr__(self) -> str: ...

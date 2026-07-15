@@ -6,6 +6,7 @@ Type information lives in `__init__.pyi` (with the `py.typed` marker).
 
 from migjorn._migjorn import (
     Cell as Cell,
+    CellParam as CellParam,
     DataCard as DataCard,
     Diagnostic as Diagnostic,
     Fill as Fill,
@@ -26,6 +27,7 @@ __all__ = [
     "Material",
     "Transform",
     "Fill",
+    "CellParam",
     "DataCard",
     "Diagnostic",
     "MergeError",

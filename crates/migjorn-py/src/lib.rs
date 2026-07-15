@@ -208,6 +208,39 @@ impl Cell {
         self.edit(py, |m, ci| m.remove_cell_complement(ci, id))
     }
 
+    #[getter]
+    fn params(&self, py: Python<'_>) -> PyResult<Vec<CellParam>> {
+        let m = self.model.bind(py).borrow();
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        Ok(m.inner
+            .cell_params(ci)
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    /// Read the first parameter matching ``key`` — a bare keyword (``"vol"``) or
+    /// a particle-qualified one (``"imp:n"``) — or ``None`` if absent.
+    fn param(&self, py: Python<'_>, key: &str) -> PyResult<Option<CellParam>> {
+        let m = self.model.bind(py).borrow();
+        let ci = m
+            .inner
+            .card_index_of_slot(self.slot)
+            .ok_or_else(stale_handle)?;
+        Ok(m.inner.cell_param(ci, key).map(Into::into))
+    }
+
+    /// Rewrite the value of the first parameter matching ``key`` in place (e.g.
+    /// ``set_param("imp:n", "2")``), returning whether one matched. Only the
+    /// value changes — the keyword and its position are preserved, so unlike
+    /// remove-then-add the card stays byte-for-byte apart from the new value.
+    fn set_param(&self, py: Python<'_>, key: &str, value: &str) -> PyResult<bool> {
+        self.edit(py, |m, ci| m.set_cell_param(ci, key, value))
+    }
+
     /// Append a parameter (e.g. ``"imp:n=1"`` or ``"u=5"``) to the cell's
     /// parameter section. Spliced in after the cell's last token and before any
     /// trailing inline ``$`` comment, so the rest of the card is preserved.
@@ -215,9 +248,11 @@ impl Cell {
         self.edit(py, |m, ci| m.add_cell_param(ci, text))
     }
 
-    /// Remove the first parameter whose keyword equals ``key`` (case-insensitive,
-    /// ignoring any ``:particle`` designator — ``"imp"`` matches ``imp:n``).
-    /// Returns whether one was removed.
+    /// Remove the first parameter matching ``key``. A bare keyword (``"imp"``)
+    /// matches the first entry with that keyword regardless of designator; a
+    /// qualified key (``"imp:n"``) matches only that particle, so ``imp:n`` and
+    /// ``imp:p`` are individually removable. Case-insensitive. Returns whether
+    /// one was removed.
     fn remove_param(&self, py: Python<'_>, key: &str) -> PyResult<bool> {
         self.edit(py, |m, ci| m.remove_cell_param(ci, key))
     }
@@ -599,6 +634,53 @@ impl Fill {
             "Fill(universe={}, starred={}, transform={:?})",
             self.universe, self.starred, self.transform
         )
+    }
+}
+
+/// One cell keyword parameter (``imp:n``, ``vol``, ``fill``, ``trcl``, ...) as
+/// read from a card.
+///
+/// ``particle`` and ``starred`` are only meaningful for the parameters whose
+/// grammar uses them (``:designator`` on ``imp``/``ext``/...; ``*`` on
+/// ``fill``/``trcl``); for every other parameter they are ``None``/``False``.
+///
+/// Attributes:
+///     key (str): Uppercased keyword without the designator (``"IMP"``, ``"VOL"``).
+///     particle (str | None): Uppercased ``:particle`` designator (``"N"``) or None.
+///     starred (bool): True when written with a ``*`` prefix (``*fill``, ``*trcl``).
+///     value (str): Value text, tokens joined by single spaces (``"7 ( 0 0 5 )"``).
+#[pyclass(frozen, module = "migjorn")]
+struct CellParam {
+    #[pyo3(get)]
+    key: String,
+    #[pyo3(get)]
+    particle: Option<String>,
+    #[pyo3(get)]
+    starred: bool,
+    #[pyo3(get)]
+    value: String,
+}
+
+impl From<core::CellParam> for CellParam {
+    fn from(p: core::CellParam) -> Self {
+        CellParam {
+            key: p.key,
+            particle: p.particle,
+            starred: p.starred,
+            value: p.value,
+        }
+    }
+}
+
+#[pymethods]
+impl CellParam {
+    fn __repr__(&self) -> String {
+        let particle = match &self.particle {
+            Some(p) => format!(":{p}"),
+            None => String::new(),
+        };
+        let star = if self.starred { "*" } else { "" };
+        format!("CellParam({star}{}{particle}={:?})", self.key, self.value)
     }
 }
 
@@ -1196,6 +1278,7 @@ fn _migjorn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Material>()?;
     m.add_class::<Transform>()?;
     m.add_class::<Fill>()?;
+    m.add_class::<CellParam>()?;
     m.add_class::<DataCard>()?;
     m.add_class::<Diagnostic>()?;
     m.add("MergeError", m.py().get_type::<MergeError>())?;

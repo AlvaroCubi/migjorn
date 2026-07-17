@@ -238,6 +238,19 @@ impl GreenTree {
             || !self.deletions.is_empty()
     }
 
+    /// Whether any *splice* edits (insertions, deletions, or whole-card
+    /// replacements) are pending — the emit-only overlay that a token-based
+    /// reader cannot see. Deliberately **excludes** token overrides, which
+    /// `token_text`/emission already apply consistently: a caller re-reading
+    /// tokens after an override sees the effective value, so overrides alone
+    /// never require materialising the tree.
+    #[inline]
+    pub fn has_pending_splices(&self) -> bool {
+        !self.card_replacements.is_empty()
+            || !self.insertions.is_empty()
+            || !self.deletions.is_empty()
+    }
+
     /// Iterate the *meaningful* (non-trivia) token indices of a card.
     pub fn card_content_tokens<'a>(&'a self, card: &Card) -> impl Iterator<Item = u32> + 'a {
         (card.first_tok..card.tok_end).filter(move |&i| !self.token_kind(i).is_trivia())

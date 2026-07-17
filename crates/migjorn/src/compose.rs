@@ -13,31 +13,39 @@ use migjorn_syntax::{GreenTree, SyntaxKind};
 use rustc_hash::FxHashSet;
 
 use crate::cell::{
-    cell_id, cell_material, cell_trcl_transform, cell_universe, parse_fill, scan_cell_refs, Fill,
-    RefKind,
+    cell_id, cell_material, cell_trcl_transform, cell_universe, cells, parse_fill, scan_cell_refs,
+    Fill, RefKind,
 };
 use crate::datacard::parse_data_card;
-use crate::material::parse_material;
+use crate::material::{materials, parse_material};
 use crate::model::{EditError, Model};
-use crate::surface::parse_surface;
-use crate::transform::parse_transform;
+use crate::surface::{parse_surface, surfaces};
+use crate::transform::{parse_transform, transforms};
 
 impl Model {
     /// The universe of the cell at `card_index` (its `u=` value), or `None` if
     /// the cell has no `u=` parameter (a level-0 / real-world cell).
-    pub fn cell_universe(&self, card_index: usize) -> Option<i64> {
+    ///
+    /// `&mut self`: a `u=` spliced in via `add_cell_param` (or a replace-mode
+    /// tail) must be [materialised](Model::materialize) so this matches emission.
+    pub fn cell_universe(&mut self, card_index: usize) -> Option<i64> {
+        self.materialize();
         cell_universe(&self.tree, card_index)
     }
 
     /// The `fill=`/`*fill=` of the cell at `card_index` (simple single-universe
-    /// form), or `None` if the cell is not filled.
-    pub fn cell_fill(&self, card_index: usize) -> Option<Fill> {
+    /// form), or `None` if the cell is not filled. `&mut self`: see
+    /// [`Model::cell_universe`].
+    pub fn cell_fill(&mut self, card_index: usize) -> Option<Fill> {
+        self.materialize();
         parse_fill(&self.tree, card_index)
     }
 
     /// Every universe defined by a `u=` in the model, sorted ascending and
-    /// deduplicated. Universe 0 (the real world) is not reported.
-    pub fn universe_ids(&self) -> Vec<i64> {
+    /// deduplicated. Universe 0 (the real world) is not reported. `&mut self`:
+    /// see [`Model::cell_universe`].
+    pub fn universe_ids(&mut self) -> Vec<i64> {
+        self.materialize();
         let mut set: FxHashSet<i64> = FxHashSet::default();
         for i in 0..self.tree.cards().len() {
             if let Some(u) = cell_universe(&self.tree, i) {
@@ -64,7 +72,8 @@ impl Model {
     /// universe. Following `#n`/`LIKE` references can pull in cells from other
     /// universes when the geometry crosses universe boundaries; for a model whose
     /// universes are self-contained this is exactly the universe's cells.
-    pub fn extract_universe(&self, u: i64) -> Model {
+    pub fn extract_universe(&mut self, u: i64) -> Model {
+        self.materialize();
         self.extract_cells(|cu| cu == Some(u))
     }
 
@@ -73,7 +82,8 @@ impl Model {
     /// [`Model::extract_universe`]. For a model whose universes are self-contained
     /// this is the inverse selection of `extract_universe` and the two partition
     /// the model's cells.
-    pub fn extract_level0(&self) -> Model {
+    pub fn extract_level0(&mut self) -> Model {
+        self.materialize();
         self.extract_cells(|cu| cu.is_none())
     }
 
@@ -247,28 +257,31 @@ impl Model {
     /// transforms).
     fn merge_conflicts(&self, others: &[&Model]) -> Vec<MergeConflict> {
         let mut conflicts = Vec::new();
-        let mut cells: FxHashSet<i64> = FxHashSet::default();
-        let mut surfaces: FxHashSet<i64> = FxHashSet::default();
-        let mut materials: FxHashSet<i64> = FxHashSet::default();
-        let mut transforms: FxHashSet<i64> = FxHashSet::default();
+        let mut cells_seen: FxHashSet<i64> = FxHashSet::default();
+        let mut surfaces_seen: FxHashSet<i64> = FxHashSet::default();
+        let mut materials_seen: FxHashSet<i64> = FxHashSet::default();
+        let mut transforms_seen: FxHashSet<i64> = FxHashSet::default();
+        // Read via the free projections (not the `&mut self` `Model` iterators):
+        // `card_source`-based merge already emits each `other`'s effective text,
+        // and id reads are unaffected by any pending splices.
         for m in std::iter::once(self).chain(others.iter().copied()) {
-            for c in m.cells() {
-                if !cells.insert(c.id) {
+            for c in cells(&m.tree) {
+                if !cells_seen.insert(c.id) {
                     conflicts.push(MergeConflict::new(ConflictKind::Cell, c.id));
                 }
             }
-            for s in m.surfaces() {
-                if !surfaces.insert(s.id) {
+            for s in surfaces(&m.tree) {
+                if !surfaces_seen.insert(s.id) {
                     conflicts.push(MergeConflict::new(ConflictKind::Surface, s.id));
                 }
             }
-            for mat in m.materials() {
-                if !materials.insert(mat.id) {
+            for mat in materials(&m.tree) {
+                if !materials_seen.insert(mat.id) {
                     conflicts.push(MergeConflict::new(ConflictKind::Material, mat.id));
                 }
             }
-            for t in m.transforms() {
-                if !transforms.insert(t.id) {
+            for t in transforms(&m.tree) {
+                if !transforms_seen.insert(t.id) {
                     conflicts.push(MergeConflict::new(ConflictKind::Transform, t.id));
                 }
             }
@@ -413,7 +426,7 @@ m1 1001 1
 
     #[test]
     fn universe_ids_and_cell_universe() {
-        let m = Model::parse(LATTICE);
+        let mut m = Model::parse(LATTICE);
         assert_eq!(m.universe_ids(), vec![10]);
         // Card 0 is the title; cell 1 (card 1) is level-0, cells 2 and 3
         // (cards 2 and 3) are in universe 10.
@@ -425,8 +438,8 @@ m1 1001 1
 
     #[test]
     fn extract_universe_keeps_cells_and_referenced_surfaces() {
-        let m = Model::parse(LATTICE);
-        let u = m.extract_universe(10);
+        let mut m = Model::parse(LATTICE);
+        let mut u = m.extract_universe(10);
         // Both universe-10 cells, none of the level-0 cell.
         assert_eq!(u.cells().count(), 2);
         assert!(u.cells().all(|c| c.id == 2 || c.id == 3));
@@ -444,8 +457,8 @@ m1 1001 1
 
     #[test]
     fn extract_level0_is_the_inverse_selection() {
-        let m = Model::parse(LATTICE);
-        let shell = m.extract_level0();
+        let mut m = Model::parse(LATTICE);
+        let mut shell = m.extract_level0();
         assert_eq!(shell.cells().count(), 1);
         assert_eq!(shell.cells().next().unwrap().id, 1);
         // The level-0 cell references surface 1 only.
@@ -471,8 +484,8 @@ title
 
 m1 1001 1
 ";
-        let m = Model::parse(src);
-        let u = m.extract_universe(10);
+        let mut m = Model::parse(src);
+        let mut u = m.extract_universe(10);
         let mut cids: Vec<i64> = u.cells().map(|c| c.id).collect();
         cids.sort_unstable();
         assert_eq!(cids, vec![2, 3]);
@@ -499,8 +512,8 @@ tr9 0 0 2
 mt1 lwtr.10t
 sdef pos=0 0 0
 ";
-        let m = Model::parse(src);
-        let u = m.extract_universe(10);
+        let mut m = Model::parse(src);
+        let mut u = m.extract_universe(10);
         assert_eq!(u.materials().map(|m| m.id).collect::<Vec<_>>(), vec![1]);
         assert_eq!(u.transforms().map(|t| t.id).collect::<Vec<_>>(), vec![5]);
         let names: Vec<String> = u.data_cards().map(|d| d.name).collect();
@@ -527,8 +540,8 @@ title
 
 tr7 0 0 3
 ";
-        let m = Model::parse(src);
-        let u = m.extract_universe(10);
+        let mut m = Model::parse(src);
+        let mut u = m.extract_universe(10);
         assert_eq!(u.transforms().map(|t| t.id).collect::<Vec<_>>(), vec![7]);
     }
 

@@ -154,7 +154,9 @@ impl Cell {
     }
     #[getter]
     fn universe(&self, py: Python<'_>) -> PyResult<Option<i64>> {
-        let m = self.model.bind(py).borrow();
+        // `borrow_mut`: `cell_universe` takes `&mut` (materialises pending param
+        // splices so the read matches emission).
+        let mut m = self.model.bind(py).borrow_mut();
         let ci = m
             .inner
             .card_index_of_slot(self.slot)
@@ -163,7 +165,7 @@ impl Cell {
     }
     #[getter]
     fn fill(&self, py: Python<'_>) -> PyResult<Option<Fill>> {
-        let m = self.model.bind(py).borrow();
+        let mut m = self.model.bind(py).borrow_mut();
         let ci = m
             .inner
             .card_index_of_slot(self.slot)
@@ -210,7 +212,9 @@ impl Cell {
 
     #[getter]
     fn params(&self, py: Python<'_>) -> PyResult<Vec<CellParam>> {
-        let m = self.model.bind(py).borrow();
+        // `borrow_mut`: `cell_params` takes `&mut` (materialises pending param
+        // splices/replace-mode tails so the read matches emission).
+        let mut m = self.model.bind(py).borrow_mut();
         let ci = m
             .inner
             .card_index_of_slot(self.slot)
@@ -225,7 +229,7 @@ impl Cell {
     /// Read the first parameter matching ``key`` — a bare keyword (``"vol"``) or
     /// a particle-qualified one (``"imp:n"``) — or ``None`` if absent.
     fn param(&self, py: Python<'_>, key: &str) -> PyResult<Option<CellParam>> {
-        let m = self.model.bind(py).borrow();
+        let mut m = self.model.bind(py).borrow_mut();
         let ci = m
             .inner
             .card_index_of_slot(self.slot)
@@ -294,7 +298,9 @@ struct Surface {
 
 impl Surface {
     fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Surface) -> R) -> PyResult<R> {
-        let m = self.model.bind(py).borrow();
+        // `borrow_mut`: `surface_by_slot` takes `&mut` (it materialises any
+        // pending `set_surface_transform` splice so the view matches emission).
+        let mut m = self.model.bind(py).borrow_mut();
         if m.inner.card_index_of_slot(self.slot).is_none() {
             return Err(stale_handle());
         }
@@ -519,7 +525,9 @@ struct Transform {
 
 impl Transform {
     fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Transform) -> R) -> PyResult<R> {
-        let m = self.model.bind(py).borrow();
+        // `borrow_mut`: `transform_by_slot` takes `&mut` (it materialises any
+        // pending displacement/rotation splice so the view matches emission).
+        let mut m = self.model.bind(py).borrow_mut();
         if m.inner.card_index_of_slot(self.slot).is_none() {
             return Err(stale_handle());
         }
@@ -923,7 +931,7 @@ impl Model {
 
     /// All data cards (generic view), in source order.
     #[getter]
-    fn data_cards(&self) -> Vec<DataCard> {
+    fn data_cards(&mut self) -> Vec<DataCard> {
         self.inner.data_cards().map(DataCard::from).collect()
     }
 
@@ -1141,17 +1149,34 @@ impl Model {
         Ok(removed)
     }
 
+    /// Remove the ``Mn`` material numbered `id`. Returns whether one was removed.
+    /// Deletes the card only; a cell still pointing at it is reported by
+    /// :meth:`validate`.
+    fn remove_material(&mut self, id: i64) -> PyResult<bool> {
+        let removed = self.inner.remove_material(id).map_err(edit_error)?;
+        self.invalidate();
+        Ok(removed)
+    }
+
+    /// Remove the ``TRn``/``*TRn`` transform numbered `id`. Returns whether one
+    /// was removed. Deletes the card only (see :meth:`remove_material`).
+    fn remove_transform(&mut self, id: i64) -> PyResult<bool> {
+        let removed = self.inner.remove_transform(id).map_err(edit_error)?;
+        self.invalidate();
+        Ok(removed)
+    }
+
     /// Check model consistency: return a list of human-readable problems,
     /// empty when consistent. Reports duplicate cell/surface/material/transform
     /// definitions, dangling surface/cell/material references from cells, and a
     /// surface whose transform (or periodic partner surface) is undefined.
-    fn validate(&self) -> Vec<String> {
+    fn validate(&mut self) -> Vec<String> {
         self.inner.validate()
     }
 
     /// Every universe defined by a ``u=`` in the model, sorted ascending and
     /// deduplicated. Universe 0 (the real world) is not reported.
-    fn universe_ids(&self) -> Vec<i64> {
+    fn universe_ids(&mut self) -> Vec<i64> {
         self.inner.universe_ids()
     }
 
@@ -1162,14 +1187,14 @@ impl Model {
     /// carried; global cards (the source, physics, ...) pass through, so the
     /// result runs on its own. Call :meth:`clear_data_cards` for a geometry-only
     /// sub-model instead.
-    fn extract_universe(&self, u: i64) -> Model {
+    fn extract_universe(&mut self, u: i64) -> Model {
         Model::build(self.inner.extract_universe(u))
     }
 
     /// Carve the level-0 shell (every cell with no ``u=``) plus everything it
     /// references into a new :class:`Model`, following the same rules as
     /// :meth:`extract_universe`.
-    fn extract_level0(&self) -> Model {
+    fn extract_level0(&mut self) -> Model {
         Model::build(self.inner.extract_level0())
     }
 

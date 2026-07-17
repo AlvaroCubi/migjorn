@@ -548,6 +548,17 @@ class Model:
         """Remove the surface numbered ``id``. Returns whether one was removed."""
         ...
 
+    def remove_material(self, id: int) -> bool:
+        """Remove the ``Mn`` material numbered ``id``. Returns whether one was
+        removed. Deletes the card only; a cell still pointing at it is reported
+        by :meth:`validate`."""
+        ...
+
+    def remove_transform(self, id: int) -> bool:
+        """Remove the ``TRn``/``*TRn`` transform numbered ``id``. Returns whether
+        one was removed. Deletes the card only (see :meth:`remove_material`)."""
+        ...
+
     def validate(self) -> list[str]:
         """Consistency check: a list of human-readable problems, empty when
         consistent. Reports duplicate cell/surface/material/transform

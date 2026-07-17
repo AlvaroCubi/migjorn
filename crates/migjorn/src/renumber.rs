@@ -443,12 +443,7 @@ fn push_tally_bin_edits(
         return;
     }
     for tok in t.bin_tokens {
-        if let Some(v) = parse_int(&tree.token_text(tok)) {
-            if v != 0 {
-                let new = map(v.abs());
-                edits.push((tok, if v < 0 { -new } else { new }));
-            }
-        }
+        push_signed_ref_edit(tree, tok, map, edits);
     }
 }
 

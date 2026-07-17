@@ -53,12 +53,15 @@ model.offset_surfaces(1_000_000)     # or model.renumber_surfaces({1: 100, ...})
 model.save("out.mcnp")
 ```
 
-To build from source instead, run the example with
+To build from source instead, open the showcase notebook with
 [uv](https://docs.astral.sh/uv/) — it builds the extension for you:
 
 ```bash
-uv run crates/migjorn-py/examples/migjorn_demo.py
+uv run --with "./crates/migjorn-py[notebook]" \
+  jupyter lab crates/migjorn-py/examples/showcase.ipynb
 ```
+
+The Rust API has an equivalent tour: `cargo run -p migjorn --example showcase`.
 
 See `crates/migjorn-py/README.md` for the full Python API and more uv commands.
 

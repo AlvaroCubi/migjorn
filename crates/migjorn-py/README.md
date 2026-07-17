@@ -9,22 +9,35 @@ Rust core.
 repository root:
 
 ```bash
-# Script tour — one command, builds + runs:
-uv run crates/migjorn-py/examples/migjorn_demo.py
-
-# Notebook (interactive) — the [notebook] extra pulls in jupyterlab/ipykernel/nbconvert:
+# Showcase notebook (interactive) — a tour of the whole API. The [notebook]
+# extra pulls in jupyterlab/ipykernel/nbconvert:
 uv run --with "./crates/migjorn-py[notebook]" \
-  jupyter lab crates/migjorn-py/examples/migjorn_demo.ipynb
+  jupyter lab crates/migjorn-py/examples/showcase.ipynb
 
 # Notebook (execute headless, refresh outputs in place):
 uv run --with "./crates/migjorn-py[notebook]" \
   jupyter nbconvert --to notebook --execute --inplace \
-  crates/migjorn-py/examples/migjorn_demo.ipynb
+  crates/migjorn-py/examples/showcase.ipynb
+
+# Universe split/merge example (a PEP 723 script — carries its own deps):
+uv run crates/migjorn-py/examples/universe_compose.py
 ```
 
-The script carries its dependency (the local `migjorn` package) as inline
-[PEP 723](https://peps.python.org/pep-0723/) metadata, so `uv run` compiles the
-extension via maturin into an isolated environment automatically.
+`uv run` compiles the extension via maturin into an isolated environment
+automatically.
+
+> **Rebuild gotcha.** uv keys its build cache on `crates/migjorn-py` alone, so
+> edits to the Rust **core** (`crates/migjorn/`) do *not* invalidate it — you can
+> silently keep running an old extension. Neither `--refresh` nor
+> `uv cache clean migjorn` helps. Force a rebuild with:
+>
+> ```bash
+> rm -rf ~/.cache/uv/archive-v0 ~/.cache/uv/sdists-v9
+> ```
+>
+> Also delete any stale `python/migjorn/_migjorn.abi3.so` left by an earlier
+> `maturin develop`: it lives in the packaged `python-source` dir and shadows
+> freshly built extensions.
 
 ## Use in an IDE (VS Code / Jupyter kernel)
 

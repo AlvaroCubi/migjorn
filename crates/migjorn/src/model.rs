@@ -372,6 +372,9 @@ impl Model {
     /// original tokens, so every other byte of the card — geometry spacing,
     /// continuation lines, inline comments, the parameter tail — is preserved.
     pub fn set_cell_material(&mut self, card_index: usize, material: i64) -> Result<(), EditError> {
+        // Decides from the card's current tokens, so any pending splice must be
+        // baked in first (a no-op unless one is pending). See `Model::view`.
+        self.materialize();
         let slot = self.tree.card_slot(card_index);
         let cell = parse_cell(&self.tree, card_index).ok_or(EditError::NotACell)?;
         let mat_tok = cell.material_token.ok_or(EditError::NoMaterialField)?;
@@ -418,6 +421,9 @@ impl Model {
     /// [`Model::set_cell_material`], which makes the cell non-void with a
     /// placeholder density) and then set the real density.
     pub fn set_cell_density(&mut self, card_index: usize, density: f64) -> Result<(), EditError> {
+        // Decides from the card's current tokens, so any pending splice must be
+        // baked in first (a no-op unless one is pending). See `Model::view`.
+        self.materialize();
         let slot = self.tree.card_slot(card_index);
         let cell = parse_cell(&self.tree, card_index).ok_or(EditError::NotACell)?;
 
@@ -458,6 +464,9 @@ impl Model {
         card_index: usize,
         transform: Option<i64>,
     ) -> Result<(), EditError> {
+        // Decides from the card's current tokens, so any pending splice must be
+        // baked in first (a no-op unless one is pending). See `Model::view`.
+        self.materialize();
         let s = parse_surface(&self.tree, card_index).ok_or(EditError::NotASurface)?;
         match (s.transform_token, transform) {
             (Some(tok), Some(v)) => self.tree.set_token_int(tok, v),
@@ -486,6 +495,9 @@ impl Model {
         i: usize,
         value: f64,
     ) -> Result<(), EditError> {
+        // Decides from the card's current tokens, so any pending splice must be
+        // baked in first (a no-op unless one is pending). See `Model::view`.
+        self.materialize();
         let s = parse_surface(&self.tree, card_index).ok_or(EditError::NotASurface)?;
         let tok = *s.coeff_tokens.get(i).ok_or(EditError::IndexOutOfRange)?;
         self.tree.set_token_text(tok, format!("{value}"));
@@ -500,6 +512,9 @@ impl Model {
         entry: usize,
         value: f64,
     ) -> Result<(), EditError> {
+        // Decides from the card's current tokens, so any pending splice must be
+        // baked in first (a no-op unless one is pending). See `Model::view`.
+        self.materialize();
         let m = parse_material(&self.tree, card_index).ok_or(EditError::NotAMaterial)?;
         let e = m.entries.get(entry).ok_or(EditError::IndexOutOfRange)?;
         self.tree
@@ -515,6 +530,9 @@ impl Model {
         entry: usize,
         zaid: &str,
     ) -> Result<(), EditError> {
+        // Decides from the card's current tokens, so any pending splice must be
+        // baked in first (a no-op unless one is pending). See `Model::view`.
+        self.materialize();
         let m = parse_material(&self.tree, card_index).ok_or(EditError::NotAMaterial)?;
         let e = m.entries.get(entry).ok_or(EditError::IndexOutOfRange)?;
         self.tree.set_token_text(e.zaid_token, zaid.to_string());
@@ -531,6 +549,9 @@ impl Model {
         card_index: usize,
         displacement: [f64; 3],
     ) -> Result<(), EditError> {
+        // Decides from the card's current tokens, so any pending splice must be
+        // baked in first (a no-op unless one is pending). See `Model::view`.
+        self.materialize();
         let t = parse_transform(&self.tree, card_index).ok_or(EditError::NotATransform)?;
         let present = t
             .displacement_tokens
@@ -570,6 +591,9 @@ impl Model {
         card_index: usize,
         rotation: &[f64],
     ) -> Result<(), EditError> {
+        // Decides from the card's current tokens, so any pending splice must be
+        // baked in first (a no-op unless one is pending). See `Model::view`.
+        self.materialize();
         let t = parse_transform(&self.tree, card_index).ok_or(EditError::NotATransform)?;
         let old = t.rotation_tokens.len();
         let new = rotation.len();
@@ -814,6 +838,9 @@ impl Model {
         key: &str,
         value: &str,
     ) -> Result<bool, EditError> {
+        // Decides from the card's current tokens, so any pending splice must be
+        // baked in first (a no-op unless one is pending). See `Model::view`.
+        self.materialize();
         let card = *self
             .tree
             .cards()
@@ -870,6 +897,9 @@ impl Model {
     /// spacing, continuation lines, existing parameters — stays byte-for-byte.
     /// `text` must be non-empty and single-line.
     pub fn add_cell_param(&mut self, card_index: usize, text: &str) -> Result<(), EditError> {
+        // Decides from the card's current tokens, so any pending splice must be
+        // baked in first (a no-op unless one is pending). See `Model::view`.
+        self.materialize();
         let text = text.trim();
         if text.is_empty() || text.contains(['\n', '\r']) {
             return Err(EditError::InvalidCardText);
@@ -910,6 +940,9 @@ impl Model {
     /// are individually removable. Case-insensitive. Returns whether one was
     /// removed. Lossless for a cell that has not been structurally re-emitted.
     pub fn remove_cell_param(&mut self, card_index: usize, key: &str) -> Result<bool, EditError> {
+        // Decides from the card's current tokens, so any pending splice must be
+        // baked in first (a no-op unless one is pending). See `Model::view`.
+        self.materialize();
         let (want_key, want_particle) = parse_param_key(key);
         let params = cell_param_ranges(&self.tree, card_index);
         let Some(p) = params
@@ -2076,6 +2109,64 @@ sdef pos=0 0 0
         let idx = v.index();
         assert_eq!(idx.cell(1), Some(ci));
         assert!(v.to_source().contains("u=7"), "{}", v.to_source());
+    }
+
+    /// Back-to-back edits on one card must not read stale tokens.
+    ///
+    /// An editor that decides from the card's current tokens (which field
+    /// exists, how many values are present) cannot see a previous *splice* —
+    /// those are emit-only. Without a `materialize` these silently produced
+    /// wrong output, and only when no read happened in between, since any read
+    /// materialises and hides the bug. Each case below is a real regression.
+    #[test]
+    fn consecutive_edits_do_not_read_stale_tokens() {
+        const SRC: &str = "t\n1 1 -1.0 -1 imp:n=1\n\n3 CZ 5\n\nm1 1001 1\ntr1 0 0 5\n";
+
+        // Attaching a transform then detaching it must leave no transform: the
+        // detach has to see the spliced-in field.
+        let mut m = Model::parse(SRC);
+        let s3 = m.view().index().surface(3).unwrap();
+        m.set_surface_transform(s3, Some(1)).unwrap();
+        m.set_surface_transform(s3, None).unwrap();
+        assert!(m.to_source().contains("3 CZ 5"), "got: {}", m.to_source());
+        assert_eq!(m.view().surfaces().next().unwrap().transform, None);
+
+        // A second rotation replaces the first rather than appending to it.
+        let mut m = Model::parse(SRC);
+        let t1 = m.view().index().transform(1).unwrap();
+        m.set_transform_rotation(t1, &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+            .unwrap();
+        m.set_transform_rotation(t1, &[2.0, 0.0, 0.0]).unwrap();
+        assert_eq!(
+            m.view().transforms().next().unwrap().rotation,
+            [2.0, 0.0, 0.0]
+        );
+
+        // Void then non-void must yield the placeholder density, not the stale
+        // pre-void one.
+        let mut m = Model::parse(SRC);
+        let c1 = m.view().index().cell(1).unwrap();
+        m.set_cell_material(c1, 0).unwrap();
+        m.set_cell_material(c1, 2).unwrap();
+        assert!(
+            m.to_source().contains("1 2 0 -1 imp:n=1"),
+            "got: {}",
+            m.to_source()
+        );
+
+        // A spliced-in parameter is visible to a later set/remove of that key.
+        let mut m = Model::parse(SRC);
+        let c1 = m.view().index().cell(1).unwrap();
+        m.add_cell_param(c1, "vol=1").unwrap();
+        assert!(m.set_cell_param(c1, "vol", "9").unwrap(), "must find vol");
+        assert_eq!(m.view().cell_param(c1, "vol").unwrap().value, "9");
+
+        let mut m = Model::parse(SRC);
+        let c1 = m.view().index().cell(1).unwrap();
+        m.add_cell_param(c1, "vol=1").unwrap();
+        assert!(m.remove_cell_param(c1, "vol").unwrap(), "must find vol");
+        assert!(m.view().cell_param(c1, "vol").is_none());
+        assert!(!m.to_source().contains("vol"), "got: {}", m.to_source());
     }
 
     #[test]

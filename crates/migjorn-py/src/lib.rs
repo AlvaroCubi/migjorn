@@ -76,20 +76,34 @@ struct Cell {
 }
 
 impl Cell {
-    /// Resolve this handle's current card and read it (preferring an edited
-    /// view), running `f` on it. Raises if the card no longer exists or is no
-    /// longer a cell.
-    fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::CellRead) -> R) -> PyResult<R> {
-        let m = self.model.bind(py).borrow();
-        let ci = m
-            .inner
+    /// Take a [`ModelView`] over the model, resolve this handle's current card
+    /// index, and run `f`. `borrow_mut` because `Model::view` materialises any
+    /// pending splices so reads match emission; the borrow is released before
+    /// this returns, since every read hands back owned data.
+    ///
+    /// [`ModelView`]: core::ModelView
+    fn with_view<R>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&core::ModelView, usize) -> PyResult<R>,
+    ) -> PyResult<R> {
+        let mut m = self.model.bind(py).borrow_mut();
+        let view = m.inner.view();
+        let ci = view
             .card_index_of_slot(self.slot)
             .ok_or_else(stale_handle)?;
-        let view = m
-            .inner
-            .read_cell(ci)
-            .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid cell"))?;
-        Ok(f(&view))
+        f(&view, ci)
+    }
+
+    /// Resolve this handle's current card and read it, running `f` on it.
+    /// Raises if the card no longer exists or is no longer a cell.
+    fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Cell) -> R) -> PyResult<R> {
+        self.with_view(py, |view, ci| {
+            let cell = view
+                .cell_at(ci)
+                .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid cell"))?;
+            Ok(f(&cell))
+        })
     }
 
     /// Run a mutation `f` on the model for this handle's card, then invalidate
@@ -114,11 +128,11 @@ impl Cell {
 impl Cell {
     #[getter]
     fn id(&self, py: Python<'_>) -> PyResult<i64> {
-        self.read(py, |c| c.id())
+        self.read(py, |c| c.id)
     }
     #[getter]
     fn material(&self, py: Python<'_>) -> PyResult<Option<i64>> {
-        self.read(py, |c| c.material())
+        self.read(py, |c| c.material)
     }
     #[setter]
     fn set_material(&self, py: Python<'_>, value: i64) -> PyResult<()> {
@@ -126,7 +140,7 @@ impl Cell {
     }
     #[getter]
     fn density(&self, py: Python<'_>) -> PyResult<Option<f64>> {
-        self.read(py, |c| c.density())
+        self.read(py, |c| c.density)
     }
     #[setter]
     fn set_density(&self, py: Python<'_>, value: f64) -> PyResult<()> {
@@ -138,7 +152,7 @@ impl Cell {
     }
     #[getter]
     fn like(&self, py: Python<'_>) -> PyResult<Option<i64>> {
-        self.read(py, |c| c.like())
+        self.read(py, |c| c.like_id())
     }
     #[getter]
     fn surface_ids(&self, py: Python<'_>) -> PyResult<Vec<i64>> {
@@ -150,31 +164,19 @@ impl Cell {
     }
     #[getter]
     fn cell_refs(&self, py: Python<'_>) -> PyResult<Vec<i64>> {
-        self.read(py, |c| c.cell_refs())
+        self.read(py, |c| c.cell_ref_ids())
     }
     #[getter]
     fn universe(&self, py: Python<'_>) -> PyResult<Option<i64>> {
-        // `borrow_mut`: `cell_universe` takes `&mut` (materialises pending param
-        // splices so the read matches emission).
-        let mut m = self.model.bind(py).borrow_mut();
-        let ci = m
-            .inner
-            .card_index_of_slot(self.slot)
-            .ok_or_else(stale_handle)?;
-        Ok(m.inner.cell_universe(ci))
+        self.with_view(py, |view, ci| Ok(view.cell_universe(ci)))
     }
     #[getter]
     fn fill(&self, py: Python<'_>) -> PyResult<Option<Fill>> {
-        let mut m = self.model.bind(py).borrow_mut();
-        let ci = m
-            .inner
-            .card_index_of_slot(self.slot)
-            .ok_or_else(stale_handle)?;
-        Ok(m.inner.cell_fill(ci).map(Fill::from))
+        self.with_view(py, |view, ci| Ok(view.cell_fill(ci).map(Fill::from)))
     }
     #[getter]
     fn well_formed(&self, py: Python<'_>) -> PyResult<bool> {
-        self.read(py, |c| c.well_formed())
+        self.read(py, |c| c.well_formed)
     }
     #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
@@ -212,29 +214,15 @@ impl Cell {
 
     #[getter]
     fn params(&self, py: Python<'_>) -> PyResult<Vec<CellParam>> {
-        // `borrow_mut`: `cell_params` takes `&mut` (materialises pending param
-        // splices/replace-mode tails so the read matches emission).
-        let mut m = self.model.bind(py).borrow_mut();
-        let ci = m
-            .inner
-            .card_index_of_slot(self.slot)
-            .ok_or_else(stale_handle)?;
-        Ok(m.inner
-            .cell_params(ci)
-            .into_iter()
-            .map(Into::into)
-            .collect())
+        self.with_view(py, |view, ci| {
+            Ok(view.cell_params(ci).into_iter().map(Into::into).collect())
+        })
     }
 
     /// Read the first parameter matching ``key`` — a bare keyword (``"vol"``) or
     /// a particle-qualified one (``"imp:n"``) — or ``None`` if absent.
     fn param(&self, py: Python<'_>, key: &str) -> PyResult<Option<CellParam>> {
-        let mut m = self.model.bind(py).borrow_mut();
-        let ci = m
-            .inner
-            .card_index_of_slot(self.slot)
-            .ok_or_else(stale_handle)?;
-        Ok(m.inner.cell_param(ci, key).map(Into::into))
+        self.with_view(py, |view, ci| Ok(view.cell_param(ci, key).map(Into::into)))
     }
 
     /// Rewrite the value of the first parameter matching ``key`` in place (e.g.
@@ -271,9 +259,7 @@ impl Cell {
         self.read(py, |c| {
             format!(
                 "Cell(id={}, material={:?}, density={:?})",
-                c.id(),
-                c.material(),
-                c.density()
+                c.id, c.material, c.density
             )
         })
     }
@@ -297,15 +283,16 @@ struct Surface {
 }
 
 impl Surface {
+    /// Take a view (materialising pending splices so reads match emission) and
+    /// read this handle's card. Raises if the card no longer exists or is no
+    /// longer a surface.
     fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Surface) -> R) -> PyResult<R> {
-        // `borrow_mut`: `surface_by_slot` takes `&mut` (it materialises any
-        // pending `set_surface_transform` splice so the view matches emission).
         let mut m = self.model.bind(py).borrow_mut();
-        if m.inner.card_index_of_slot(self.slot).is_none() {
+        let view = m.inner.view();
+        if view.card_index_of_slot(self.slot).is_none() {
             return Err(stale_handle());
         }
-        let surface = m
-            .inner
+        let surface = view
             .surface_by_slot(self.slot)
             .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid surface"))?;
         Ok(f(&surface))
@@ -431,13 +418,16 @@ struct Material {
 }
 
 impl Material {
+    /// Take a view (materialising pending splices so reads match emission) and
+    /// read this handle's card. Raises if the card no longer exists or is no
+    /// longer a material.
     fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Material) -> R) -> PyResult<R> {
-        let m = self.model.bind(py).borrow();
-        if m.inner.card_index_of_slot(self.slot).is_none() {
+        let mut m = self.model.bind(py).borrow_mut();
+        let view = m.inner.view();
+        if view.card_index_of_slot(self.slot).is_none() {
             return Err(stale_handle());
         }
-        let material = m
-            .inner
+        let material = view
             .material_by_slot(self.slot)
             .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid material"))?;
         Ok(f(&material))
@@ -524,15 +514,16 @@ struct Transform {
 }
 
 impl Transform {
+    /// Take a view (materialising pending splices so reads match emission) and
+    /// read this handle's card. Raises if the card no longer exists or is no
+    /// longer a transform.
     fn read<R>(&self, py: Python<'_>, f: impl FnOnce(&core::Transform) -> R) -> PyResult<R> {
-        // `borrow_mut`: `transform_by_slot` takes `&mut` (it materialises any
-        // pending displacement/rotation splice so the view matches emission).
         let mut m = self.model.bind(py).borrow_mut();
-        if m.inner.card_index_of_slot(self.slot).is_none() {
+        let view = m.inner.view();
+        if view.card_index_of_slot(self.slot).is_none() {
             return Err(stale_handle());
         }
-        let transform = m
-            .inner
+        let transform = view
             .transform_by_slot(self.slot)
             .ok_or_else(|| PyRuntimeError::new_err("card is no longer a valid transform"))?;
         Ok(f(&transform))
@@ -801,8 +792,16 @@ impl Model {
         }
     }
 
-    fn idx(&self) -> &core::ModelIndex {
-        self.index.get_or_init(|| self.inner.index())
+    /// The cached id index, built on first use. `&mut self`: the index is built
+    /// through a `ModelView`, which materialises pending splices — so a cached
+    /// index can never disagree with what the model emits. Cleared by
+    /// `invalidate` after any structural/number edit.
+    fn idx(&mut self) -> &core::ModelIndex {
+        if self.index.get().is_none() {
+            let built = self.inner.view().index();
+            let _ = self.index.set(built);
+        }
+        self.index.get().expect("just initialised")
     }
 
     /// Invalidate the cached id index after a structural/number edit.
@@ -843,7 +842,7 @@ impl Model {
         self.inner.to_source()
     }
 
-    fn __repr__(&self) -> String {
+    fn __repr__(&mut self) -> String {
         let idx = self.idx();
         format!(
             "Model(cells={}, surfaces={}, materials={}, transforms={}, diagnostics={})",
@@ -932,36 +931,36 @@ impl Model {
     /// All data cards (generic view), in source order.
     #[getter]
     fn data_cards(&mut self) -> Vec<DataCard> {
-        self.inner.data_cards().map(DataCard::from).collect()
+        self.inner.view().data_cards().map(DataCard::from).collect()
     }
 
     /// Number of cells (cheap; does not build the cell list).
     #[getter]
-    fn num_cells(&self) -> usize {
+    fn num_cells(&mut self) -> usize {
         self.idx().cell_count()
     }
 
     /// Number of surfaces (cheap; does not build the surface list).
     #[getter]
-    fn num_surfaces(&self) -> usize {
+    fn num_surfaces(&mut self) -> usize {
         self.idx().surface_count()
     }
 
     /// Number of materials (cheap; does not build the material list).
     #[getter]
-    fn num_materials(&self) -> usize {
+    fn num_materials(&mut self) -> usize {
         self.idx().material_count()
     }
 
     /// Number of transforms (cheap; does not build the transform list).
     #[getter]
-    fn num_transforms(&self) -> usize {
+    fn num_transforms(&mut self) -> usize {
         self.idx().transform_count()
     }
 
     /// Look up a surface by number, or ``None``.
     fn surface(slf: Bound<'_, Self>, id: i64) -> Option<Surface> {
-        let m = slf.borrow();
+        let mut m = slf.borrow_mut();
         let ci = m.idx().surface(id)?;
         let slot = m.inner.slot_at(ci);
         Some(Surface {
@@ -972,7 +971,7 @@ impl Model {
 
     /// Look up a cell by number, or ``None``.
     fn cell(slf: Bound<'_, Self>, id: i64) -> Option<Cell> {
-        let m = slf.borrow();
+        let mut m = slf.borrow_mut();
         let ci = m.idx().cell(id)?;
         let slot = m.inner.slot_at(ci);
         Some(Cell {
@@ -983,7 +982,7 @@ impl Model {
 
     /// Look up a material by number, or ``None``.
     fn material(slf: Bound<'_, Self>, id: i64) -> Option<Material> {
-        let m = slf.borrow();
+        let mut m = slf.borrow_mut();
         let ci = m.idx().material(id)?;
         let slot = m.inner.slot_at(ci);
         Some(Material {
@@ -994,7 +993,7 @@ impl Model {
 
     /// Look up a transform by number, or ``None``.
     fn transform(slf: Bound<'_, Self>, id: i64) -> Option<Transform> {
-        let m = slf.borrow();
+        let mut m = slf.borrow_mut();
         let ci = m.idx().transform(id)?;
         let slot = m.inner.slot_at(ci);
         Some(Transform {
@@ -1171,13 +1170,13 @@ impl Model {
     /// definitions, dangling surface/cell/material references from cells, and a
     /// surface whose transform (or periodic partner surface) is undefined.
     fn validate(&mut self) -> Vec<String> {
-        self.inner.validate()
+        self.inner.view().validate()
     }
 
     /// Every universe defined by a ``u=`` in the model, sorted ascending and
     /// deduplicated. Universe 0 (the real world) is not reported.
     fn universe_ids(&mut self) -> Vec<i64> {
-        self.inner.universe_ids()
+        self.inner.view().universe_ids()
     }
 
     /// Carve universe ``u`` into a new :class:`Model`: its cells plus everything

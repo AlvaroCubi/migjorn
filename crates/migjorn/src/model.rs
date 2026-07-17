@@ -1,9 +1,28 @@
 //! The high-level `Model` facade.
 //!
-//! `Model` wraps a parsed tree plus diagnostics and exposes typed iterators, an
-//! id-lookup index, editing (renumbering), and lossless re-emission. It is the
-//! surface downstream crates and the Python bindings consume — owned types, no
-//! leaked lifetimes.
+//! `Model` wraps a parsed tree plus diagnostics and owns *editing* (renumbering,
+//! card add/remove, in-place value edits) and lossless re-emission. *Reading* —
+//! typed iterators, the id-lookup index, cell parameters, validation — lives on
+//! [`ModelView`], obtained from [`Model::view`]. It is the surface downstream
+//! crates and the Python bindings consume — owned types, no leaked lifetimes.
+//!
+//! # Why reads go through a view
+//!
+//! Some edits are *splices* (token insertions/deletions and whole-card
+//! replacements) that the CST applies only at emit time, so a reader walking raw
+//! tokens would disagree with `to_source()`. [`Model::materialize`] bakes them
+//! in by reparsing, but it is deliberately *lazy*: N edits cost one reparse at
+//! the next read, and the common `parse → renumber → emit` path never reparses
+//! at all (renumbering writes token overrides only, which emission already
+//! applies).
+//!
+//! Laziness has to be triggered by someone. Doing it in each reader would make
+//! every reader `&mut self` — which is contagious: readers stop composing, a
+//! `&Model` can no longer read, and the rule is still only enforced by
+//! convention. Instead `Model::view` pays the `&mut` once, at the boundary where
+//! normalization actually happens, and hands out a `ModelView` whose readers are
+//! all `&self`. The invariant is then structural: you cannot reach a reader
+//! without having materialized first.
 
 use migjorn_syntax::{Diagnostic, GreenTree, Parsed, SyntaxKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -60,50 +79,34 @@ impl Model {
         self.tree.to_source()
     }
 
-    /// Iterate cells in source order.
+    /// Materialize any pending splices and hand out a [`ModelView`]: a
+    /// consistent, read-only projection whose readers are all `&self`, so they
+    /// compose and can be shared.
     ///
-    /// Takes `&mut self` because it first [`materialize`s](Self::materialize) any
-    /// pending geometry/param splices, so the typed views agree with
-    /// [`to_source`](Self::to_source). The returned iterator borrows the model
-    /// for its lifetime; collect it (or use a terminal op) before mutating again.
-    pub fn cells(&mut self) -> impl Iterator<Item = Cell> + '_ {
+    /// This is the *only* entry point to the typed readers. Taking `&mut self`
+    /// here — once, at the boundary where normalization actually happens —
+    /// is what lets everything downstream be `&self`: the view cannot observe a
+    /// tree that disagrees with [`to_source`](Self::to_source), because
+    /// obtaining one requires materializing first.
+    ///
+    /// ```
+    /// # use migjorn::Model;
+    /// # let mut model = Model::parse("t\n1 0 -1\n\n1 SO 5\n\nm1 1001 1\n");
+    /// let view = model.view();
+    /// let idx = view.index();
+    /// // Readers nest: iterate cells while reading each one's params.
+    /// for cell in view.cells() {
+    ///     let _params = view.cell_params(cell.card_index);
+    ///     assert_eq!(idx.cell(cell.id), Some(cell.card_index));
+    /// }
+    /// ```
+    pub fn view(&mut self) -> ModelView<'_> {
         self.materialize();
-        cells(&self.tree)
-    }
-
-    /// Iterate surfaces in source order. `&mut self`: see [`Model::cells`] (a
-    /// `set_surface_transform` splice must be materialised to match emission).
-    pub fn surfaces(&mut self) -> impl Iterator<Item = Surface> + '_ {
-        self.materialize();
-        surfaces(&self.tree)
-    }
-
-    /// Iterate `TRn` transforms in source order. `&mut self`: see [`Model::cells`]
-    /// (a displacement/rotation splice must be materialised).
-    pub fn transforms(&mut self) -> impl Iterator<Item = Transform> + '_ {
-        self.materialize();
-        transforms(&self.tree)
-    }
-
-    /// Iterate `Mn` materials in source order. `&mut self` for signature
-    /// uniformity with the other iterators; material edits are override-only
-    /// today, so the [`materialize`](Self::materialize) call is a no-op — but
-    /// this keeps the reader correct if a splice-based material edit is ever added.
-    pub fn materials(&mut self) -> impl Iterator<Item = Material> + '_ {
-        self.materialize();
-        materials(&self.tree)
-    }
-
-    /// Iterate all data cards generically, in source order. `&mut self` for
-    /// uniformity; data-card edits are override-only, so `materialize` is a no-op.
-    pub fn data_cards(&mut self) -> impl Iterator<Item = DataCard> + '_ {
-        self.materialize();
-        data_cards(&self.tree)
-    }
-
-    /// Build an id-lookup index over the model.
-    pub fn index(&self) -> ModelIndex {
-        ModelIndex::build(&self.tree)
+        debug_assert!(
+            self.owned_cells.is_empty(),
+            "materialize must leave the CST as the sole source of truth"
+        );
+        ModelView { tree: &self.tree }
     }
 
     // --- Stable-handle addressing --------------------------------------------
@@ -158,36 +161,6 @@ impl Model {
             .collect()
     }
 
-    /// Read the surface with stable `slot`, or `None` if the slot no longer
-    /// resolves to a surface card. `&mut self`: a `set_surface_transform` splice
-    /// must be [materialised](Self::materialize) so the view matches emission.
-    pub fn surface_by_slot(&mut self, slot: u32) -> Option<Surface> {
-        self.materialize();
-        let ci = self.tree.card_by_slot(slot)?;
-        parse_surface(&self.tree, ci)
-    }
-
-    /// Read the material with stable `slot`, or `None`.
-    ///
-    /// Stays `&self`: material edits (`set_material_fraction`/`set_material_zaid`
-    /// and renumbering) are token *overrides*, which `token_text` already
-    /// applies — never splices — so this reader can never diverge from emission.
-    /// If a splice-based material edit is ever added, switch this to the
-    /// `&mut self` + [`materialize`](Self::materialize) pattern.
-    pub fn material_by_slot(&self, slot: u32) -> Option<Material> {
-        let ci = self.tree.card_by_slot(slot)?;
-        parse_material(&self.tree, ci)
-    }
-
-    /// Read the transform with stable `slot`, or `None`. `&mut self`: a
-    /// displacement/rotation splice must be [materialised](Self::materialize) so
-    /// the view matches emission.
-    pub fn transform_by_slot(&mut self, slot: u32) -> Option<Transform> {
-        self.materialize();
-        let ci = self.tree.card_by_slot(slot)?;
-        parse_transform(&self.tree, ci)
-    }
-
     /// Renumber every surface (definitions + references) via `map`.
     pub fn renumber_surfaces(&mut self, map: impl FnMut(i64) -> i64) {
         self.materialize();
@@ -229,17 +202,6 @@ impl Model {
         renumber_tallies(&mut self.tree, map);
     }
 
-    /// Read the cell at `card_index`, preferring a structurally-edited (owned)
-    /// view when one exists, else the freshly-parsed CST view. This is the
-    /// single read path so that reads and re-emission agree after an edit.
-    pub fn read_cell(&self, card_index: usize) -> Option<CellRead<'_>> {
-        let slot = self.tree.card_slot(card_index);
-        if let Some(oc) = self.owned_cells.get(&slot) {
-            return Some(CellRead::Owned(oc));
-        }
-        Some(CellRead::Parsed(parse_cell(&self.tree, card_index)?))
-    }
-
     /// Add a new cell from MCNP `text` (a cell card body, e.g.
     /// `"10 6 -7.85 -5 6 imp:n=1"`), appended to the end of the cell block.
     /// Returns the new card's stable slot. The text must parse as exactly one
@@ -273,7 +235,7 @@ impl Model {
     /// Remove the `Mn` material numbered `id`. Returns whether a material was
     /// removed. Like [`Model::remove_cell`], this deletes the card only and does
     /// not rewrite references — any cell left pointing at the gone material is
-    /// reported by [`Model::validate`].
+    /// reported by [`ModelView::validate`].
     pub fn remove_material(&mut self, id: i64) -> Result<bool, EditError> {
         self.remove_card_where(|t, i| parse_material(t, i).is_some_and(|m| m.id == id))
     }
@@ -282,97 +244,6 @@ impl Model {
     /// transform was removed. Deletes the card only (see [`Model::remove_material`]).
     pub fn remove_transform(&mut self, id: i64) -> Result<bool, EditError> {
         self.remove_card_where(|t, i| parse_transform(t, i).is_some_and(|tr| tr.id == id))
-    }
-
-    /// Check the model's consistency and return a list of human-readable
-    /// problems (empty when the model is consistent). Two families of problem
-    /// are reported, in this order:
-    ///
-    /// - **Duplicate definitions** — a cell, surface, material, or transform
-    ///   number defined by more than one card (each offending number reported
-    ///   once, in source order).
-    /// - **Dangling references** — every surface, cell, or material a cell
-    ///   references must exist; a surface's transformation number must name a
-    ///   defined `TRn`, and a periodic surface (a negative transform field) must
-    ///   name a defined partner surface.
-    ///
-    /// This is a semantic check, not a syntactic one: malformed cards surface as
-    /// [`Model::diagnostics`] at parse time and are simply skipped here.
-    ///
-    /// `&mut self`: [materialises](Self::materialize) pending splices first so
-    /// references inside structurally-edited cells are validated against what the
-    /// model actually emits. The reads below then use the internal free functions
-    /// on the now-clean tree.
-    pub fn validate(&mut self) -> Vec<String> {
-        self.materialize();
-        let idx = self.index();
-        let mut problems = Vec::new();
-
-        // --- Duplicate definitions ------------------------------------------
-        // Ids are read straight from the typed iterators (source order), so a
-        // number redefined by a later card is reported exactly once.
-        report_duplicates(&mut problems, "cell", cells(&self.tree).map(|c| c.id));
-        report_duplicates(&mut problems, "surface", surfaces(&self.tree).map(|s| s.id));
-        report_duplicates(
-            &mut problems,
-            "material",
-            materials(&self.tree).map(|m| m.id),
-        );
-        report_duplicates(
-            &mut problems,
-            "transform",
-            transforms(&self.tree).map(|t| t.id),
-        );
-
-        // --- Dangling references from cells ---------------------------------
-        // Iterate every card position through `read_cell` so structurally-edited
-        // (owned) cells are validated against their current, edited state.
-        for pos in 0..self.tree.cards().len() {
-            let Some(cr) = self.read_cell(pos) else {
-                continue;
-            };
-            let id = cr.id();
-            for sid in cr.surface_ids() {
-                if idx.surface(sid).is_none() {
-                    problems.push(format!("cell {id} references missing surface {sid}"));
-                }
-            }
-            for rid in cr.cell_refs() {
-                if idx.cell(rid).is_none() {
-                    problems.push(format!("cell {id} references missing cell {rid}"));
-                }
-            }
-            if let Some(m) = cr.material() {
-                if m != 0 && idx.material(m).is_none() {
-                    problems.push(format!("cell {id} references missing material {m}"));
-                }
-            }
-        }
-
-        // --- Dangling references from surfaces ------------------------------
-        // A surface's optional field before the mnemonic is either a positive
-        // `TRn` number or, when negative, a periodic partner *surface* number.
-        for s in surfaces(&self.tree) {
-            match s.transform {
-                Some(n) if n > 0 => {
-                    if idx.transform(n).is_none() {
-                        problems.push(format!("surface {} references missing transform {n}", s.id));
-                    }
-                }
-                Some(n) if n < 0 => {
-                    let partner = -n;
-                    if idx.surface(partner).is_none() {
-                        problems.push(format!(
-                            "surface {} is periodic with missing surface {partner}",
-                            s.id
-                        ));
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        problems
     }
 
     /// Validate `text` as a single card of `kind`, splice it into the end of the
@@ -931,30 +802,6 @@ impl Model {
         Ok(())
     }
 
-    /// Read every cell parameter (`imp:n`, `vol`, `fill`, `trcl`, …) of the cell
-    /// at `card_index` as [`CellParam`] views, in source order. Empty for a
-    /// non-cell, a `LIKE n BUT` cell, or a cell with no parameter section.
-    ///
-    /// `&mut self`: [materialising](Self::materialize) first bakes any spliced-in
-    /// parameters (`add_cell_param`) and replace-mode tails into real tokens, so
-    /// the CST scan sees exactly what [`to_source`](Self::to_source) emits.
-    pub fn cell_params(&mut self, card_index: usize) -> Vec<CellParam> {
-        self.materialize();
-        cell_param_views(&self.tree, card_index)
-    }
-
-    /// Read the first parameter matching `key` (`"vol"`, or a particle-qualified
-    /// `"imp:n"`; see [`Model::remove_cell_param`] for the match rules), or `None`.
-    pub fn cell_param(&mut self, card_index: usize, key: &str) -> Option<CellParam> {
-        let (want_key, want_particle) = parse_param_key(key);
-        self.cell_params(card_index).into_iter().find(|v| {
-            v.key == want_key
-                && want_particle
-                    .as_deref()
-                    .is_none_or(|p| v.particle.as_deref() == Some(p))
-        })
-    }
-
     /// Rewrite the value of the first parameter matching `key` in place (e.g.
     /// `set_cell_param(ci, "imp:n", "2")`), returning whether one matched. The
     /// keyword and its position are untouched — only the value is replaced — so
@@ -1425,80 +1272,188 @@ fn validate_snippet(text: &str, kind: SyntaxKind) -> Result<(), EditError> {
     }
 }
 
-/// A read view of a cell: either a structurally-edited owned node or a freshly
-/// parsed CST view. Exposes the same fields either way so callers need not
-/// branch. Returned by [`Model::read_cell`].
-pub enum CellRead<'a> {
-    /// A structurally-edited cell (source of truth is the owned node).
-    Owned(&'a OwnedCell),
-    /// An unedited cell, parsed from the CST.
-    Parsed(Cell),
+/// A consistent, read-only projection of a [`Model`] whose pending splices have
+/// been materialized. Obtained from [`Model::view`].
+///
+/// Every reader here takes `&self`, so they compose freely (iterate `cells()`
+/// while calling `cell_param()` inside the loop) and a `&ModelView` can be
+/// passed around or shared. The `&mut` cost is paid once, in `Model::view`.
+///
+/// A view borrows the model, so the model cannot be edited while one is alive;
+/// drop it (or scope it) before the next edit, then take a fresh one.
+pub struct ModelView<'a> {
+    pub(crate) tree: &'a GreenTree,
 }
 
-impl CellRead<'_> {
-    /// Cell number.
-    pub fn id(&self) -> i64 {
-        match self {
-            CellRead::Owned(o) => o.id,
-            CellRead::Parsed(c) => c.id,
-        }
+impl ModelView<'_> {
+    /// Iterate cells in source order.
+    pub fn cells(&self) -> impl Iterator<Item = Cell> + '_ {
+        cells(self.tree)
     }
-    /// Material number (0 = void; `None` for `LIKE n BUT`).
-    pub fn material(&self) -> Option<i64> {
-        match self {
-            CellRead::Owned(o) => o.material,
-            CellRead::Parsed(c) => c.material,
-        }
+
+    /// Iterate surfaces in source order.
+    pub fn surfaces(&self) -> impl Iterator<Item = Surface> + '_ {
+        surfaces(self.tree)
     }
-    /// Density (positive = atom, negative = mass; `None` for void).
-    pub fn density(&self) -> Option<f64> {
-        match self {
-            CellRead::Owned(o) => o.density,
-            CellRead::Parsed(c) => c.density,
-        }
+
+    /// Iterate `TRn` transforms in source order.
+    pub fn transforms(&self) -> impl Iterator<Item = Transform> + '_ {
+        transforms(self.tree)
     }
-    /// True when the material number is 0.
-    pub fn is_void(&self) -> bool {
-        self.material() == Some(0)
+
+    /// Iterate `Mn` materials in source order.
+    pub fn materials(&self) -> impl Iterator<Item = Material> + '_ {
+        materials(self.tree)
     }
-    /// Base cell for a `LIKE n BUT` card (never for an owned cell).
-    pub fn like(&self) -> Option<i64> {
-        match self {
-            CellRead::Owned(_) => None,
-            CellRead::Parsed(c) => c.like.map(|r| r.id),
-        }
+
+    /// Iterate all data cards generically, in source order.
+    pub fn data_cards(&self) -> impl Iterator<Item = DataCard> + '_ {
+        data_cards(self.tree)
     }
-    /// Referenced surface numbers (magnitudes), in order.
-    pub fn surface_ids(&self) -> Vec<i64> {
-        match self {
-            CellRead::Owned(o) => o.surface_ids(),
-            CellRead::Parsed(c) => c.surface_refs().iter().map(|r| r.id).collect(),
-        }
+
+    /// Build an id-lookup index over the model. Cannot go stale: a view only
+    /// exists over a materialized tree.
+    pub fn index(&self) -> ModelIndex {
+        ModelIndex::build(self.tree)
     }
-    /// Referenced surfaces with sense, in order.
-    pub fn signed_surfaces(&self) -> Vec<i64> {
-        match self {
-            CellRead::Owned(o) => o.signed_surfaces(),
-            CellRead::Parsed(c) => c
-                .surface_refs()
-                .iter()
-                .map(|r| if r.negative { -r.id } else { r.id })
-                .collect(),
-        }
+
+    /// Read the cell at `card_index`, or `None` if the card is not a cell.
+    pub fn cell_at(&self, card_index: usize) -> Option<Cell> {
+        parse_cell(self.tree, card_index)
     }
-    /// Referenced cells (`#n` complements, `LIKE n` base), in order.
-    pub fn cell_refs(&self) -> Vec<i64> {
-        match self {
-            CellRead::Owned(o) => o.cell_refs(),
-            CellRead::Parsed(c) => c.cell_refs().iter().map(|r| r.id).collect(),
-        }
+
+    /// Read the surface with stable `slot`, or `None` if the slot no longer
+    /// resolves to a surface card.
+    pub fn surface_by_slot(&self, slot: u32) -> Option<Surface> {
+        parse_surface(self.tree, self.tree.card_by_slot(slot)?)
     }
-    /// Whether the geometry parsed cleanly (owned cells are always well-formed).
-    pub fn well_formed(&self) -> bool {
-        match self {
-            CellRead::Owned(_) => true,
-            CellRead::Parsed(c) => c.well_formed,
+
+    /// Read the material with stable `slot`, or `None`.
+    pub fn material_by_slot(&self, slot: u32) -> Option<Material> {
+        parse_material(self.tree, self.tree.card_by_slot(slot)?)
+    }
+
+    /// Read the transform with stable `slot`, or `None`.
+    pub fn transform_by_slot(&self, slot: u32) -> Option<Transform> {
+        parse_transform(self.tree, self.tree.card_by_slot(slot)?)
+    }
+
+    /// Read the cell with stable `slot`, or `None`.
+    pub fn cell_by_slot(&self, slot: u32) -> Option<Cell> {
+        parse_cell(self.tree, self.tree.card_by_slot(slot)?)
+    }
+
+    /// Current card index of the card with stable `slot`, or `None` if no live
+    /// card has that slot (it was deleted).
+    pub fn card_index_of_slot(&self, slot: u32) -> Option<usize> {
+        self.tree.card_by_slot(slot)
+    }
+
+    /// Stable slot id of the card at `card_index`.
+    pub fn slot_at(&self, card_index: usize) -> u32 {
+        self.tree.card_slot(card_index)
+    }
+
+    /// The exact source text of the card at `card_index` (includes inline `$`
+    /// comments and continuations).
+    pub fn card_source(&self, card_index: usize) -> String {
+        self.tree.card_source(card_index)
+    }
+
+    /// Re-emit the model as source text.
+    pub fn to_source(&self) -> String {
+        self.tree.to_source()
+    }
+
+    /// Read every cell parameter (`imp:n`, `vol`, `fill`, `trcl`, ...) of the cell
+    /// at `card_index` as [`CellParam`] views, in source order. Empty for a
+    /// non-cell, a `LIKE n BUT` cell, or a cell with no parameter section.
+    pub fn cell_params(&self, card_index: usize) -> Vec<CellParam> {
+        cell_param_views(self.tree, card_index)
+    }
+
+    /// Read the first parameter matching `key` (`"vol"`, or a particle-qualified
+    /// `"imp:n"`; see [`Model::remove_cell_param`] for the match rules), or `None`.
+    pub fn cell_param(&self, card_index: usize, key: &str) -> Option<CellParam> {
+        let (want_key, want_particle) = parse_param_key(key);
+        self.cell_params(card_index).into_iter().find(|v| {
+            v.key == want_key
+                && want_particle
+                    .as_deref()
+                    .is_none_or(|p| v.particle.as_deref() == Some(p))
+        })
+    }
+
+    /// Check the model's consistency and return a list of human-readable
+    /// problems (empty when the model is consistent). Two families of problem
+    /// are reported, in this order:
+    ///
+    /// - **Duplicate definitions** — a cell, surface, material, or transform
+    ///   number defined by more than one card (each offending number reported
+    ///   once, in source order).
+    /// - **Dangling references** — every surface, cell, or material a cell
+    ///   references must exist; a surface's transformation number must name a
+    ///   defined `TRn`, and a periodic surface (a negative transform field) must
+    ///   name a defined partner surface.
+    ///
+    /// This is a semantic check, not a syntactic one: malformed cards surface as
+    /// [`Model::diagnostics`] at parse time and are simply skipped here.
+    pub fn validate(&self) -> Vec<String> {
+        let idx = self.index();
+        let mut problems = Vec::new();
+
+        // --- Duplicate definitions ------------------------------------------
+        // Ids are read straight from the typed iterators (source order), so a
+        // number redefined by a later card is reported exactly once.
+        report_duplicates(&mut problems, "cell", self.cells().map(|c| c.id));
+        report_duplicates(&mut problems, "surface", self.surfaces().map(|s| s.id));
+        report_duplicates(&mut problems, "material", self.materials().map(|m| m.id));
+        report_duplicates(&mut problems, "transform", self.transforms().map(|t| t.id));
+
+        // --- Dangling references from cells ---------------------------------
+        for c in self.cells() {
+            let id = c.id;
+            for sid in c.surface_ids() {
+                if idx.surface(sid).is_none() {
+                    problems.push(format!("cell {id} references missing surface {sid}"));
+                }
+            }
+            for rid in c.cell_ref_ids() {
+                if idx.cell(rid).is_none() {
+                    problems.push(format!("cell {id} references missing cell {rid}"));
+                }
+            }
+            if let Some(m) = c.material {
+                if m != 0 && idx.material(m).is_none() {
+                    problems.push(format!("cell {id} references missing material {m}"));
+                }
+            }
         }
+
+        // --- Dangling references from surfaces ------------------------------
+        // A surface's optional field before the mnemonic is either a positive
+        // `TRn` number or, when negative, a periodic partner *surface* number.
+        for s in self.surfaces() {
+            match s.transform {
+                Some(n) if n > 0 => {
+                    if idx.transform(n).is_none() {
+                        problems.push(format!("surface {} references missing transform {n}", s.id));
+                    }
+                }
+                Some(n) if n < 0 => {
+                    let partner = -n;
+                    if idx.surface(partner).is_none() {
+                        problems.push(format!(
+                            "surface {} is periodic with missing surface {partner}",
+                            s.id
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        problems
     }
 }
 
@@ -1685,20 +1640,20 @@ sdef pos=0 0 0
     #[test]
     fn facade_iterators_and_roundtrip() {
         let mut d = Model::parse(MODEL);
-        assert_eq!(d.cells().count(), 2);
-        assert_eq!(d.surfaces().count(), 1);
-        assert_eq!(d.materials().count(), 1);
-        assert_eq!(d.transforms().count(), 1);
+        assert_eq!(d.view().cells().count(), 2);
+        assert_eq!(d.view().surfaces().count(), 1);
+        assert_eq!(d.view().materials().count(), 1);
+        assert_eq!(d.view().transforms().count(), 1);
         // sdef + m1 + tr1 are all data cards.
-        assert_eq!(d.data_cards().count(), 3);
+        assert_eq!(d.view().data_cards().count(), 3);
         assert!(d.diagnostics().is_empty());
         assert_eq!(d.to_source(), MODEL);
     }
 
     #[test]
     fn index_lookups() {
-        let d = Model::parse(MODEL);
-        let idx = d.index();
+        let mut d = Model::parse(MODEL);
+        let idx = d.view().index();
         assert_eq!(idx.cell_count(), 2);
         assert!(idx.cell(1).is_some());
         assert!(idx.cell(2).is_some());
@@ -1717,14 +1672,14 @@ sdef pos=0 0 0
     }
 
     /// Position of the first cell card whose id equals `id`.
-    fn cell_pos(m: &Model, id: i64) -> usize {
-        m.index().cell(id).unwrap()
+    fn cell_pos(m: &mut Model, id: i64) -> usize {
+        m.view().index().cell(id).unwrap()
     }
 
     #[test]
     fn set_material_and_density_in_place() {
         let mut m = Model::parse(MODEL);
-        let ci = cell_pos(&m, 1); // "1 1 -1.0 -1 imp:n=1"
+        let ci = cell_pos(&mut m, 1); // "1 1 -1.0 -1 imp:n=1"
         m.set_cell_material(ci, 124).unwrap();
         m.set_cell_density(ci, 7.93).unwrap();
         let out = m.to_source();
@@ -1737,20 +1692,20 @@ sdef pos=0 0 0
     #[test]
     fn density_on_void_cell_is_rejected() {
         let mut m = Model::parse(MODEL);
-        let ci = cell_pos(&m, 2); // void cell "2 0 1"
+        let ci = cell_pos(&mut m, 2); // void cell "2 0 1"
         assert_eq!(m.set_cell_density(ci, 1.0), Err(EditError::NoDensityField));
     }
 
     #[test]
     fn assign_material_to_void_cell_adds_placeholder_density() {
         let mut m = Model::parse(MODEL);
-        let void_ci = cell_pos(&m, 2); // "2 0 1 imp:n=0"
-                                       // Assigning a real material to a void cell just works (no error) and
-                                       // gives it a placeholder density of 0.
+        let void_ci = cell_pos(&mut m, 2); // "2 0 1 imp:n=0"
+                                           // Assigning a real material to a void cell just works (no error) and
+                                           // gives it a placeholder density of 0.
         m.set_cell_material(void_ci, 5).unwrap();
-        let read = m.read_cell(void_ci).unwrap();
+        let read = m.view().cell_at(void_ci).unwrap();
         assert!(!read.is_void());
-        assert_eq!(read.density(), Some(0.0));
+        assert_eq!(read.density, Some(0.0));
         let out = m.to_source();
         assert!(out.contains("2 5 0 1 imp:n=0"), "got: {out}"); // params preserved
                                                                 // Everything else is byte-for-byte.
@@ -1764,9 +1719,9 @@ sdef pos=0 0 0
     #[test]
     fn material_zero_makes_cell_void_and_drops_density() {
         let mut m = Model::parse(MODEL);
-        let ci = cell_pos(&m, 1); // "1 1 -1.0 -1 imp:n=1"
+        let ci = cell_pos(&mut m, 1); // "1 1 -1.0 -1 imp:n=1"
         m.set_cell_material(ci, 0).unwrap();
-        assert!(m.read_cell(ci).unwrap().is_void());
+        assert!(m.view().cell_at(ci).unwrap().is_void());
         let out = m.to_source();
         assert!(out.contains("1 0 -1 imp:n=1"), "got: {out}");
         // Re-parse is clean.
@@ -1776,7 +1731,7 @@ sdef pos=0 0 0
     #[test]
     fn material_swap_between_real_materials_is_allowed() {
         let mut m = Model::parse(MODEL);
-        let ci = cell_pos(&m, 1);
+        let ci = cell_pos(&mut m, 1);
         m.set_cell_material(ci, 7).unwrap();
         assert!(m.to_source().contains("1 7 -1.0 -1 imp:n=1"));
     }
@@ -1784,10 +1739,13 @@ sdef pos=0 0 0
     #[test]
     fn add_surface_to_cell_reemits_and_is_lossless_elsewhere() {
         let mut m = Model::parse(MODEL);
-        let ci = cell_pos(&m, 1); // "1 1 -1.0 -1 imp:n=1"
+        let ci = cell_pos(&mut m, 1); // "1 1 -1.0 -1 imp:n=1"
         m.add_cell_surface(ci, 5, true).unwrap(); // add -5
                                                   // Read view reflects the edit immediately.
-        assert_eq!(m.read_cell(ci).unwrap().signed_surfaces(), vec![-1, -5]);
+        assert_eq!(
+            m.view().cell_at(ci).unwrap().signed_surfaces(),
+            vec![-1, -5]
+        );
         let out = m.to_source();
         // Lossless: the untouched density `-1.0` is preserved (not reformatted).
         assert!(out.contains("1 1 -1.0 -1 -5 imp:n=1"), "got: {out}");
@@ -1801,7 +1759,7 @@ sdef pos=0 0 0
     #[test]
     fn remove_surface_and_guard_against_emptying() {
         let mut m = Model::parse("t\n1 0 -1 2 imp:n=1\n\n1 SO 5\n2 PX 0\n\nm1 1001 1\n");
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         assert!(m.remove_cell_surface(ci, 2).unwrap());
         assert!(m.to_source().contains("1 0 -1 imp:n=1"));
         // Removing the last surface is refused.
@@ -1821,7 +1779,7 @@ sdef pos=0 0 0
                    \x20         $ a comment\n\
                    \n1 SO 5\n2 PX 0\n3 PY 0\n\nm1 1001 1\n";
         let mut m = Model::parse(src);
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         // The two-step property flow (set material, then density) is lossless.
         m.set_cell_material(ci, 200).unwrap();
         m.set_cell_density(ci, 2.2875).unwrap();
@@ -1833,9 +1791,9 @@ sdef pos=0 0 0
                         \n1 SO 5\n2 PX 0\n3 PY 0\n\nm1 1001 1\n";
         assert_eq!(out, expected, "got:\n{out}");
         // Read model reflects the edit.
-        let read = m.read_cell(ci).unwrap();
-        assert_eq!(read.material(), Some(200));
-        assert_eq!(read.density(), Some(2.2875));
+        let read = m.view().cell_at(ci).unwrap();
+        assert_eq!(read.material, Some(200));
+        assert_eq!(read.density, Some(2.2875));
     }
 
     #[test]
@@ -1845,7 +1803,7 @@ sdef pos=0 0 0
                    \x20         -3 4\n\
                    \n1 PX 0\n2 PY 0\n3 PZ 0\n4 SO 9\n\nm1 1001 1\n";
         let mut m = Model::parse(src);
-        let ci = m.index().cell(10).unwrap();
+        let ci = m.view().index().cell(10).unwrap();
         m.add_cell_surface(ci, 99, true).unwrap();
         let out = m.to_source();
         // Multi-line geometry, the inline `$ inner` comment, and the density
@@ -1860,7 +1818,7 @@ sdef pos=0 0 0
     #[test]
     fn add_surface_into_union_parenthesises() {
         let mut m = Model::parse("t\n1 0 -1 : 2 imp:n=1\n\n1 SO 5\n2 PX 0\n\nm1 1001 1\n");
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         m.add_cell_surface(ci, 3, true).unwrap();
         assert!(
             m.to_source().contains("1 0 (-1 : 2) -3 imp:n=1"),
@@ -1883,7 +1841,7 @@ sdef pos=0 0 0
                    1 1 -1.0 -1 imp:n=1  $ fuel\n\
                    \n1 SO 5\n\nm1 1001 1\n";
         let mut m = Model::parse(src);
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         m.add_cell_param(ci, "u=5").unwrap();
         // New param lands after `imp:n=1` and before the inline `$ fuel` comment.
         assert_eq!(
@@ -1898,7 +1856,7 @@ sdef pos=0 0 0
     #[test]
     fn add_cell_param_to_cell_without_params() {
         let mut m = Model::parse("t\n1 0 -1\n\n1 SO 5\n\nm1 1001 1\n");
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         m.add_cell_param(ci, "imp:n=1").unwrap();
         assert_eq!(m.to_source(), "t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
         assert_eq!(m.add_cell_param(ci, ""), Err(EditError::InvalidCardText));
@@ -1908,7 +1866,7 @@ sdef pos=0 0 0
     fn remove_cell_param_is_lossless() {
         let src = "title\n1 1 -1.0 -1 imp:n=1 u=5 vol=3  $ c\n\n1 SO 5\n\nm1 1001 1\n";
         let mut m = Model::parse(src);
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         // Remove a middle param.
         assert!(m.remove_cell_param(ci, "u").unwrap());
         assert_eq!(
@@ -1934,8 +1892,8 @@ sdef pos=0 0 0
         let mut m = Model::parse(
             "t\n1 1 -1.0 -1 imp:n=1 imp:p=0 vol=3 *fill=7 (0 0 5)  $ c\n\n1 SO 5\n\nm1 1001 1\n",
         );
-        let ci = m.index().cell(1).unwrap();
-        let params = m.cell_params(ci);
+        let ci = m.view().index().cell(1).unwrap();
+        let params = m.view().cell_params(ci);
         assert_eq!(
             params,
             vec![
@@ -1970,20 +1928,20 @@ sdef pos=0 0 0
     #[test]
     fn cell_param_is_particle_qualified() {
         let mut m = Model::parse("t\n1 0 -1 imp:n=1 imp:p=0\n\n1 SO 5\n\nm1 1001 1\n");
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         // A bare keyword takes the first matching entry.
-        assert_eq!(m.cell_param(ci, "imp").unwrap().value, "1");
+        assert_eq!(m.view().cell_param(ci, "imp").unwrap().value, "1");
         // A qualified key selects the specific particle.
-        assert_eq!(m.cell_param(ci, "imp:p").unwrap().value, "0");
-        assert_eq!(m.cell_param(ci, "imp:n").unwrap().value, "1");
-        assert!(m.cell_param(ci, "vol").is_none());
+        assert_eq!(m.view().cell_param(ci, "imp:p").unwrap().value, "0");
+        assert_eq!(m.view().cell_param(ci, "imp:n").unwrap().value, "1");
+        assert!(m.view().cell_param(ci, "vol").is_none());
     }
 
     #[test]
     fn set_cell_param_rewrites_value_in_place() {
         let src = "title\n1 1 -1.0 -1 imp:n=1 vol=3  $ c\n\n1 SO 5\n\nm1 1001 1\n";
         let mut m = Model::parse(src);
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         assert!(m.set_cell_param(ci, "imp:n", "2").unwrap());
         // Value changes in place; order and every other byte are preserved.
         assert_eq!(
@@ -1999,7 +1957,7 @@ sdef pos=0 0 0
     fn set_cell_param_collapses_multi_token_value() {
         let src = "t\n1 0 -1 fill=7 (0 0 5) vol=3\n\n1 SO 5\n\nm1 1001 1\n";
         let mut m = Model::parse(src);
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         assert!(m.set_cell_param(ci, "fill", "8 (1 0 0)").unwrap());
         assert_eq!(
             m.to_source(),
@@ -2015,7 +1973,7 @@ sdef pos=0 0 0
     fn remove_cell_param_particle_qualified() {
         let src = "t\n1 0 -1 imp:n=1 imp:p=0 vol=3\n\n1 SO 5\n\nm1 1001 1\n";
         let mut m = Model::parse(src);
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         // A qualified key removes only that particle's entry.
         assert!(m.remove_cell_param(ci, "imp:p").unwrap());
         assert_eq!(
@@ -2024,7 +1982,7 @@ sdef pos=0 0 0
             "got:\n{}",
             m.to_source()
         );
-        assert!(m.cell_param(ci, "imp:n").is_some());
+        assert!(m.view().cell_param(ci, "imp:n").is_some());
     }
 
     #[test]
@@ -2033,12 +1991,12 @@ sdef pos=0 0 0
         // from the CST (no replacement); parameters must still read/write through
         // the tree, consistent with `add`/`remove`/`set_cell_param`.
         let mut m = Model::parse("t\n1 0 -1 2 imp:n=1 vol=3\n\n1 SO 5\n2 SO 9\n\nm1 1001 1\n");
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         m.remove_cell_surface(ci, 2).unwrap();
-        assert_eq!(m.cell_param(ci, "imp:n").unwrap().value, "1");
+        assert_eq!(m.view().cell_param(ci, "imp:n").unwrap().value, "1");
         assert!(m.set_cell_param(ci, "vol", "42").unwrap());
         assert!(m.to_source().contains("vol=42"), "got:\n{}", m.to_source());
-        assert_eq!(m.cell_param(ci, "vol").unwrap().value, "42");
+        assert_eq!(m.view().cell_param(ci, "vol").unwrap().value, "42");
         assert!(Model::parse(m.to_source()).diagnostics().is_empty());
     }
 
@@ -2048,12 +2006,12 @@ sdef pos=0 0 0
         // where the parameter tail is an opaque owned string; exercise that path.
         let mut m =
             Model::parse("t\n1 0 (-1:2) 3 imp:n=1 vol=3\n\n1 SO 5\n2 SO 9\n3 SO 7\n\nm1 1001 1\n");
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         m.remove_cell_surface(ci, 3).unwrap();
         assert!(m.tree.card_has_replacement(ci), "expected replace mode");
-        assert_eq!(m.cell_param(ci, "imp:n").unwrap().value, "1");
+        assert_eq!(m.view().cell_param(ci, "imp:n").unwrap().value, "1");
         assert!(m.set_cell_param(ci, "vol", "42").unwrap());
-        assert_eq!(m.cell_param(ci, "vol").unwrap().value, "42");
+        assert_eq!(m.view().cell_param(ci, "vol").unwrap().value, "42");
         assert!(m.to_source().contains("vol=42"), "got:\n{}", m.to_source());
         assert!(Model::parse(m.to_source()).diagnostics().is_empty());
     }
@@ -2076,6 +2034,51 @@ sdef pos=0 0 0
     }
 
     #[test]
+    fn view_readers_compose_under_one_shared_borrow() {
+        // The point of `ModelView`: `&self` readers nest. Iterating cells while
+        // reading each one's params inside the loop does not borrow-conflict, and
+        // an index built up front stays usable throughout.
+        let mut m =
+            Model::parse("t\n1 1 -1.0 -1 imp:n=1 vol=3\n2 0 1 imp:n=0\n\n1 SO 5\n\nm1 1001 1\n");
+        let v = m.view();
+        let idx = v.index();
+        let mut seen = Vec::new();
+        for c in v.cells() {
+            let imp = v.cell_param(c.card_index, "imp:n").map(|p| p.value);
+            let text = v.card_source(c.card_index);
+            assert_eq!(idx.cell(c.id), Some(c.card_index));
+            seen.push((c.id, imp, text.contains("imp:n")));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                (1, Some("1".to_string()), true),
+                (2, Some("0".to_string()), true)
+            ]
+        );
+    }
+
+    #[test]
+    fn view_index_is_correct_after_a_pending_splice() {
+        // `index()` used to be `&self` on `Model` and built straight from raw
+        // tokens, so it could disagree with `to_source()` while a splice was
+        // pending. Reaching it only through a view makes that unrepresentable.
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let ci = m.view().index().cell(1).unwrap();
+        // A structural edit that queues a splice rather than a token override.
+        m.add_cell_param(ci, "u=7").unwrap();
+        assert!(m.tree.has_pending_splices(), "expected a pending splice");
+
+        let v = m.view();
+        assert_eq!(v.cell_universe(ci), Some(7));
+        assert_eq!(v.cell_param(ci, "u").map(|p| p.value), Some("7".into()));
+        // The index agrees with what the model actually emits.
+        let idx = v.index();
+        assert_eq!(idx.cell(1), Some(ci));
+        assert!(v.to_source().contains("u=7"), "{}", v.to_source());
+    }
+
+    #[test]
     fn renumber_after_structural_edit_moves_refs_with_defs() {
         // A union removal puts cell 1 in replace mode, so its surface/material
         // references live in the emit-only overlay. Renumbering must still move
@@ -2083,7 +2086,7 @@ sdef pos=0 0 0
         let mut m = Model::parse(
             "t\n1 7 -1.0 (-1:2) 3 imp:n=1 u=4\n\n1 SO 5\n2 SO 9\n3 SO 7\n\nm7 1001 1\n",
         );
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         m.remove_cell_surface(ci, 3).unwrap();
 
         m.renumber_surfaces(|id| id + 100);
@@ -2096,7 +2099,11 @@ sdef pos=0 0 0
         assert!(src.contains("u=5"), "got:\n{src}");
         assert!(src.contains("101 SO 5"), "got:\n{src}");
         assert!(src.contains("m17 1001 1"), "got:\n{src}");
-        assert!(m.validate().is_empty(), "got: {:?}", m.validate());
+        assert!(
+            m.view().validate().is_empty(),
+            "got: {:?}",
+            m.view().validate()
+        );
     }
 
     #[test]
@@ -2104,26 +2111,21 @@ sdef pos=0 0 0
         // `add_cell_surface` splices tokens the raw CST does not carry; the typed
         // iterator, the owned-aware reader, and emission must all agree.
         let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n2 SO 9\n\nm1 1001 1\n");
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         m.add_cell_surface(ci, 2, true).unwrap();
 
-        let from_iter: Vec<i64> = m
-            .cells()
-            .find(|c| c.id == 1)
-            .unwrap()
-            .surface_refs()
-            .iter()
-            .map(|r| r.id)
-            .collect();
-        let from_read = m.read_cell(ci).unwrap().surface_ids();
+        // Both reads coexist under one shared view — no collect-to-end-the-borrow.
+        let v = m.view();
+        let from_iter = v.cells().find(|c| c.id == 1).unwrap().surface_ids();
+        let from_read = v.cell_at(ci).unwrap().surface_ids();
         assert_eq!(from_iter, from_read);
         assert_eq!(from_iter, vec![1, 2]);
         assert!(m.to_source().contains("-1 -2"), "got:\n{}", m.to_source());
 
         // Same class for surfaces: a transform splice must reach `surfaces()`.
-        let ti = m.index().surface(2).unwrap();
+        let ti = m.view().index().surface(2).unwrap();
         m.set_surface_transform(ti, Some(1)).unwrap();
-        let s = m.surfaces().find(|s| s.id == 2).unwrap();
+        let s = m.view().surfaces().find(|s| s.id == 2).unwrap();
         assert_eq!(s.transform, Some(1));
     }
 
@@ -2144,8 +2146,14 @@ sdef pos=0 0 0
             src, "t\n1 0 -1\n\n1 SO 5\n\nm2 8016 1\ntr1 0 0 0\n",
             "got:\n{src}"
         );
-        assert_eq!(m.materials().map(|x| x.id).collect::<Vec<_>>(), vec![2]);
-        assert_eq!(m.transforms().map(|x| x.id).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            m.view().materials().map(|x| x.id).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            m.view().transforms().map(|x| x.id).collect::<Vec<_>>(),
+            vec![1]
+        );
         // Slots of surviving cards are stable across the removals' reparse.
         assert_eq!(m.cell_slots()[0], kept_cell);
     }
@@ -2158,7 +2166,7 @@ sdef pos=0 0 0
                    \x20         4 imp:n=1\n\
                    \n1 PX 0\n2 PY 0\n3 PZ 0\n4 SO 9\n\nm1 1001 1\n";
         let mut m = Model::parse(src);
-        let ci = m.index().cell(10).unwrap();
+        let ci = m.view().index().cell(10).unwrap();
         assert!(m.remove_cell_surface(ci, 2).unwrap());
         // Only surface `2` (and its separator) is gone; everything else stays.
         let expected = "title\n\
@@ -2166,13 +2174,16 @@ sdef pos=0 0 0
                         \x20         4 imp:n=1\n\
                         \n1 PX 0\n2 PY 0\n3 PZ 0\n4 SO 9\n\nm1 1001 1\n";
         assert_eq!(m.to_source(), expected, "got:\n{}", m.to_source());
-        assert_eq!(m.read_cell(ci).unwrap().signed_surfaces(), vec![-1, 3, 4]);
+        assert_eq!(
+            m.view().cell_at(ci).unwrap().signed_surfaces(),
+            vec![-1, 3, 4]
+        );
     }
 
     #[test]
     fn remove_first_surface_leaves_no_leading_separator() {
         let mut m = Model::parse("t\n1 0 -1 2 3 imp:n=1\n\n1 SO 5\n2 PX 0\n3 PY 0\n\nm1 1001 1\n");
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         assert!(m.remove_cell_surface(ci, 1).unwrap());
         assert!(
             m.to_source().contains("1 0 2 3 imp:n=1"),
@@ -2186,14 +2197,17 @@ sdef pos=0 0 0
         let mut m = Model::parse(
             "t\n1 0 -1 #7 2 imp:n=1\n7 0 -3 imp:n=1\n\n1 SO 5\n2 PX 0\n3 PZ 0\n\nm1 1001 1\n",
         );
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         assert!(m.remove_cell_complement(ci, 7).unwrap());
         assert!(
             m.to_source().contains("1 0 -1 2 imp:n=1"),
             "got: {}",
             m.to_source()
         );
-        assert_eq!(m.read_cell(ci).unwrap().cell_refs(), Vec::<i64>::new());
+        assert_eq!(
+            m.view().cell_at(ci).unwrap().cell_ref_ids(),
+            Vec::<i64>::new()
+        );
         assert!(Model::parse(m.to_source()).diagnostics().is_empty());
     }
 
@@ -2203,9 +2217,9 @@ sdef pos=0 0 0
         // formatting) but the result is correct and re-parses cleanly.
         let mut m =
             Model::parse("t\n1 0 (-1 : 2) -3 imp:n=1\n\n1 SO 5\n2 PX 0\n3 PY 0\n\nm1 1001 1\n");
-        let ci = m.index().cell(1).unwrap();
+        let ci = m.view().index().cell(1).unwrap();
         assert!(m.remove_cell_surface(ci, 3).unwrap());
-        assert_eq!(m.read_cell(ci).unwrap().signed_surfaces(), vec![-1, 2]);
+        assert_eq!(m.view().cell_at(ci).unwrap().signed_surfaces(), vec![-1, 2]);
         let out = m.to_source();
         assert!(out.contains("imp:n=1"), "params kept: {out}");
         assert!(Model::parse(&out).diagnostics().is_empty());
@@ -2214,19 +2228,19 @@ sdef pos=0 0 0
     #[test]
     fn material_edit_after_geometry_edit_is_consistent() {
         let mut m = Model::parse(MODEL);
-        let ci = cell_pos(&m, 1);
+        let ci = cell_pos(&mut m, 1);
         m.add_cell_surface(ci, 9, false).unwrap(); // promotes the cell
         m.set_cell_material(ci, 3).unwrap(); // must route through the owned node
         let out = m.to_source();
         // Lossless: only the material changes; density `-1.0` stays byte-for-byte.
         assert!(out.contains("1 3 -1.0 -1 9 imp:n=1"), "got: {out}");
-        assert_eq!(m.read_cell(ci).unwrap().material(), Some(3));
+        assert_eq!(m.view().cell_at(ci).unwrap().material, Some(3));
     }
 
     #[test]
     fn geometry_edit_refused_on_like_cell() {
         let mut m = Model::parse("t\n1 0 -1\n9 LIKE 1 BUT imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
-        let ci = m.index().cell(9).unwrap();
+        let ci = m.view().index().cell(9).unwrap();
         assert_eq!(
             m.add_cell_surface(ci, 2, false),
             Err(EditError::NotEditableGeometry)
@@ -2244,17 +2258,17 @@ sdef pos=0 0 0
             "got:\n{out}"
         );
         // Addressable by number and by the returned slot; still editable.
-        let ci = m.index().cell(10).unwrap();
+        let ci = m.view().index().cell(10).unwrap();
         assert_eq!(m.slot_at(ci), slot);
         m.add_cell_surface(ci, 1, false).unwrap(); // surface 1 exists in MODEL
-        assert_eq!(m.read_cell(ci).unwrap().signed_surfaces(), vec![-1, 1]);
+        assert_eq!(m.view().cell_at(ci).unwrap().signed_surfaces(), vec![-1, 1]);
         // Lossless splice: the density `-2.0` of the freshly-added cell is kept.
         assert!(
             m.to_source().contains("10 1 -2.0 -1 1 imp:n=1"),
             "got:\n{}",
             m.to_source()
         );
-        assert!(m.validate().is_empty(), "{:?}", m.validate());
+        assert!(m.view().validate().is_empty(), "{:?}", m.view().validate());
     }
 
     #[test]
@@ -2295,7 +2309,7 @@ sdef pos=0 0 0
     fn remove_cell_preserves_other_cards_and_slots() {
         let mut m = Model::parse(MODEL);
         // Hold a handle-slot for cell 1 before removing cell 2.
-        let ci1 = m.index().cell(1).unwrap();
+        let ci1 = m.view().index().cell(1).unwrap();
         let slot1 = m.slot_at(ci1);
         assert!(m.remove_cell(2).unwrap());
         let out = m.to_source();
@@ -2303,7 +2317,7 @@ sdef pos=0 0 0
         assert!(out.contains("1 SO 5"), "surfaces intact");
         // Cell 1's slot still resolves to cell 1 (handle survived).
         let pos = m.card_index_of_slot(slot1).unwrap();
-        assert_eq!(m.read_cell(pos).unwrap().id(), 1);
+        assert_eq!(m.view().cell_at(pos).unwrap().id, 1);
         // Removing a missing cell is a no-op false.
         assert!(!m.remove_cell(999).unwrap());
     }
@@ -2313,9 +2327,9 @@ sdef pos=0 0 0
         // Cell 1 complements cell 3; removing cell 3 leaves a dangling ref.
         let mut m =
             Model::parse("t\n1 0 -1 #3 imp:n=1\n3 0 -2 imp:n=1\n\n1 SO 5\n2 SO 9\n\nm1 1001 1\n");
-        assert!(m.validate().is_empty());
+        assert!(m.view().validate().is_empty());
         m.remove_cell(3).unwrap();
-        let problems = m.validate();
+        let problems = m.view().validate();
         assert!(
             problems.iter().any(|p| p.contains("missing cell 3")),
             "got: {problems:?}"
@@ -2326,7 +2340,7 @@ sdef pos=0 0 0
     fn validate_flags_missing_surface_and_material() {
         // Cell 1 references surface 9 (undefined) and material 5 (undefined).
         let mut m = Model::parse("t\n1 5 -1.0 -9 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
-        let problems = m.validate();
+        let problems = m.view().validate();
         assert!(
             problems
                 .iter()
@@ -2351,7 +2365,7 @@ sdef pos=0 0 0
              \n1 SO 5\n1 SO 9\n2 PX 0\n\
              \nm1 1001 1\nm1 8016 1\ntr1 0 0 0\ntr1 1 1 1\n",
         );
-        let problems = m.validate();
+        let problems = m.view().validate();
         for kind in ["cell", "surface", "material", "transform"] {
             let want = format!("duplicate {kind} 1 defined more than once");
             assert!(problems.contains(&want), "missing {want:?} in {problems:?}");
@@ -2359,6 +2373,7 @@ sdef pos=0 0 0
         // A thrice-defined id is still reported exactly once.
         let mut m = Model::parse("t\n1 0 -1\n\n5 SO 1\n5 SO 2\n5 SO 3\n\nm1 1001 1\n");
         let dupes: Vec<_> = m
+            .view()
             .validate()
             .into_iter()
             .filter(|p| p.contains("duplicate surface 5"))
@@ -2372,7 +2387,7 @@ sdef pos=0 0 0
         // surface 8 (undefined). Surface 3 uses transform 4, which exists.
         let mut m =
             Model::parse("t\n1 0 -1\n\n1 9 SO 5\n2 -8 PX 0\n3 4 PY 0\n\nm1 1001 1\ntr4 0 0 0\n");
-        let problems = m.validate();
+        let problems = m.view().validate();
         assert!(
             problems
                 .iter()
@@ -2395,7 +2410,7 @@ sdef pos=0 0 0
     #[test]
     fn set_surface_coeff_and_transform_in_place() {
         let mut m = Model::parse("t\n1 0 -1\n\n1 3 SO 5\n2 SO 9\n\nm1 1001 1\ntr3 0 0 0\n");
-        let si = m.index().surface(1).unwrap();
+        let si = m.view().index().surface(1).unwrap();
         m.set_surface_coeff(si, 0, 7.5).unwrap();
         assert!(m.to_source().contains("1 3 SO 7.5"), "{}", m.to_source());
         // Out-of-range coefficient index is rejected.
@@ -2410,7 +2425,7 @@ sdef pos=0 0 0
         m.set_surface_transform(si, None).unwrap();
         assert!(m.to_source().contains("1 SO 7.5"), "{}", m.to_source());
         // Adding a transform to a surface that has none is a lossless splice.
-        let s2 = m.index().surface(2).unwrap();
+        let s2 = m.view().index().surface(2).unwrap();
         m.set_surface_transform(s2, Some(3)).unwrap();
         assert!(m.to_source().contains("2 3 SO 9"), "{}", m.to_source());
     }
@@ -2418,7 +2433,7 @@ sdef pos=0 0 0
     #[test]
     fn set_material_fraction_and_zaid_in_place() {
         let mut m = Model::parse("t\n1 0 -1\n\n1 SO 5\n\nm1 1001.31c 0.5 8016.31c 0.5\n");
-        let mi = m.index().material(1).unwrap();
+        let mi = m.view().index().material(1).unwrap();
         m.set_material_fraction(mi, 0, 0.7).unwrap();
         m.set_material_zaid(mi, 1, "8016.70c").unwrap();
         assert!(
@@ -2437,14 +2452,14 @@ sdef pos=0 0 0
         let mut m = Model::parse(
             "t\n1 0 -1\n\n1 SO 5\n\nm1 1001 1\ntr1 0 0 5\n*tr2 0 0 0 1 0 0 0 1 0 0 0 1\n",
         );
-        let t1 = m.index().transform(1).unwrap();
+        let t1 = m.view().index().transform(1).unwrap();
         m.set_transform_displacement(t1, [1.0, 2.0, 3.0]).unwrap();
         assert!(m.to_source().contains("tr1 1 2 3"), "{}", m.to_source());
         // A full-displacement transform can gain rotation entries (splice).
         m.set_transform_rotation(t1, &[90.0]).unwrap();
         assert!(m.to_source().contains("tr1 1 2 3 90"), "{}", m.to_source());
         // A same-arity rotation rewrite succeeds (tr2 has 9 entries).
-        let t2 = m.index().transform(2).unwrap();
+        let t2 = m.view().index().transform(2).unwrap();
         m.set_transform_rotation(t2, &[2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0])
             .unwrap();
         assert!(
@@ -2453,7 +2468,7 @@ sdef pos=0 0 0
             m.to_source()
         );
         // Surplus rotation entries on tr2 are deleted losslessly (keep 3).
-        let t2 = m.index().transform(2).unwrap();
+        let t2 = m.view().index().transform(2).unwrap();
         m.set_transform_rotation(t2, &[7.0, 0.0, 0.0]).unwrap();
         assert!(
             m.to_source().contains("*tr2 0 0 0 7 0 0\n"),
@@ -2465,7 +2480,7 @@ sdef pos=0 0 0
     #[test]
     fn set_transform_fills_missing_displacement_component() {
         let mut m = Model::parse("t\n1 0 -1\n\n1 SO 5\n\nm1 1001 1\ntr3 1\n");
-        let t3 = m.index().transform(3).unwrap();
+        let t3 = m.view().index().transform(3).unwrap();
         m.set_transform_displacement(t3, [1.0, 2.0, 3.0]).unwrap();
         assert!(m.to_source().contains("tr3 1 2 3\n"), "{}", m.to_source());
     }
@@ -2475,7 +2490,7 @@ sdef pos=0 0 0
         let mut m = Model::parse(MODEL);
         let surf_slots = m.surface_slots();
         assert_eq!(surf_slots.len(), 1);
-        let s = m.surface_by_slot(surf_slots[0]).unwrap();
+        let s = m.view().surface_by_slot(surf_slots[0]).unwrap();
         assert_eq!(s.id, 1);
         // slot ↔ index round-trips.
         let ci = m.card_index_of_slot(surf_slots[0]).unwrap();

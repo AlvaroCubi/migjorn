@@ -303,6 +303,34 @@ impl Cell {
         }
         out
     }
+
+    /// True when the material number is 0.
+    pub fn is_void(&self) -> bool {
+        self.material == Some(0)
+    }
+
+    /// Base cell number for a `LIKE n BUT` card.
+    pub fn like_id(&self) -> Option<i64> {
+        self.like.map(|r| r.id)
+    }
+
+    /// Referenced surface numbers (magnitudes), in order.
+    pub fn surface_ids(&self) -> Vec<i64> {
+        self.surface_refs().iter().map(|r| r.id).collect()
+    }
+
+    /// Referenced surfaces with sense (negative = inside), in order.
+    pub fn signed_surfaces(&self) -> Vec<i64> {
+        self.surface_refs()
+            .iter()
+            .map(|r| if r.negative { -r.id } else { r.id })
+            .collect()
+    }
+
+    /// Referenced cell numbers (`#n` complements plus a `LIKE n` base), in order.
+    pub fn cell_ref_ids(&self) -> Vec<i64> {
+        self.cell_refs().iter().map(|r| r.id).collect()
+    }
 }
 
 /// Parse the cell card at `card_index`, or `None` if it is not a cell card.

@@ -6,7 +6,7 @@
 //! It parses a small self-contained MCNP model, reads the typed data, proves the
 //! parse is byte-for-byte lossless, and renumbers the whole geometry.
 
-use migjorn::Model;
+use migjorn::{Model, ModelView};
 
 /// A small but representative model: comments, an inline `$` comment, a `&`
 /// continuation, unions (`:`), a cell complement (`#4`), a region complement,
@@ -47,9 +47,9 @@ fn rule(title: &str) {
 }
 
 /// A cell's on-disk text (to show edits visually).
-fn cell_source(model: &Model, id: i64) -> Option<String> {
-    let ci = model.index().cell(id)?;
-    Some(model.card_source(ci).trim_end().to_string())
+fn cell_source(view: &ModelView, id: i64) -> Option<String> {
+    let ci = view.index().cell(id)?;
+    Some(view.card_source(ci).trim_end().to_string())
 }
 
 fn main() {
@@ -57,7 +57,10 @@ fn main() {
 
     rule("parse");
     println!("diagnostics: {}", model.diagnostics().len());
-    let idx = model.index();
+    // One `&mut` at the boundary; every read below borrows the view shared, so
+    // they compose and nest freely.
+    let view = model.view();
+    let idx = view.index();
     println!(
         "cells={}  surfaces={}  materials={}  transforms={}",
         idx.cell_count(),
@@ -67,7 +70,7 @@ fn main() {
     );
 
     rule("surfaces");
-    for s in model.surfaces() {
+    for s in view.surfaces() {
         let tr = s.transform.map(|t| format!(" (TR{t})")).unwrap_or_default();
         println!(
             "  {:>3}  {:<4} {:?}{}",
@@ -79,7 +82,7 @@ fn main() {
     }
 
     rule("cells");
-    for c in model.cells() {
+    for c in view.cells() {
         if let Some(base) = c.like {
             println!("  {:>3}  LIKE {} BUT ...", c.id, base.id);
             continue;
@@ -89,12 +92,8 @@ fn main() {
         } else {
             format!("mat {} @ {}", c.material.unwrap(), c.density.unwrap())
         };
-        let refs: Vec<i64> = c
-            .surface_refs()
-            .iter()
-            .map(|r| if r.negative { -r.id } else { r.id })
-            .collect();
-        let complements: Vec<i64> = c.cell_refs().iter().map(|r| r.id).collect();
+        let refs: Vec<i64> = c.signed_surfaces();
+        let complements: Vec<i64> = c.cell_ref_ids();
         print!("  {:>3}  {:<14} surfaces {:?}", c.id, kind, refs);
         if !complements.is_empty() {
             print!("  complements #{complements:?}");
@@ -103,7 +102,7 @@ fn main() {
     }
 
     rule("materials");
-    for m in model.materials() {
+    for m in view.materials() {
         let comp: Vec<String> = m
             .entries
             .iter()
@@ -113,22 +112,25 @@ fn main() {
     }
 
     rule("transforms");
-    for t in model.transforms() {
+    for t in view.transforms() {
         println!("  tr{}  displacement {:?}", t.id, t.displacement);
     }
 
     rule("lossless round-trip");
-    let roundtrips = model.to_source() == MODEL;
+    let roundtrips = view.to_source() == MODEL;
     println!("parse -> to_source() reproduces the input byte-for-byte: {roundtrips}");
     assert!(roundtrips);
 
     rule("whole-geometry renumbering");
-    println!("cell 3 before:  {}", cell_source(&model, 3).unwrap());
+    println!("cell 3 before:  {}", cell_source(&model.view(), 3).unwrap());
     // Offset every surface by +1000 (definitions AND references), and shift
     // cells into the 900-series via a dict for the ones we care about.
     model.renumber_surfaces(|id| id + 1000);
     model.renumber_cells(|id| id + 900);
-    println!("cell 3 after:   {}", cell_source(&model, 903).unwrap());
+    println!(
+        "cell 3 after:   {}",
+        cell_source(&model.view(), 903).unwrap()
+    );
     println!("  (surfaces 2,3 -> 1002,1003; complement #4 -> #904; cell id 3 -> 903)");
 
     rule("edit is lossless everywhere else");

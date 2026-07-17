@@ -18,37 +18,29 @@ use crate::cell::{
 };
 use crate::datacard::parse_data_card;
 use crate::material::{materials, parse_material};
-use crate::model::{EditError, Model};
+use crate::model::{EditError, Model, ModelView};
 use crate::surface::{parse_surface, surfaces};
 use crate::transform::{parse_transform, transforms};
 
-impl Model {
+impl ModelView<'_> {
     /// The universe of the cell at `card_index` (its `u=` value), or `None` if
     /// the cell has no `u=` parameter (a level-0 / real-world cell).
-    ///
-    /// `&mut self`: a `u=` spliced in via `add_cell_param` (or a replace-mode
-    /// tail) must be [materialised](Model::materialize) so this matches emission.
-    pub fn cell_universe(&mut self, card_index: usize) -> Option<i64> {
-        self.materialize();
-        cell_universe(&self.tree, card_index)
+    pub fn cell_universe(&self, card_index: usize) -> Option<i64> {
+        cell_universe(self.tree, card_index)
     }
 
     /// The `fill=`/`*fill=` of the cell at `card_index` (simple single-universe
-    /// form), or `None` if the cell is not filled. `&mut self`: see
-    /// [`Model::cell_universe`].
-    pub fn cell_fill(&mut self, card_index: usize) -> Option<Fill> {
-        self.materialize();
-        parse_fill(&self.tree, card_index)
+    /// form), or `None` if the cell is not filled.
+    pub fn cell_fill(&self, card_index: usize) -> Option<Fill> {
+        parse_fill(self.tree, card_index)
     }
 
     /// Every universe defined by a `u=` in the model, sorted ascending and
-    /// deduplicated. Universe 0 (the real world) is not reported. `&mut self`:
-    /// see [`Model::cell_universe`].
-    pub fn universe_ids(&mut self) -> Vec<i64> {
-        self.materialize();
+    /// deduplicated. Universe 0 (the real world) is not reported.
+    pub fn universe_ids(&self) -> Vec<i64> {
         let mut set: FxHashSet<i64> = FxHashSet::default();
         for i in 0..self.tree.cards().len() {
-            if let Some(u) = cell_universe(&self.tree, i) {
+            if let Some(u) = cell_universe(self.tree, i) {
                 if u != 0 {
                     set.insert(u);
                 }
@@ -58,7 +50,9 @@ impl Model {
         ids.sort_unstable();
         ids
     }
+}
 
+impl Model {
     /// Carve universe `u` into a standalone [`Model`]: the cells whose `u=` is
     /// `u`, plus everything they reference — surfaces, the cells reached through
     /// `#n` complements and `LIKE n` bases (followed transitively), and the
@@ -261,9 +255,11 @@ impl Model {
         let mut surfaces_seen: FxHashSet<i64> = FxHashSet::default();
         let mut materials_seen: FxHashSet<i64> = FxHashSet::default();
         let mut transforms_seen: FxHashSet<i64> = FxHashSet::default();
-        // Read via the free projections (not the `&mut self` `Model` iterators):
-        // `card_source`-based merge already emits each `other`'s effective text,
-        // and id reads are unaffected by any pending splices.
+        // Read via the free projections rather than `Model::view`: `others` are
+        // shared refs, and a view would need `&mut` on models we only read.
+        // Safe without materializing — ids are override-only, so `token_text`
+        // already applies any pending edit, and the `card_source`-based merge
+        // emits each `other`'s effective text regardless.
         for m in std::iter::once(self).chain(others.iter().copied()) {
             for c in cells(&m.tree) {
                 if !cells_seen.insert(c.id) {
@@ -427,42 +423,47 @@ m1 1001 1
     #[test]
     fn universe_ids_and_cell_universe() {
         let mut m = Model::parse(LATTICE);
-        assert_eq!(m.universe_ids(), vec![10]);
+        let v = m.view();
+        assert_eq!(v.universe_ids(), vec![10]);
         // Card 0 is the title; cell 1 (card 1) is level-0, cells 2 and 3
         // (cards 2 and 3) are in universe 10.
-        assert_eq!(m.cell_universe(0), None); // title card
-        assert_eq!(m.cell_universe(1), None); // level-0 cell
-        assert_eq!(m.cell_universe(2), Some(10));
-        assert_eq!(m.cell_universe(3), Some(10));
+        assert_eq!(v.cell_universe(0), None); // title card
+        assert_eq!(v.cell_universe(1), None); // level-0 cell
+        assert_eq!(v.cell_universe(2), Some(10));
+        assert_eq!(v.cell_universe(3), Some(10));
     }
 
     #[test]
     fn extract_universe_keeps_cells_and_referenced_surfaces() {
         let mut m = Model::parse(LATTICE);
         let mut u = m.extract_universe(10);
-        // Both universe-10 cells, none of the level-0 cell.
-        assert_eq!(u.cells().count(), 2);
-        assert!(u.cells().all(|c| c.id == 2 || c.id == 3));
-        // Surfaces 2 and 3 are referenced; surface 1 (level-0 only) is dropped.
-        let sids: Vec<i64> = u.surfaces().map(|s| s.id).collect();
-        assert_eq!(sids, vec![2, 3]);
-        // The material used by cell 2 is carried so the extraction runs alone.
-        assert_eq!(u.materials().map(|m| m.id).collect::<Vec<_>>(), vec![1]);
+        {
+            let v = u.view();
+            // Both universe-10 cells, none of the level-0 cell.
+            assert_eq!(v.cells().count(), 2);
+            assert!(v.cells().all(|c| c.id == 2 || c.id == 3));
+            // Surfaces 2 and 3 are referenced; surface 1 (level-0 only) is dropped.
+            let sids: Vec<i64> = v.surfaces().map(|s| s.id).collect();
+            assert_eq!(sids, vec![2, 3]);
+            // The material used by cell 2 is carried so the extraction runs alone.
+            assert_eq!(v.materials().map(|m| m.id).collect::<Vec<_>>(), vec![1]);
+        }
         assert!(u.diagnostics().is_empty());
         // ...and clearing it yields the geometry-only sub-model.
         let mut geometry_only = u;
         geometry_only.clear_data_cards();
-        assert_eq!(geometry_only.data_cards().count(), 0);
+        assert_eq!(geometry_only.view().data_cards().count(), 0);
     }
 
     #[test]
     fn extract_level0_is_the_inverse_selection() {
         let mut m = Model::parse(LATTICE);
         let mut shell = m.extract_level0();
-        assert_eq!(shell.cells().count(), 1);
-        assert_eq!(shell.cells().next().unwrap().id, 1);
+        let v = shell.view();
+        assert_eq!(v.cells().count(), 1);
+        assert_eq!(v.cells().next().unwrap().id, 1);
         // The level-0 cell references surface 1 only.
-        assert_eq!(shell.surfaces().map(|s| s.id).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(v.surfaces().map(|s| s.id).collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]
@@ -486,10 +487,11 @@ m1 1001 1
 ";
         let mut m = Model::parse(src);
         let mut u = m.extract_universe(10);
-        let mut cids: Vec<i64> = u.cells().map(|c| c.id).collect();
+        let v = u.view();
+        let mut cids: Vec<i64> = v.cells().map(|c| c.id).collect();
         cids.sort_unstable();
         assert_eq!(cids, vec![2, 3]);
-        let sids: Vec<i64> = u.surfaces().map(|s| s.id).collect();
+        let sids: Vec<i64> = v.surfaces().map(|s| s.id).collect();
         assert_eq!(sids, vec![2, 4]); // surface 1 (level-0) and 3/5 (u=20) dropped
     }
 
@@ -514,9 +516,10 @@ sdef pos=0 0 0
 ";
         let mut m = Model::parse(src);
         let mut u = m.extract_universe(10);
-        assert_eq!(u.materials().map(|m| m.id).collect::<Vec<_>>(), vec![1]);
-        assert_eq!(u.transforms().map(|t| t.id).collect::<Vec<_>>(), vec![5]);
-        let names: Vec<String> = u.data_cards().map(|d| d.name).collect();
+        let v = u.view();
+        assert_eq!(v.materials().map(|m| m.id).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(v.transforms().map(|t| t.id).collect::<Vec<_>>(), vec![5]);
+        let names: Vec<String> = v.data_cards().map(|d| d.name).collect();
         assert!(names.contains(&"M1".to_string()), "{names:?}");
         assert!(names.contains(&"TR5".to_string()), "{names:?}");
         assert!(names.contains(&"MT1".to_string()), "{names:?}");
@@ -542,7 +545,10 @@ tr7 0 0 3
 ";
         let mut m = Model::parse(src);
         let mut u = m.extract_universe(10);
-        assert_eq!(u.transforms().map(|t| t.id).collect::<Vec<_>>(), vec![7]);
+        assert_eq!(
+            u.view().transforms().map(|t| t.id).collect::<Vec<_>>(),
+            vec![7]
+        );
     }
 
     #[test]
@@ -550,11 +556,12 @@ tr7 0 0 3
         let mut shell = Model::parse("title\n1 0 -1 fill=10\n\n1 SO 5\n\nm1 1001 1\n");
         let filler = Model::parse("f\n2 0 -2 u=10\n\n2 SO 3\n");
         shell.merge(&[&filler]).unwrap();
-        assert_eq!(shell.cells().count(), 2);
-        assert_eq!(shell.surfaces().count(), 2);
+        let v = shell.view();
+        assert_eq!(v.cells().count(), 2);
+        assert_eq!(v.surfaces().count(), 2);
         // The data card from the shell survives; both cells re-parse cleanly.
-        assert_eq!(shell.materials().count(), 1);
-        assert!(shell.validate().is_empty(), "{:?}", shell.validate());
+        assert_eq!(v.materials().count(), 1);
+        assert!(v.validate().is_empty(), "{:?}", v.validate());
     }
 
     #[test]
@@ -579,11 +586,14 @@ tr7 0 0 3
     #[test]
     fn clear_data_cards_keeps_geometry() {
         let mut m = Model::parse(LATTICE);
-        assert_eq!(m.data_cards().count(), 1); // m1
+        assert_eq!(m.view().data_cards().count(), 1); // m1
         m.clear_data_cards();
-        assert_eq!(m.data_cards().count(), 0);
-        assert_eq!(m.cells().count(), 3);
-        assert_eq!(m.surfaces().count(), 3);
+        {
+            let v = m.view();
+            assert_eq!(v.data_cards().count(), 0);
+            assert_eq!(v.cells().count(), 3);
+            assert_eq!(v.surfaces().count(), 3);
+        }
         assert!(m.diagnostics().is_empty());
     }
 

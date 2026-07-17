@@ -16,16 +16,22 @@ mod renumber;
 mod surface;
 mod transform;
 
-// The public API is `Model` (the facade) plus the owned typed views it returns
-// and the structured error/diagnostic types. The typed-projection functions,
-// the emitter, numeric parsing, renumbering internals, and the whole CST layer
-// are implementation details and are intentionally *not* re-exported here — all
-// capability is reached through `Model`'s methods.
+// The public API is `Model` (the facade) plus the `ModelView` its `view()`
+// hands out, the owned typed views those return, and the structured
+// error/diagnostic types. The typed-projection functions, the emitter, numeric
+// parsing, renumbering internals, and the whole CST layer are implementation
+// details and are intentionally *not* re-exported here — all capability is
+// reached through `Model`/`ModelView`.
+//
+// The split is the editing/reading boundary: `Model` owns the edits, and
+// `Model::view` materialises any pending splices once and returns a `ModelView`
+// whose readers are all `&self`. Reads therefore compose and can be shared, and
+// a reader can never observe a tree that disagrees with `to_source()`.
 pub use cell::{Cell, CellParam, CellRef, Fill, GeomExpr, OwnedCell, SurfaceRef};
 pub use compose::{ConflictKind, MergeConflict};
 pub use datacard::DataCard;
 pub use material::{Material, MaterialEntry};
-pub use model::{CellRead, EditError, Model, ModelIndex};
+pub use model::{EditError, Model, ModelIndex, ModelView};
 pub use surface::{Surface, SurfaceKind};
 pub use transform::Transform;
 

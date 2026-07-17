@@ -18,13 +18,14 @@ cargo insta review                            # review pending snapshot changes 
 ```
 `migjorn-py` is excluded from the Rust jobs because it is a Python extension needing a Python toolchain; it is built and linted in the Python job.
 
-Python (`crates/migjorn-py`, uses [uv](https://docs.astral.sh/uv/) + maturin):
+Python (`crates/migjorn-py`, uses maturin + a persistent venv):
 ```bash
-uv run --no-project --with ./crates/migjorn-py --with pytest pytest crates/migjorn-py/tests -q
-(cd crates/migjorn-py && maturin develop --release)  # manual build/install into a venv
+cd crates/migjorn-py && maturin develop --release   # rebuild into your active venv — do this before every pytest run
+pytest crates/migjorn-py/tests -q                    # `pytest` alone won't see new Rust code, only a fresh maturin develop does
 uvx ruff@0.15.21 check crates/migjorn-py             # lint (CI-pinned version)
 uvx ruff@0.15.21 format crates/migjorn-py            # CI runs --check
 ```
+CI instead uses `uv run --no-project --with ./crates/migjorn-py --with pytest pytest ...` (see `ci.yml`) — that ephemeral form is fine there because every run starts from an empty cache, but see the gotcha below for why it's the wrong choice locally.
 
 ## Architecture
 
@@ -50,5 +51,5 @@ Regression testing is data-driven: drop any `.mcnp` file (or a one-card snippet)
 - **No `panic = "abort"`** in the release profile — the Python extension needs panics to unwind so PyO3 converts them to Python exceptions instead of aborting the host process. Don't add it.
 - **Stub drift is enforced.** `crates/migjorn-py/tests/test_stubs.py` fails if `python/migjorn/__init__.pyi` and the runtime API disagree. After changing the PyO3 surface, update the `.pyi` stubs.
 - **An editor that decides from the card's current tokens must `materialize()` first.** Splices are emit-only, so a raw-token read cannot see a previous one and the edit silently does the wrong thing (e.g. `set_surface_transform(Some(1))` then `(None)` failing to remove it). Any read in between hides the bug, which is why it evaded the tests for so long — `consecutive_edits_do_not_read_stale_tokens` locks the cases down. The `owned_cells`-backed geometry editors (`add_cell_surface`, `remove_cell_complement`, …) are the exception: `owned_cells` is their source of truth, so they stay materialize-free and keep their edit batching.
-- **The Python extension can silently be stale.** uv keys its build cache on `crates/migjorn-py` alone, so edits to the Rust core (`crates/migjorn/`) do *not* trigger a rebuild — `uv run --with ./crates/migjorn-py` will happily test old code, and both `--refresh` and `uv cache clean migjorn` fail to fix it. Force it with `rm -rf ~/.cache/uv/archive-v0 ~/.cache/uv/sdists-v9`. Also delete any stale `crates/migjorn-py/python/migjorn/_migjorn.abi3.so` left by an earlier `maturin develop`: it sits in the packaged `python-source` dir and shadows fresh builds. When a Python result contradicts a Rust test, suspect this first.
+- **The Python extension can silently be stale — this is why local testing uses a persistent venv, not `uv run --with`.** `maturin develop --release` shells out to `cargo build` directly, so it always sees edits to the Rust core (`crates/migjorn/`); `uv run --with ./crates/migjorn-py`, by contrast, keys its build cache on the `migjorn-py` directory alone and will happily keep testing old code after a core-only edit, and neither `--refresh` nor `uv cache clean migjorn` fixes it (force it with `rm -rf ~/.cache/uv/archive-v0 ~/.cache/uv/sdists-v9` if you do end up needing that ephemeral form, e.g. for the notebook workflow in `crates/migjorn-py/README.md`). Also delete any stale `crates/migjorn-py/python/migjorn/_migjorn.abi3.so` left by an earlier `maturin develop`: it sits in the packaged `python-source` dir and shadows fresh builds. When a Python result contradicts a Rust test, suspect one of these first.
 - Design notes and benchmarks live in `docs/` (`m0`…`m9`), each documenting a milestone (findings, renumber, editing, structural editing, construction, renumber generalization).

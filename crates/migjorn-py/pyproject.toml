@@ -28,7 +28,9 @@ Repository = "https://github.com/Fusion4Energy/migjorn"
 
 [dependency-groups]
 # Installed by `uv sync` / `uv run` by default (alongside the migjorn
-# build itself), so a plain `uv run pytest` works out of the box.
+# build itself). For the local test loop prefer a persistent venv +
+# explicit `maturin develop --release` before `pytest` (see README) —
+# it rebuilds from cargo directly and can't serve a stale extension.
 dev = ["pytest"]
 
 [tool.maturin]

@@ -75,4 +75,8 @@ Regression corpus: drop any `.mcnp` file (or a one-card snippet) into
 `crates/migjorn-syntax/tests/corpus/` and run `cargo insta review` — it is
 asserted lossless and snapshotted automatically, no test code required.
 
+Python tests: see `crates/migjorn-py/README.md#development-persistent-venv`
+(`maturin develop --release` before every `pytest` run — the compiled
+extension doesn't rebuild itself).
+
 Design notes and benchmark results: `docs/`.

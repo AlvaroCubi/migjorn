@@ -38,6 +38,9 @@ automatically.
 > Also delete any stale `python/migjorn/_migjorn.abi3.so` left by an earlier
 > `maturin develop`: it lives in the packaged `python-source` dir and shadows
 > freshly built extensions.
+>
+> Because of this, local test runs use a persistent venv + explicit
+> `maturin develop` instead — see **Development (persistent venv)** below.
 
 ## Use in an IDE (VS Code / Jupyter kernel)
 
@@ -69,13 +72,21 @@ the usual cause. After changing the Rust code, re-run
 > and `py.typed` physically in `site-packages`, which every type checker resolves.
 > (Trade-off: after editing the code you must re-sync to pick up changes.)
 
-## Install (development, without uv)
+## Development (persistent venv)
+
+This is the reliable path for the local edit/test loop — `maturin develop`
+calls `cargo build` directly, so, unlike `uv run --with ./crates/migjorn-py`,
+it can't serve a stale extension after a Rust-core change.
 
 ```bash
-pip install maturin
+pip install maturin pytest
 cd crates/migjorn-py
 maturin develop --release
+pytest tests -q
 ```
+
+Re-run `maturin develop --release` before `pytest` every time — `pytest` alone
+won't pick up new Rust code, only a fresh `maturin develop` does.
 
 To build a wheel: `maturin build --release` (produces an `abi3` wheel that works
 on CPython 3.9+).

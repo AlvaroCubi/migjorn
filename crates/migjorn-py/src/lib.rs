@@ -865,6 +865,11 @@ impl Model {
     }
 
     /// All cells, in source order (materialises a list of handles).
+    ///
+    /// Built from `cell_slots()`, not `Model::view()`: card add/remove always
+    /// reparses immediately and in-card splices never change a card's kind or
+    /// count, so this classification can't disagree with a materialised read
+    /// (see the "sanctioned" stable-slot exception in `migjorn::Model`).
     #[getter]
     fn cells(slf: Bound<'_, Self>) -> Vec<Cell> {
         let py = slf.py();
@@ -881,6 +886,8 @@ impl Model {
     }
 
     /// All surfaces, in source order (materialises a list of handles).
+    ///
+    /// See `Model::cells` above: `surface_slots()` is splice-safe, no `view()` needed.
     #[getter]
     fn surfaces(slf: Bound<'_, Self>) -> Vec<Surface> {
         let py = slf.py();
@@ -897,6 +904,8 @@ impl Model {
     }
 
     /// All ``TRn`` transforms, in source order.
+    ///
+    /// See `Model::cells` above: `transform_slots()` is splice-safe, no `view()` needed.
     #[getter]
     fn transforms(slf: Bound<'_, Self>) -> Vec<Transform> {
         let py = slf.py();
@@ -913,6 +922,8 @@ impl Model {
     }
 
     /// All ``Mn`` materials, in source order.
+    ///
+    /// See `Model::cells` above: `material_slots()` is splice-safe, no `view()` needed.
     #[getter]
     fn materials(slf: Bound<'_, Self>) -> Vec<Material> {
         let py = slf.py();

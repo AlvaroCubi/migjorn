@@ -288,6 +288,57 @@ impl GreenTree {
         out
     }
 
+    /// The exact source text of the half-open token range `[from, to)`,
+    /// applying any overrides and card replacements — the primitive
+    /// `card_source` is built on, generalized to a sub-range. Used to split a
+    /// card's own content from a trailing comment block absorbed onto it.
+    pub fn token_range_source(&self, from: u32, to: u32) -> String {
+        let ranges = self.replaced_ranges();
+        let mut out = String::new();
+        self.emit_range(from, to, &ranges, &mut out);
+        out
+    }
+
+    /// Token index where the card at `card_index` ends its own content and a
+    /// trailing block of whole `c`/`$` comment lines begins (or `card.tok_end`
+    /// if it absorbed none). A card only ever absorbs comments onto its
+    /// *tail* (see `build_cards`), so everything before this index — content
+    /// lines, `&`/indent continuations, and any inline `$` comment on the
+    /// last content line — is the card's own text; everything from here on is
+    /// a header an author wrote for whatever card follows, misattached
+    /// backward onto this one.
+    pub fn card_header_split(&self, card_index: usize) -> u32 {
+        let card = self.cards[card_index];
+        let mut i = match self.card_content_tokens(&card).last() {
+            Some(last) => {
+                let mut j = last + 1;
+                while j < card.tok_end
+                    && matches!(
+                        self.token_kind(j),
+                        SyntaxKind::WHITESPACE | SyntaxKind::DOLLAR_COMMENT
+                    )
+                {
+                    j += 1;
+                }
+                j
+            }
+            // No content token at all: only possible for a comment-shaped
+            // title (e.g. a model whose title is literally "C") — its whole
+            // first line is the title, not a header for what follows.
+            None => {
+                let mut j = card.first_tok;
+                while j < card.tok_end && self.token_kind(j) != SyntaxKind::NEWLINE {
+                    j += 1;
+                }
+                j
+            }
+        };
+        if i < card.tok_end && self.token_kind(i) == SyntaxKind::NEWLINE {
+            i += 1;
+        }
+        i
+    }
+
     /// Replace the *content* of the card at `card_index` with `text` on
     /// re-emission. Only the card's meaningful (non-trivia) token span is
     /// replaced; leading indentation and trailing trivia — newlines, the block's

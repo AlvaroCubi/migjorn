@@ -144,44 +144,64 @@ impl Model {
             });
         }
 
-        // Surfaces referenced by kept cells (and the transforms they carry).
-        let mut surface_texts: Vec<String> = Vec::new();
-        for i in 0..ncards {
-            if self.tree.cards()[i].kind != SyntaxKind::SURFACE_CARD {
-                continue;
-            }
-            let Some(s) = parse_surface(&self.tree, i) else {
-                continue;
-            };
-            if wanted_surfaces.contains(&s.id) {
-                if let Some(t) = s.transform {
-                    wanted_transforms.insert(t.abs());
-                }
-                surface_texts.push(self.tree.card_source(i).trim_end().to_string());
-            }
-        }
-
-        // Kept cells, in source order.
+        // Walk every card once, in source order, splitting each into its own
+        // text and any trailing comment block it absorbed (`card_header_split`).
+        // That trailing block is a header an author wrote for whatever card
+        // comes *next* — the card-boundary rule just misattaches it backward
+        // onto this one (see `build_cards`). A header trailing a dropped card
+        // therefore carries forward as `pending_header` onto whichever kept
+        // card follows, instead of being discarded with its host.
+        let mut title_text = "title".to_string();
         let mut cell_texts: Vec<String> = Vec::new();
-        for i in 0..ncards {
-            if kept.contains(&i) {
-                cell_texts.push(self.tree.card_source(i).trim_end().to_string());
-            }
-        }
-
-        // Only the data cards the kept geometry needs.
+        let mut surface_texts: Vec<String> = Vec::new();
         let mut data_texts: Vec<String> = Vec::new();
+        let mut pending_header: Option<String> = None;
         for i in 0..ncards {
-            if self.tree.cards()[i].kind != SyntaxKind::DATA_CARD {
+            let kind = self.tree.cards()[i].kind;
+            let (own, header) = card_text_and_header(&self.tree, i);
+
+            if kind == SyntaxKind::TITLE_CARD {
+                title_text = own;
+                pending_header = header;
                 continue;
             }
-            if data_card_needed(&self.tree, i, &wanted_materials, &wanted_transforms) {
-                data_texts.push(self.tree.card_source(i).trim_end().to_string());
+
+            let is_kept = match kind {
+                SyntaxKind::CELL_CARD => kept.contains(&i),
+                SyntaxKind::SURFACE_CARD => match parse_surface(&self.tree, i) {
+                    Some(s) if wanted_surfaces.contains(&s.id) => {
+                        if let Some(t) = s.transform {
+                            wanted_transforms.insert(t.abs());
+                        }
+                        true
+                    }
+                    _ => false,
+                },
+                SyntaxKind::DATA_CARD => {
+                    data_card_needed(&self.tree, i, &wanted_materials, &wanted_transforms)
+                }
+                _ => false,
+            };
+
+            if is_kept {
+                let text = match pending_header.take() {
+                    Some(h) => format!("{h}\n{own}"),
+                    None => own,
+                };
+                match kind {
+                    SyntaxKind::CELL_CARD => cell_texts.push(text),
+                    SyntaxKind::SURFACE_CARD => surface_texts.push(text),
+                    SyntaxKind::DATA_CARD => data_texts.push(text),
+                    _ => unreachable!("filtered to cell/surface/data above"),
+                }
+                pending_header = header;
+            } else if header.is_some() {
+                pending_header = header;
             }
         }
 
         Model::parse(assemble_blocks(
-            &self.title_source(),
+            &title_text,
             &cell_texts,
             &surface_texts,
             &data_texts,
@@ -301,6 +321,23 @@ impl Model {
             .map(|i| self.tree.card_source(i).trim_end().to_string())
             .unwrap_or_else(|| "title".to_string())
     }
+}
+
+/// A card's own source text (through its last content line, trimmed of
+/// trailing whitespace) and, if it absorbed a trailing block of whole `c`/`$`
+/// comment lines, that header (trimmed) — the header an author wrote to
+/// introduce whichever card follows, misattached backward by the
+/// card-boundary rule. See `GreenTree::card_header_split`.
+fn card_text_and_header(tree: &GreenTree, card_index: usize) -> (String, Option<String>) {
+    let card = tree.cards()[card_index];
+    let split = tree.card_header_split(card_index);
+    let own = tree
+        .token_range_source(card.first_tok, split)
+        .trim_end()
+        .to_string();
+    let header = tree.token_range_source(split, card.tok_end);
+    let header = header.trim();
+    (own, (!header.is_empty()).then(|| header.to_string()))
 }
 
 /// Whether the data card at `card_index` must be carried into an extraction:
@@ -548,6 +585,38 @@ tr7 0 0 3
         assert_eq!(
             u.view().transforms().map(|t| t.id).collect::<Vec<_>>(),
             vec![7]
+        );
+    }
+
+    #[test]
+    fn extract_reattaches_headers_misattached_to_dropped_cards() {
+        // "c banner" trails the title (absorbed backward, per `build_cards`);
+        // "c Universe 10 cells" trails the level-0 cell but is really a header
+        // for the u=10 cell that follows it. Extracting universe 10 drops the
+        // level-0 cell, so that header must travel onto cell 2 instead of
+        // being discarded with its host — and the title must not keep the
+        // banner that was never meant for the extraction at all.
+        let src = "\
+title
+c banner
+c another banner line
+1 0 -1 fill=10
+c Universe 10 cells
+2 0 -2 u=10
+
+1 SO 5
+2 SO 4
+";
+        let mut m = Model::parse(src);
+        let u = m.extract_universe(10);
+        let out = u.tree.to_source();
+        assert!(
+            out.contains("c Universe 10 cells\n2 0 -2 u=10"),
+            "header did not reattach to the kept cell: {out:?}"
+        );
+        assert!(
+            !out.contains("banner"),
+            "banner meant for the dropped cell leaked into the extraction: {out:?}"
         );
     }
 

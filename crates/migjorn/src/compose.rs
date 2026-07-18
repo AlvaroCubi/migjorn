@@ -50,6 +50,23 @@ impl ModelView<'_> {
         ids.sort_unstable();
         ids
     }
+
+    /// Carve universe `u` into a standalone [`Model`], as
+    /// [`Model::extract_universe`]. A view only ever exists over an already-
+    /// materialized tree, so this takes `&self` and composes like every other
+    /// view reader: call it from multiple threads (e.g. via `rayon`'s
+    /// `par_iter`) to extract every universe in parallel, since `ModelView`
+    /// borrows the tree immutably and is `Sync`.
+    pub fn extract_universe(&self, u: i64) -> Model {
+        extract_cells(self.tree, |cu| cu == Some(u))
+    }
+
+    /// Carve the level-0 shell into a standalone [`Model`], as
+    /// [`Model::extract_level0`]. See [`ModelView::extract_universe`] for why
+    /// this is `&self`.
+    pub fn extract_level0(&self) -> Model {
+        extract_cells(self.tree, |cu| cu.is_none())
+    }
 }
 
 impl Model {
@@ -68,7 +85,7 @@ impl Model {
     /// universes are self-contained this is exactly the universe's cells.
     pub fn extract_universe(&mut self, u: i64) -> Model {
         self.materialize();
-        self.extract_cells(|cu| cu == Some(u))
+        extract_cells(&self.tree, |cu| cu == Some(u))
     }
 
     /// Carve the level-0 shell — every cell with no `u=` — plus everything those
@@ -78,134 +95,7 @@ impl Model {
     /// the model's cells.
     pub fn extract_level0(&mut self) -> Model {
         self.materialize();
-        self.extract_cells(|cu| cu.is_none())
-    }
-
-    /// Shared engine for the `extract_*` methods: seed the kept set with the
-    /// cells whose universe satisfies `keep`, follow every reference to a closed
-    /// set of cells/surfaces/materials/transforms, carry only the needed data
-    /// cards, and re-parse a title + cell + surface + data model.
-    fn extract_cells(&self, keep: impl Fn(Option<i64>) -> bool) -> Model {
-        let ncards = self.tree.cards().len();
-
-        // Cell id → card index, so `#n`/`LIKE n` references can be followed.
-        let mut cell_card: rustc_hash::FxHashMap<i64, usize> = rustc_hash::FxHashMap::default();
-        for i in 0..ncards {
-            if let Some((_, id)) = cell_id(&self.tree, i) {
-                cell_card.entry(id).or_insert(i);
-            }
-        }
-
-        // Seed the worklist with the cells whose universe satisfies `keep`.
-        let mut kept: FxHashSet<usize> = FxHashSet::default();
-        let mut work: Vec<usize> = Vec::new();
-        for i in 0..ncards {
-            if self.tree.cards()[i].kind == SyntaxKind::CELL_CARD
-                && keep(cell_universe(&self.tree, i))
-                && kept.insert(i)
-            {
-                work.push(i);
-            }
-        }
-
-        // Follow every reference to a closed set of cells and gather the
-        // surfaces, materials, and transforms the kept cells use.
-        let mut wanted_surfaces: FxHashSet<i64> = FxHashSet::default();
-        let mut wanted_materials: FxHashSet<i64> = FxHashSet::default();
-        let mut wanted_transforms: FxHashSet<i64> = FxHashSet::default();
-        while let Some(i) = work.pop() {
-            if let Some((_, mat)) = cell_material(&self.tree, i) {
-                if mat != 0 {
-                    wanted_materials.insert(mat);
-                }
-            }
-            // A `fill=u (TRn)` or `trcl=TRn` bare reference needs that transform.
-            if let Some(t) = parse_fill(&self.tree, i)
-                .and_then(|f| f.transform)
-                .and_then(|s| s.parse::<i64>().ok())
-            {
-                wanted_transforms.insert(t.abs());
-            }
-            if let Some(t) = cell_trcl_transform(&self.tree, i) {
-                wanted_transforms.insert(t);
-            }
-            scan_cell_refs(&self.tree, i, |kind, _tok, val| match kind {
-                RefKind::SurfaceRef { .. } => {
-                    wanted_surfaces.insert(val);
-                }
-                RefKind::CellRef => {
-                    if let Some(&ci) = cell_card.get(&val) {
-                        if kept.insert(ci) {
-                            work.push(ci);
-                        }
-                    }
-                }
-                RefKind::CellId => {}
-            });
-        }
-
-        // Walk every card once, in source order, splitting each into its own
-        // text and any trailing comment block it absorbed (`card_header_split`).
-        // That trailing block is a header an author wrote for whatever card
-        // comes *next* — the card-boundary rule just misattaches it backward
-        // onto this one (see `build_cards`). A header trailing a dropped card
-        // therefore carries forward as `pending_header` onto whichever kept
-        // card follows, instead of being discarded with its host.
-        let mut title_text = "title".to_string();
-        let mut cell_texts: Vec<String> = Vec::new();
-        let mut surface_texts: Vec<String> = Vec::new();
-        let mut data_texts: Vec<String> = Vec::new();
-        let mut pending_header: Option<String> = None;
-        for i in 0..ncards {
-            let kind = self.tree.cards()[i].kind;
-            let (own, header) = card_text_and_header(&self.tree, i);
-
-            if kind == SyntaxKind::TITLE_CARD {
-                title_text = own;
-                pending_header = header;
-                continue;
-            }
-
-            let is_kept = match kind {
-                SyntaxKind::CELL_CARD => kept.contains(&i),
-                SyntaxKind::SURFACE_CARD => match parse_surface(&self.tree, i) {
-                    Some(s) if wanted_surfaces.contains(&s.id) => {
-                        if let Some(t) = s.transform {
-                            wanted_transforms.insert(t.abs());
-                        }
-                        true
-                    }
-                    _ => false,
-                },
-                SyntaxKind::DATA_CARD => {
-                    data_card_needed(&self.tree, i, &wanted_materials, &wanted_transforms)
-                }
-                _ => false,
-            };
-
-            if is_kept {
-                let text = match pending_header.take() {
-                    Some(h) => format!("{h}\n{own}"),
-                    None => own,
-                };
-                match kind {
-                    SyntaxKind::CELL_CARD => cell_texts.push(text),
-                    SyntaxKind::SURFACE_CARD => surface_texts.push(text),
-                    SyntaxKind::DATA_CARD => data_texts.push(text),
-                    _ => unreachable!("filtered to cell/surface/data above"),
-                }
-                pending_header = header;
-            } else if header.is_some() {
-                pending_header = header;
-            }
-        }
-
-        Model::parse(assemble_blocks(
-            &title_text,
-            &cell_texts,
-            &surface_texts,
-            &data_texts,
-        ))
+        extract_cells(&self.tree, |cu| cu.is_none())
     }
 
     /// Drop every data card, keeping the title, cell block, and surface block.
@@ -321,6 +211,134 @@ impl Model {
             .map(|i| self.tree.card_source(i).trim_end().to_string())
             .unwrap_or_else(|| "title".to_string())
     }
+}
+
+/// Shared engine for the `extract_*` methods: seed the kept set with the
+/// cells whose universe satisfies `keep`, follow every reference to a closed
+/// set of cells/surfaces/materials/transforms, carry only the needed data
+/// cards, and re-parse a title + cell + surface + data model. Takes `&GreenTree`
+/// rather than `&Model` so it is callable from both `Model` (after the `&mut`
+/// materialize) and `ModelView` (already guaranteed materialized) — the latter
+/// is what lets callers extract several universes in parallel.
+fn extract_cells(tree: &GreenTree, keep: impl Fn(Option<i64>) -> bool) -> Model {
+    let ncards = tree.cards().len();
+
+    // Cell id → card index, so `#n`/`LIKE n` references can be followed.
+    let mut cell_card: rustc_hash::FxHashMap<i64, usize> = rustc_hash::FxHashMap::default();
+    for i in 0..ncards {
+        if let Some((_, id)) = cell_id(tree, i) {
+            cell_card.entry(id).or_insert(i);
+        }
+    }
+
+    // Seed the worklist with the cells whose universe satisfies `keep`.
+    let mut kept: FxHashSet<usize> = FxHashSet::default();
+    let mut work: Vec<usize> = Vec::new();
+    for i in 0..ncards {
+        if tree.cards()[i].kind == SyntaxKind::CELL_CARD
+            && keep(cell_universe(tree, i))
+            && kept.insert(i)
+        {
+            work.push(i);
+        }
+    }
+
+    // Follow every reference to a closed set of cells and gather the
+    // surfaces, materials, and transforms the kept cells use.
+    let mut wanted_surfaces: FxHashSet<i64> = FxHashSet::default();
+    let mut wanted_materials: FxHashSet<i64> = FxHashSet::default();
+    let mut wanted_transforms: FxHashSet<i64> = FxHashSet::default();
+    while let Some(i) = work.pop() {
+        if let Some((_, mat)) = cell_material(tree, i) {
+            if mat != 0 {
+                wanted_materials.insert(mat);
+            }
+        }
+        // A `fill=u (TRn)` or `trcl=TRn` bare reference needs that transform.
+        if let Some(t) = parse_fill(tree, i)
+            .and_then(|f| f.transform)
+            .and_then(|s| s.parse::<i64>().ok())
+        {
+            wanted_transforms.insert(t.abs());
+        }
+        if let Some(t) = cell_trcl_transform(tree, i) {
+            wanted_transforms.insert(t);
+        }
+        scan_cell_refs(tree, i, |kind, _tok, val| match kind {
+            RefKind::SurfaceRef { .. } => {
+                wanted_surfaces.insert(val);
+            }
+            RefKind::CellRef => {
+                if let Some(&ci) = cell_card.get(&val) {
+                    if kept.insert(ci) {
+                        work.push(ci);
+                    }
+                }
+            }
+            RefKind::CellId => {}
+        });
+    }
+
+    // Walk every card once, in source order, splitting each into its own
+    // text and any trailing comment block it absorbed (`card_header_split`).
+    // That trailing block is a header an author wrote for whatever card
+    // comes *next* — the card-boundary rule just misattaches it backward
+    // onto this one (see `build_cards`). A header trailing a dropped card
+    // therefore carries forward as `pending_header` onto whichever kept
+    // card follows, instead of being discarded with its host.
+    let mut title_text = "title".to_string();
+    let mut cell_texts: Vec<String> = Vec::new();
+    let mut surface_texts: Vec<String> = Vec::new();
+    let mut data_texts: Vec<String> = Vec::new();
+    let mut pending_header: Option<String> = None;
+    for i in 0..ncards {
+        let kind = tree.cards()[i].kind;
+        let (own, header) = card_text_and_header(tree, i);
+
+        if kind == SyntaxKind::TITLE_CARD {
+            title_text = own;
+            pending_header = header;
+            continue;
+        }
+
+        let is_kept = match kind {
+            SyntaxKind::CELL_CARD => kept.contains(&i),
+            SyntaxKind::SURFACE_CARD => match parse_surface(tree, i) {
+                Some(s) if wanted_surfaces.contains(&s.id) => {
+                    if let Some(t) = s.transform {
+                        wanted_transforms.insert(t.abs());
+                    }
+                    true
+                }
+                _ => false,
+            },
+            SyntaxKind::DATA_CARD => data_card_needed(tree, i, &wanted_materials, &wanted_transforms),
+            _ => false,
+        };
+
+        if is_kept {
+            let text = match pending_header.take() {
+                Some(h) => format!("{h}\n{own}"),
+                None => own,
+            };
+            match kind {
+                SyntaxKind::CELL_CARD => cell_texts.push(text),
+                SyntaxKind::SURFACE_CARD => surface_texts.push(text),
+                SyntaxKind::DATA_CARD => data_texts.push(text),
+                _ => unreachable!("filtered to cell/surface/data above"),
+            }
+            pending_header = header;
+        } else if header.is_some() {
+            pending_header = header;
+        }
+    }
+
+    Model::parse(assemble_blocks(
+        &title_text,
+        &cell_texts,
+        &surface_texts,
+        &data_texts,
+    ))
 }
 
 /// A card's own source text (through its last content line, trimmed of
@@ -490,6 +508,59 @@ m1 1001 1
         let mut geometry_only = u;
         geometry_only.clear_data_cards();
         assert_eq!(geometry_only.view().data_cards().count(), 0);
+    }
+
+    #[test]
+    fn view_extract_matches_mut_extract() {
+        // `ModelView::extract_universe`/`extract_level0` must agree byte-for-byte
+        // with the `&mut self` originals — they share the same `extract_cells`
+        // engine, just reached without a fresh materialize.
+        let mut via_view = Model::parse(LATTICE);
+        let mut via_mut = Model::parse(LATTICE);
+        assert_eq!(
+            via_view.view().extract_universe(10).to_source(),
+            via_mut.extract_universe(10).to_source()
+        );
+        assert_eq!(
+            via_view.view().extract_level0().to_source(),
+            via_mut.extract_level0().to_source()
+        );
+    }
+
+    #[test]
+    fn view_extract_universe_runs_across_threads() {
+        // `ModelView` borrows the tree immutably, so it is `Sync`: extracting
+        // several universes concurrently needs no cloning and no `unsafe`. This
+        // is the capability `gitronics` uses to parallelize universe extraction
+        // with `rayon` again after `extract_universe` became `&mut self`.
+        let src = "\
+title
+1 0 -1 fill=10
+2 1 -1.0 -2 u=10
+3 1 -1.0 -2 u=20
+4 1 -1.0 -2 u=30
+
+1 SO 5
+2 SO 4
+
+m1 1001 1
+";
+        let mut m = Model::parse(src);
+        let view = m.view();
+        let view = &view;
+        let mut sources: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = view
+                .universe_ids()
+                .into_iter()
+                .map(|u| scope.spawn(move || view.extract_universe(u).to_source()))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        sources.sort();
+        assert_eq!(sources.len(), 3);
+        assert!(sources[0].contains("u=10"));
+        assert!(sources[1].contains("u=20"));
+        assert!(sources[2].contains("u=30"));
     }
 
     #[test]

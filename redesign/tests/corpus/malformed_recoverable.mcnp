@@ -1,0 +1,12 @@
+Malformed input the parser must recover from (never panic)
+1 1 -1.0 -1 imp:n=1
+2 0 1 -              $ dangling geometry operator
+3 0 ((1 2 imp:n=1   $ unbalanced parentheses
+4 9 -1.0 imp:n=1    $ material with no geometry surfaces
+
+1 SO 5
+2 PX
+3 GQ 1 1 1          $ too few coefficients
+
+m1 1001 zzz         $ non-numeric fraction
+mt99

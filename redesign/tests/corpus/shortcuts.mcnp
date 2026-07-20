@@ -1,0 +1,15 @@
+Data-array shortcuts: repeat nR, interpolate nI, jump nJ, multiply nM
+1 1 -1.0 -1 imp:n=1
+2 1 -1.0 -2 1 imp:n=1
+3 0 2 imp:n=0
+
+1 SO 1
+2 SO 5
+
+m1 1001 1
+c imp with a repeat: three cells get imp 1 1 1 via 2R
+imp:n 1 2R 0
+c energy grid with interpolation and a jump
+e0 1e-3 8I 1 2J 20
+c a multiply shortcut
+sp2 1 3M 9M

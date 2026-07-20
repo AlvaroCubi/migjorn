@@ -1,0 +1,17 @@
+Surfaces: mnemonics, boundary prefixes, transforms, a macrobody
+1 0 -1 2 -3 imp:n=1
+2 0 (1 : -2 : 3) -10 imp:n=0
+
+1  SO  5
+*2  PX  0                 $ reflective boundary (leading *)
++3  PY  0                 $ white boundary (leading +)
+4  3  PZ  1               $ surface with transform number 3
+5  -3 SO  2               $ periodic (negative transform)
+6  GQ  1 1 1 0 0 0 0 0 0 -25
+7  C/X  0 0 2
+10  RPP  +558.36 +902.00  &
+         -428.58 -105.42  &
+         +438.70 +662.54
+
+m1 1001 1
+tr3 0 0 5

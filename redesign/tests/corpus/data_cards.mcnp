@@ -1,0 +1,23 @@
+Data cards: materials with library suffixes, MT, transforms, tallies, source
+1 1 -1.0 -1 imp:n=1
+2 0 1 imp:n=0
+
+1 SO 5
+
+c materials
+m1   1001.31c 2  8016.31c 1   $ light water, atomic fractions
+mt1  lwtr.10t
+m2   26000 -0.98  6000 -0.02  $ steel, weight fractions
+c transforms
+tr5  0 0 10
+*tr6 0 0 0  30 60 90 60 30 90 90 90 0
+c tallies and companions
+f4:n 1
+fc4  cell flux in the fuel
+e4   1e-3 0.1 1 10 20
+sd4  1
+f1:n 1
+mode n p
+nps  1e6
+sdef pos=0 0 0 erg=14.1
+print

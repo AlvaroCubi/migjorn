@@ -42,25 +42,40 @@ shape** (they are good — see `api/` and `docs/03`), not its core data structur
 
 ## The architecture (already decided — see `docs/02-architecture.md`)
 
-**Cards are the atomic unit.** The model is a `Vec<Card>`; each card owns (or,
-while pristine, borrows) its own small token buffer.
+**Cards are the atomic unit, and every card is uniform.** The model is a
+`Vec<Card>`; each card owns its own text (`String`) and token buffer
+(`Vec<Token>`) — the same shape whether it was just parsed, never touched, or
+edited a hundred times. No borrowed/owned split, no edit overlay.
 
-- `Cst { source: Arc<str>, arena: Arc<[Token]>, cards: Vec<Card> }`.
-- `Card` text is a **hybrid**: `Pristine { span, tokens-range }` (borrows the
-  shared source + token arena, zero per-card allocation — so parse stays ~1 s)
-  or `Owned { String, Vec<Token> }` (only after the card is edited or newly
-  built).
-- Structural edits mutate **only** `cards` (a `Vec` insert/remove); `source` and
-  `arena` are never mutated. Add = lex the one snippet (µs) + `Vec::insert`.
-  Remove = `Vec::remove`.
-- In-card edits set a local token override, promoting that card to `Owned`.
-- Emit walks `cards`: pristine → memcpy `source[span]`; owned → render tokens.
-  Untouched cards stay a memcpy, so emission never regresses to O(all tokens).
+- `Cst { cards: Vec<Card> }`. `Card { slot: u32, kind, text: String,
+  tokens: Vec<Token> }` where token spans are relative to the card's `text`.
+  There is no shared source buffer or token arena, and the source is not retained
+  after parse.
+- Structural edits mutate **only** `cards` (a `Vec` insert/remove). Add = lex the
+  one snippet into a self-contained `Card` (µs) + `Vec::insert`. Remove =
+  `Vec::remove`.
+- In-card edits (renumber a token, set a value, add/remove a parameter) splice
+  that one card's `text` and fix its token spans. Same code path for all of them;
+  no mode change, nothing to "promote".
+- Emit is `for card in cards { out.push_str(&card.text) }` — a memcpy per card,
+  edited or not (an unedited card's `text` already holds its exact bytes). One
+  uniform path; byte-for-byte lossless when unedited.
 - Stable per-card `slot` ids; live handles resolve slot → index each use, so an
   edit to one card never invalidates a handle to another.
 - Maintained `id → slot` indices for O(1) lookup.
 - Cards are independent ⇒ parse, renumber, and emit are data-parallel with
-  `rayon` for the stretch targets.
+  `rayon`. This matters most at **parse**: giving every card its own copy costs
+  ~0.9 s single-threaded on the big model, and parallel per-card construction is
+  what keeps parse in the ≤ 1 s budget.
+
+**Why uniform and not a shared arena with borrowed cards?** Measured: the
+shared-arena/borrow scheme saves ~0.9 s of *parse* time and nothing else — emit
+is identical, memory is comparable, and it makes no *edit* faster (a single edit
+rebuilds only its one small card either way). It would cost a `CardText` enum, an
+overrides overlay, a retained source/arena, and "is this card a memcpy" branching
+throughout. For a library about simple, fast iterative editing that is a bad
+trade. Take the uniform design; treat the shared arena as a documented,
+deferrable parse-latency optimization to add only if a profile demands it.
 
 This deletes the previous design's `OwnedCell`/promotion, emit-only splices,
 `has_pending_splices`/`materialize()`, and the `Model`/`ModelView` split — none
@@ -82,8 +97,8 @@ On a ~1M-card model, release build:
 
 | Operation | Target |
 |---|---|
-| parse | ≤ 1.0 s (stretch ≤ 0.5 s parallel) |
-| emit unedited / after K edits | ≤ 0.20 s / ≤ 0.20 s + O(K) |
+| parse | ≤ 1.0 s (needs parallel per-card build) |
+| emit unedited / after K edits | ≤ 0.20 s / ≤ 0.20 s (same uniform path) |
 | single add_cell / remove_cell | ≤ 10 ms |
 | 1000-edit session | ≤ 1.0 s total |
 | read after edit | ≤ 1 ms |
@@ -112,9 +127,9 @@ says how to measure and how to fail CI on a regression.
   before any feature exists.
 - **M1 — Typed projection (read-only).** `Model`, `Cell`/`Surface`/`Material`/
   `Transform` views, id indices, lookups. Gate: `test_parsing.py`.
-- **M2 — In-card value edits.** set material/density/coeff/param via local token
-  overrides; emit stays memcpy for untouched cards. Gate: relevant
-  `test_editing.py` + emit-after-K-edits bench.
+- **M2 — In-card value edits.** set material/density/coeff/param by splicing the
+  one card's `text` + tokens. Gate: relevant `test_editing.py` + emit-after-K-
+  edits bench (must stay flat — emit cost is edit-independent).
 - **M3 — Structural edits.** add/remove card as `Vec<Card>` ops; stable slots;
   handle invalidation. Gate: structural `test_editing.py` + add/remove/session
   benches (the headline win).
@@ -122,7 +137,8 @@ says how to measure and how to fail CI on a regression.
   transforms/universes/tallies. Gate: renumber tests + benches.
 - **M5 — Composition.** validate / extract_universe / extract_level0 / merge.
 - **M6 — Python bindings + parallelism.** PyO3 `abi3` to `api/migjorn.pyi`;
-  rayon for parse/renumber/emit to reach stretch targets; stub-drift test.
+  rayon for parse (per-card build)/renumber/emit to hit the budget; stub-drift
+  test.
 
 At each milestone, run the round-trip suite (it must never regress) and the
 relevant bench rows.

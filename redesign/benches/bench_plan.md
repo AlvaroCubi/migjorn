@@ -25,7 +25,8 @@ how the current-library numbers were taken).
 1. `parse` — file bytes → `Model`.
 2. `to_source` on the **unedited** model.
 3. `to_source` after **K** scattered value edits (K = 1, 100, 10 000) — assert it
-   stays ~`unedited + O(K)`, i.e. untouched cards still memcpy.
+   stays ~`unedited` (flat, edit-independent): every card emits by the same
+   per-card memcpy whether or not it was edited, so K must not move emit time.
 4. `add_cell` single — median of N repeats, each from a fresh parse.
 5. `remove_cell` single — same.
 6. **Session**: 1000 interleaved add/remove/value edits + reads, total wall time.

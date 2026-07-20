@@ -5,10 +5,11 @@
 //! implementation has a concrete target. The guiding decision:
 //!
 //!   **Cards are the atomic unit.** The model is a `Vec<Card>` where each card
-//!   owns (or borrows, when pristine) its own small token buffer. Structural
-//!   edits are `Vec<Card>` operations; in-card edits are local token overrides;
-//!   emission copies untouched cards verbatim and renders only edited ones.
-//!   Nothing ever re-lexes the whole file.
+//!   uniformly owns its own text (`String`) and token buffer (`Vec<Token>`).
+//!   Structural edits are `Vec<Card>` operations; in-card edits mutate that one
+//!   card's text and tokens; emission concatenates every card's text. There is
+//!   no borrowed/owned distinction and no edit overlay — every card is handled
+//!   identically regardless of its edit history. Nothing ever re-lexes the file.
 //!
 //! Crate layout is unchanged from today (it is good):
 //!   migjorn-syntax : lexer + per-card CST (this file's `Cst`, `Card`, `Token`)
@@ -19,7 +20,6 @@
 //! motivate this shape.
 
 use std::ops::Range;
-use std::sync::Arc;
 
 // ===========================================================================
 // migjorn-syntax : the lossless, per-card concrete syntax layer
@@ -56,12 +56,13 @@ impl SyntaxKind {
     }
 }
 
-/// A single token: its kind and its byte span into the card's text. Text is a
-/// span, never an owned string — no per-token allocation.
+/// A single token: its kind and its byte span **within its owning card's text**.
+/// Text is a span (relative to the card), never an owned string — a card carries
+/// tens of tokens, not the whole file, so its tokens tile its own `String`.
 #[derive(Debug, Clone, Copy)]
 pub struct Token {
     pub kind: SyntaxKind,
-    /// Byte range within the owning card's current text.
+    /// Byte range within the owning card's `text`.
     pub span: Range<u32>,
 }
 
@@ -82,42 +83,51 @@ pub enum CardKind {
 
 /// One card: the atomic unit of the whole design.
 ///
-/// Pristine cards (from the original parse) borrow their text as a span into the
-/// shared source and their tokens as a slice of the shared token arena — zero
-/// per-card allocation. The moment a card is edited or newly constructed it
-/// switches to owning a `String` + `Vec<Token>`. This hybrid keeps parse cheap
-/// and edits local.
+/// **Every card owns its bytes and its tokens — uniformly, from parse onward.**
+/// There is no borrowed/owned split and no edit overlay: a card is always a
+/// `String` (its exact current text) plus the `Vec<Token>` that tiles it. This
+/// is the deliberate simplicity of the design — every card is handled the same
+/// way regardless of whether or how it has been edited (see
+/// docs/02-architecture.md "Why uniform ownership" for the measurement that
+/// justifies it: the shared-arena alternative saves ~0.9 s of parse time and
+/// nothing else, so it is left as an optional, deferrable optimization).
+///
+/// - Emit a card: `out.push_str(&card.text)` — a memcpy, edited or not, because
+///   an unedited card's `text` already holds its original bytes exactly.
+/// - Edit a token (renumber, set value): splice the new text into `text` and
+///   shift the following token spans. O(card length) — a card is tens of tokens.
+/// - Structural in-card edit (add/remove a parameter, splice a surface): same —
+///   rewrite `text` + `tokens`. Nothing special, no mode change.
 pub struct Card {
-    /// Stable id that survives inserts/removes/reparses — the anchor a live
-    /// handle resolves through, so a handle is never invalidated by an edit to
-    /// a *different* card.
+    /// Stable id that survives inserts/removes — the anchor a live handle
+    /// resolves through, so a handle is never invalidated by an edit to a
+    /// *different* card.
     pub slot: u32,
     pub kind: CardKind,
-    text: CardText,
+    /// This card's exact current bytes. Initially a copy of its source slice;
+    /// mutated in place by edits. Emission is a straight copy of this.
+    text: String,
+    /// Tokens tiling `text` (spans relative to `text`), trivia included.
+    tokens: Vec<Token>,
 }
 
-enum CardText {
-    /// Untouched since parse: text is `source[span]`, tokens are `arena[range]`.
-    Pristine { span: Range<usize>, tokens: Range<usize> },
-    /// Edited or freshly built: owns its bytes and tokens.
-    Owned { text: String, tokens: Vec<Token> },
-}
-
-/// The concrete syntax tree: an immutable shared source snapshot + a shared
-/// pristine token arena + the ordered list of cards. Structural editing mutates
-/// only `cards`; `source`/`arena` are never mutated (removed/edited cards simply
-/// stop pointing into them). `compact()` rebuilds to reclaim space when wanted.
+/// The concrete syntax tree: just the ordered list of cards. Each card is
+/// self-contained, so there is no shared source buffer or token arena to keep in
+/// sync — structural editing is a plain `Vec<Card>` operation, and the original
+/// source is not retained after parse.
 pub struct Cst {
-    source: Arc<str>,
-    arena: Arc<[Token]>,
     cards: Vec<Card>,
 }
 
 impl Cst {
-    /// Lex `src` into cards. Cards are independent, so this is embarrassingly
-    /// parallel: split into blocks, lex each in parallel, concatenate. Target:
-    /// <= 1.0s single-threaded, <= 0.5s parallel, on a 380 MB / ~1M-card file.
-    pub fn parse(src: impl Into<Arc<str>>) -> Cst {
+    /// Lex `src` into self-contained cards (each copies its bytes + builds its
+    /// tokens). Cards are independent, so this is embarrassingly parallel: split
+    /// into blocks, lex+build cards in parallel, concatenate. Target: <= 1.0 s
+    /// on a 380 MB / ~1M-card file — the per-card copy costs ~0.9 s
+    /// single-threaded, so parallel construction is what keeps parse in budget
+    /// (see docs/04). The input `&str` is only borrowed during parse; it need
+    /// not be retained.
+    pub fn parse(src: &str) -> Cst {
         todo!()
     }
 
@@ -125,22 +135,23 @@ impl Cst {
         todo!()
     }
 
-    /// Text of one card, reflecting its edits. Pristine → a `&str` slice;
-    /// owned → its buffer. O(card length).
+    /// Text of one card, reflecting its edits — a slice of the card's own
+    /// buffer. O(1).
     pub fn card_text(&self, i: usize) -> &str {
         todo!()
     }
 
-    /// Emit the whole model. Untouched cards are memcpy'd from `source`; edited
-    /// cards are rendered from their owned tokens. O(bytes) + O(edited cards),
-    /// with no reparse. Byte-identical to the input when unedited.
+    /// Emit the whole model: `for card in cards { out.push_str(&card.text) }`.
+    /// O(bytes), no reparse, byte-identical to the input when unedited. There is
+    /// no fast/slow path — every card emits the same way whether or not it was
+    /// edited.
     pub fn to_source(&self) -> String {
         todo!()
     }
 
     // --- structural editing: pure `Vec<Card>` operations --------------------
 
-    /// Insert an already-lexed card at position `i`; returns its fresh slot.
+    /// Insert an already-built card at position `i`; returns its fresh slot.
     /// O(num_cards) memmove of card structs — no relex of the file.
     pub fn insert_card(&mut self, i: usize, card: Card) -> u32 {
         todo!()
@@ -151,18 +162,28 @@ impl Cst {
         todo!()
     }
 
-    /// Lex a single snippet into a detached `Card` (used by `insert_card`).
-    /// O(snippet length) — microseconds.
-    pub fn lex_card(&self, text: &str, kind: CardKind) -> Card {
+    /// Lex a single snippet into a detached, self-contained `Card` (used by
+    /// `insert_card`). O(snippet length) — microseconds.
+    pub fn lex_card(text: &str, kind: CardKind) -> Card {
         todo!()
     }
 
-    // --- in-card token override overlay -------------------------------------
+    // --- in-card editing: mutate the card's own text + tokens ---------------
 
-    /// Overwrite one token's text in place, promoting the card to `Owned` on
-    /// first touch. This is how renumbering and value edits work: local to the
-    /// card, so every *other* card keeps its verbatim-copy emit fast path.
-    pub fn set_token_text(&mut self, card: usize, token: usize, text: impl Into<String>) {
+    /// Overwrite one token's text in place: splice `text` into the card's buffer
+    /// at that token's span and shift the following spans by the length delta.
+    /// This is how renumber and value edits work — every card is edited the same
+    /// way, whether it is being touched for the first time or the hundredth.
+    /// O(card length).
+    pub fn set_token_text(&mut self, card: usize, token: usize, text: &str) {
+        todo!()
+    }
+
+    /// Structural in-card edit: splice tokens in/out (add a surface to geometry,
+    /// add/remove a parameter) by rewriting a byte range of the card's `text`
+    /// and re-tokenizing just that card. O(card length) — same cost class as a
+    /// value edit; no distinct code path.
+    pub fn splice_card_text(&mut self, card: usize, byte_range: Range<usize>, text: &str) {
         todo!()
     }
 
@@ -215,7 +236,7 @@ pub enum Severity {
 }
 
 impl Model {
-    pub fn parse(src: impl Into<Arc<str>>) -> Model {
+    pub fn parse(src: &str) -> Model {
         todo!()
     }
     pub fn to_source(&self) -> String {

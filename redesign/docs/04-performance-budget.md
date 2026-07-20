@@ -9,18 +9,18 @@ the contract for the rewrite. These are the thresholds `benches/` enforces.
 
 | Operation | Current (measured) | Target | Notes |
 |---|---:|---:|---|
-| **parse** (file → Model) | 0.96 s | **≤ 1.0 s** (stretch ≤ 0.5 s parallel) | the only unavoidable O(file) step |
-| **emit**, unedited | 0.16 s | **≤ 0.20 s** | memcpy of the snapshot |
-| **emit**, after K edits | 1.7–5.8 s (any edit) | **≤ 0.20 s + O(K)** | untouched cards stay memcpy |
+| **parse** (file → Model) | 0.96 s | **≤ 1.0 s** (needs parallel per-card build) | includes ~0.9 s per-card copy; parallelize it |
+| **emit**, unedited | 0.16 s | **≤ 0.20 s** | concat every card's text (memcpy per card) |
+| **emit**, after K edits | 1.7–5.8 s (any edit) | **≤ 0.20 s** | same uniform path; edits don't change emit cost |
 | **add_cell** (single) | 2.42 s | **≤ 10 ms** | Vec insert + µs lex; no reparse |
 | **remove_cell** (single) | 2.44 s | **≤ 10 ms** | Vec remove; no reparse |
 | **1000 structural edits** in a session | ~40 min (extrapolated) | **≤ 1.0 s total** | the headline workload |
-| **read after an edit** (`view()`/handle use) | 1.65 s | **≤ 1 ms** | no materialize/reparse |
-| **in-card value edit** (set material, one token) | ~µs (but forces later reparse) | **≤ 5 µs, no deferred reparse** | local override |
+| **read after an edit** (handle use) | 1.65 s | **≤ 1 ms** | no materialize/reparse; card list is the state |
+| **in-card value edit** (set material, one token) | ~µs (but forces later reparse) | **≤ 5 µs, no deferred reparse** | splice one card's buffer |
 | **renumber_cells** (defs + refs + bins) | 0.64 s + 1.71 s emit | **≤ 0.5 s** incl. emit | 427k edits |
 | **renumber_surfaces** (24.3M refs) | 2.56 s + 5.78 s emit | **≤ 2.0 s** incl. emit | genuinely 24M token rewrites |
 | **id lookup** `model.cell(id)` | O(scan) today | **O(1)** | maintained id→slot index |
-| **peak memory** | ~2–3× file | **≤ 3× file** | snapshot + arena + card list |
+| **peak memory** | ~2–3× file | **≤ 3× file** | per-card text + tokens (tokens dominate) |
 
 The single non-negotiable: **no editing operation may re-lex or re-parse the
 whole file.** If any add/remove/edit/renumber path calls the lexer on more than
@@ -39,9 +39,18 @@ the changed card(s), the design has regressed to the current one.
    tokens doing 2–3 hash lookups each. This is why even a modest renumber emits
    in 1.7 s+.
 
-The rewrite fixes all three by construction: edits are card-local, so untouched
-cards stay pristine and their emit stays a memcpy, and there is never anything to
-"materialize."
+The rewrite fixes all three by construction: edits are card-local, every card
+owns its exact bytes so emit is always a plain per-card memcpy, and there is
+never anything to "materialize."
+
+One cost the rewrite *adds* is at parse: giving every card its own `String` +
+`Vec<Token>` copies the file into ~2M small allocations, ~0.9 s single-threaded
+(measured). This is the deliberate price of uniform ownership (see
+[`02-architecture.md`](02-architecture.md) "Why uniform"). It is the
+parallelizable part of parse — split into blocks and build cards on a `rayon`
+pool — which is how parse stays within the ≤ 1 s budget. If a profile ever shows
+parse latency dominating, the shared-arena/borrow scheme is a localized,
+edit-logic-free optimization to add then.
 
 ## How to measure (the harness the rewrite must ship)
 

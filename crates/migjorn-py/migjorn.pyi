@@ -174,11 +174,19 @@ class Model:
     def extract_universe(self, u: int) -> Model:
         """A new standalone model of universe ``u``'s cells and the surfaces,
         materials and transforms they use. Does not recurse into filled
-        sub-universes."""
+        sub-universes — use :meth:`extract_cells` for that."""
 
     def extract_level0(self) -> Model:
         """A new standalone model of the level-0 (root) cells — those with no
-        ``u=`` — and their surfaces, materials and transforms."""
+        ``u=`` — and their surfaces, materials and transforms. Does not recurse
+        into filled sub-universes — use :meth:`extract_cells` for that."""
+
+    def extract_cells(self, ids: list[int]) -> Model:
+        """A new standalone model of the given cells and everything they need
+        to be self-contained: their surfaces, materials and transforms, plus —
+        recursively — any cell reached through a ``fill=`` (pulls in that
+        universe's own cells), a ``LIKE n BUT`` base, or a ``#n`` complement.
+        Ids that don't name an existing cell are silently ignored."""
 
     def merge(self, others: list[Model]) -> None:
         """Fold the cells, surfaces and data cards of ``others`` into this model.

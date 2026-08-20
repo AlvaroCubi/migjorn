@@ -11,8 +11,9 @@ specifically:
 - live-handle semantics: a handle into a removed card must raise, not read
   garbage or panic across the boundary
 - diagnostics content surviving the boundary intact
-- the composition API (validate / merge / extract_universe / extract_level0)
-  and the per-field mutators (set_coeff(s), set_fraction, set_zaid, ...)
+- the composition API (validate / merge / extract_universe / extract_level0 /
+  extract_cells) and the per-field mutators (set_coeff(s), set_fraction,
+  set_zaid, ...)
 
 Run against a build of *this* checkout's bindings, e.g.:
     cd crates/migjorn-py && maturin build --release --out ../../dist
@@ -200,6 +201,44 @@ def test_extract_level0_takes_only_rootless_cells() -> None:
     root = model.extract_level0()
     assert root.num_cells == 1
     assert root.cell(2) is None
+
+
+def test_extract_universe_does_not_recurse_into_filled_sub_universes() -> None:
+    # extract_universe pulls only universe 5's own cell and leaves the fill=
+    # dangling; recursing across universe boundaries is extract_cells' job.
+    model = migjorn.parse(
+        "t\n"
+        "1 0 -1 u=5 fill=7 imp:n=1\n"
+        "2 1 -1.0 -2 u=7 imp:n=1\n"
+        "\n1 SO 5\n2 SO 6\n\nm1 1001 1\n"
+    )
+    u5 = model.extract_universe(5)
+    assert u5.num_cells == 1
+    assert u5.cell(1) is not None
+    assert u5.cell(2) is None
+
+
+def test_extract_cells_recurses_through_fill_like_and_complement() -> None:
+    model = migjorn.parse(
+        "t\n"
+        "1 0 -1 fill=5 imp:n=1\n"
+        "2 1 -1.0 -2 u=5 imp:n=1\n"
+        "3 0 -3 #2 imp:n=1\n"
+        "4 LIKE 3 BUT trcl=1 imp:n=1\n"
+        "\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n"
+    )
+    extracted = model.extract_cells([4])
+    assert extracted.num_cells == 3
+    assert extracted.cell(4) is not None
+    assert extracted.cell(3) is not None
+    assert extracted.cell(2) is not None
+    assert extracted.cell(1) is None
+
+
+def test_extract_cells_ignores_unknown_ids() -> None:
+    model = migjorn.parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
+    extracted = model.extract_cells([1, 999])
+    assert extracted.num_cells == 1
 
 
 def test_merge_combines_disjoint_models() -> None:

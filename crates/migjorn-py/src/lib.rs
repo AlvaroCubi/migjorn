@@ -315,6 +315,11 @@ impl Model {
             inner: Rc::new(RefCell::new(self.inner.borrow().extract_level0())),
         }
     }
+    fn extract_cells(&self, ids: Vec<i64>) -> Model {
+        Model {
+            inner: Rc::new(RefCell::new(self.inner.borrow().extract_cells(&ids))),
+        }
+    }
     fn merge(&self, others: Vec<Bound<'_, Model>>) -> PyResult<()> {
         // Deref the `Ref` to the `Model` before cloning, so this is unambiguously
         // `Model::clone` (a bare `.clone()` on a `Ref` reads as `Ref::clone`).

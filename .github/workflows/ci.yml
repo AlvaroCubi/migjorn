@@ -38,10 +38,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       # Pinned so a new ruff release can't fail CI unexpectedly; bump deliberately.
+      # `tests/` is the top-level Python acceptance suite (parsing, round-trip,
+      # editing, stub drift); crates/migjorn-py holds the bindings + FFI tests.
       - name: ruff lint
-        run: uvx ruff@0.15.21 check crates/migjorn-py
+        run: uvx ruff@0.15.21 check tests crates/migjorn-py
       - name: ruff format
-        run: uvx ruff@0.15.21 format --check crates/migjorn-py
+        run: uvx ruff@0.15.21 format --check tests crates/migjorn-py
 
   python:
     name: Python (bindings + stub drift)
@@ -52,8 +54,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v5
       # Builds the extension via maturin and installs it non-editably (so the
-      # type stubs land on disk), then runs the binding tests and the stub-drift
-      # check (tests/test_stubs.py) which fails if migjorn/__init__.pyi and the
-      # runtime API disagree.
+      # type stub lands on disk), then runs both suites: the top-level
+      # tests/ acceptance suite (parsing, round-trip, editing, and stub drift —
+      # tests/test_stub.py, which fails if migjorn.pyi and the runtime API
+      # disagree) and crates/migjorn-py/tests, the PyO3-boundary tests.
       - name: Build, install & test
-        run: uv run --no-project --with ./crates/migjorn-py --with pytest pytest crates/migjorn-py/tests -q
+        run: uv run --no-project --with ./crates/migjorn-py --with pytest pytest tests crates/migjorn-py/tests -q

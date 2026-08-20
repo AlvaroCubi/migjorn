@@ -1,16 +1,20 @@
 /target
 **/*.rs.bk
-Cargo.lock.orig
+*.pdb
 
 # Python
 __pycache__/
-*.pyc
-*.pyd
-*.pdb
-.pytest_cache/
-*.egg-info/
-*.so
+*.py[cod]
 .venv/
-# uv writes this when it treats the package dir as a project; the example's
-# `uv run --with` commands resolve fresh and don't need a committed lock.
-uv.lock
+*.so
+*.pyd
+.pytest_cache/
+
+# Generated bench inputs
+/benches/*.mcnp
+
+# maturin wheel output
+/dist/
+
+# Generated model outputs at repo root
+/*.mcnp

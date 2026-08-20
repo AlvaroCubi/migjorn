@@ -1,0 +1,7 @@
+MCNP Fortran-style implicit-exponent numbers (no literal 'e')
+1 1 -6.02+23 -1 imp:n=1 $ density with a dropped-e exponent
+2 0 1 imp:n=0
+
+1 SO 1.0-1
+
+m1 1001.31c 1.0-1 8016.31c 8.0-1

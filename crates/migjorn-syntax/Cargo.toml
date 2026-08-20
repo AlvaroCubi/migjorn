@@ -1,14 +1,14 @@
 [package]
 name = "migjorn-syntax"
-description = "Lossless syntax layer (lexer + concrete syntax tree) for the migjorn MCNP parser."
-edition.workspace = true
 version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
-authors.workspace = true
-repository.workspace = true
+description = "Lossless, per-card concrete syntax layer for MCNP input files"
 
 [dependencies]
-rustc-hash = "2"
+compact_str.workspace = true
+memchr.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
-insta = { version = "1", features = ["glob"] }

@@ -1,0 +1,838 @@
+//! In-card value edits (milestone M2).
+//!
+//! Every method here mutates exactly one card by splicing its own `text` and
+//! fixing that card's token spans — never re-lexing or re-parsing the file, and
+//! never touching a second card. A value edit does not change any defined id, so
+//! the model's id indices stay valid without maintenance; that is what makes
+//! these edits O(card length) and index-free.
+//!
+//! Writes are addressed by stable `slot` (the anchor a live view resolves
+//! through), so a view can hand its `slot` to the model and the edit lands on the
+//! right card even after inserts/removes elsewhere.
+
+use migjorn_syntax::{CardKind, Cst};
+
+use crate::data;
+use crate::model::Model;
+use crate::{cell, surface};
+
+/// Why an edit could not be applied. Reads never fail (they project a best-effort
+/// value); edits do, because the caller asked to change a field that isn't there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditError {
+    /// The slot resolves to a removed card, or a card of the wrong kind for this
+    /// edit (e.g. `set_cell_material` on a surface).
+    WrongKind,
+    /// The addressed field or index does not exist on this card (density on a
+    /// void cell, coefficient index past the end, entry past the last one).
+    NoSuchField,
+    /// There is no block of the relevant kind to add the new card into (e.g.
+    /// `add_cell` on a model that has no cell block at all).
+    NoBlock,
+}
+
+impl std::fmt::Display for EditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            EditError::WrongKind => "card is missing or is not the right kind for this edit",
+            EditError::NoSuchField => "the addressed field does not exist on this card",
+            EditError::NoBlock => "the model has no block of this kind to add the card into",
+        };
+        f.write_str(msg)
+    }
+}
+
+impl std::error::Error for EditError {}
+
+/// Format a number the way MCNP reads it back: the shortest round-trippable
+/// decimal. Integral values print without a fractional part (`-1.0` -> `-1`),
+/// which is valid MCNP and matches how these fields are usually written.
+fn fmt_num(v: f64) -> String {
+    // Rust's default float formatting is already shortest-round-trip.
+    format!("{v}")
+}
+
+/// Byte offset of a card's content end — before its `\r\n` / `\n` terminator.
+fn content_end(text: &str) -> usize {
+    let b = text.as_bytes();
+    let mut e = b.len();
+    if e > 0 && b[e - 1] == b'\n' {
+        e -= 1;
+        if e > 0 && b[e - 1] == b'\r' {
+            e -= 1;
+        }
+    }
+    e
+}
+
+/// Byte offset just past the last non-trivia token (so an append lands before any
+/// trailing `$` comment).
+fn last_significant_end(card: &migjorn_syntax::Card) -> Option<usize> {
+    card.tokens()
+        .iter()
+        .rposition(|t| !t.is_trivia())
+        .map(|i| card.tokens()[i].end() as usize)
+}
+
+fn join_nums(values: &[f64]) -> String {
+    let mut out = String::new();
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&fmt_num(*v));
+    }
+    out
+}
+
+impl Model {
+    // --- cells --------------------------------------------------------------
+
+    /// Set a cell's material number, crossing the void boundary as needed.
+    ///
+    /// Void (`0`) has no density field, a real material has one, so this is not
+    /// always a token swap: going void -> real inserts a placeholder density, and
+    /// real -> void drops the density field. The geometry and trailing parameters
+    /// are untouched either way.
+    pub fn set_cell_material(&mut self, slot: u32, material: i64) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Cell {
+            return Err(EditError::WrongKind);
+        }
+        let l = cell::layout(card);
+        let mat_tok = l.material_tok.ok_or(EditError::NoSuchField)?;
+        let mat_span = card.tokens()[mat_tok].range();
+        let density_end = l.density_tok.map(|d| card.tokens()[d].range().end);
+
+        let currently_void = l.material == Some(0);
+        let becoming_void = material == 0;
+        let target = self.cst.card_mut(slot).unwrap();
+
+        match (currently_void, becoming_void) {
+            // Plain swap: void stays void, or real stays real (density kept).
+            (false, false) | (true, true) => {
+                target.set_token_text(mat_tok, &material.to_string());
+            }
+            // void -> real: the material token grows into `<material> <density>`,
+            // with a `0` placeholder the caller is expected to set next.
+            (true, false) => {
+                target.splice(mat_span, &format!("{material} 0"));
+            }
+            // real -> void: collapse `<material> <density>` down to just `0`.
+            (false, true) => {
+                let end = density_end.ok_or(EditError::NoSuchField)?;
+                target.splice(mat_span.start..end, "0");
+            }
+        }
+        Ok(())
+    }
+
+    /// Set a cell's density. Only meaningful on a non-void cell — a void cell has
+    /// no density field, so this reports [`EditError::NoSuchField`] rather than
+    /// inventing one (set the material first).
+    pub fn set_cell_density(&mut self, slot: u32, density: f64) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Cell {
+            return Err(EditError::WrongKind);
+        }
+        let dens_tok = cell::layout(card)
+            .density_tok
+            .ok_or(EditError::NoSuchField)?;
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .set_token_text(dens_tok, &fmt_num(density));
+        Ok(())
+    }
+
+    /// Set the value of an existing keyword parameter (`imp:n`, `vol`, `fill`,
+    /// ...), matched case-insensitively by its qualified key. Returns `false` if
+    /// the cell has no such parameter — adding one is a structural edit (M3), not
+    /// this. Everything else on the card, including a trailing `$` comment, is
+    /// preserved byte-for-byte.
+    pub fn set_cell_param(&mut self, slot: u32, key: &str, value: &str) -> Result<bool, EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Cell {
+            return Err(EditError::WrongKind);
+        }
+        let l = cell::layout(card);
+        let params = cell::params(card, &l.params);
+        let Some(p) = params
+            .iter()
+            .find(|p| p.qualified_key().eq_ignore_ascii_case(key))
+        else {
+            return Ok(false);
+        };
+        // An empty value slot means a bare keyword; giving it a value is really an
+        // add, so leave it to M3 rather than guess an insertion point.
+        if p.value_tokens.start >= p.value_tokens.end {
+            return Ok(false);
+        }
+        let toks = card.tokens();
+        let from = toks[p.value_tokens.start].start as usize;
+        let to = toks[p.value_tokens.end - 1].end() as usize;
+        self.cst.card_mut(slot).unwrap().splice(from..to, value);
+        Ok(true)
+    }
+
+    // --- surfaces -----------------------------------------------------------
+
+    /// Replace one coefficient of a surface, addressed by position.
+    pub fn set_surface_coeff(
+        &mut self,
+        slot: u32,
+        index: usize,
+        value: f64,
+    ) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Surface {
+            return Err(EditError::WrongKind);
+        }
+        let l = surface::layout(card);
+        let tok = *surface::coeff_tokens(card, &l)
+            .get(index)
+            .ok_or(EditError::NoSuchField)?;
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .set_token_text(tok, &fmt_num(value));
+        Ok(())
+    }
+
+    /// Replace a surface's entire coefficient list. When the count is unchanged
+    /// this rewrites the tokens in place (each keeps its own spacing); when it
+    /// changes, the whole coefficient span is respliced. A trailing inline
+    /// comment after the coefficients is preserved.
+    pub fn set_surface_coeffs(&mut self, slot: u32, values: &[f64]) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Surface {
+            return Err(EditError::WrongKind);
+        }
+        let l = surface::layout(card);
+        let toks = surface::coeff_tokens(card, &l);
+        if toks.is_empty() {
+            return Err(EditError::NoSuchField);
+        }
+
+        if toks.len() == values.len() {
+            let strings: Vec<String> = values.iter().map(|v| fmt_num(*v)).collect();
+            let edits: Vec<(usize, &str)> = toks
+                .iter()
+                .zip(&strings)
+                .map(|(&t, s)| (t, s.as_str()))
+                .collect();
+            self.cst.card_mut(slot).unwrap().rewrite_tokens(&edits);
+        } else {
+            let from = card.tokens()[toks[0]].start as usize;
+            let to = card.tokens()[*toks.last().unwrap()].end() as usize;
+            self.cst
+                .card_mut(slot)
+                .unwrap()
+                .splice(from..to, &join_nums(values));
+        }
+        Ok(())
+    }
+
+    /// Set (or clear) a surface's transform number. `Some(n)` sets it, inserting
+    /// the field before the mnemonic if the surface had none; `None` removes it.
+    /// A negative `n` marks a periodic surface and is written through verbatim.
+    pub fn set_surface_transform(
+        &mut self,
+        slot: u32,
+        transform: Option<i64>,
+    ) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Surface {
+            return Err(EditError::WrongKind);
+        }
+        let l = surface::layout(card);
+        let toks = card.tokens();
+        let mnemonic_start = l.mnemonic_tok.map(|m| toks[m].start as usize);
+        let transform_start = l.transform_tok.map(|t| toks[t].start as usize);
+        let target = self.cst.card_mut(slot).unwrap();
+
+        match (transform, l.transform_tok) {
+            (Some(n), Some(tok)) => target.set_token_text(tok, &n.to_string()),
+            (Some(n), None) => {
+                let at = mnemonic_start.ok_or(EditError::NoSuchField)?;
+                target.splice(at..at, &format!("{n} "));
+            }
+            (None, Some(_)) => {
+                // Drop the transform token and the whitespace up to the mnemonic.
+                let start = transform_start.unwrap();
+                let end = mnemonic_start.unwrap_or(start);
+                target.splice(start..end, "");
+            }
+            (None, None) => {}
+        }
+        Ok(())
+    }
+
+    // --- materials ----------------------------------------------------------
+
+    /// Set the fraction of one material entry, addressed by position. A negative
+    /// fraction is by weight; the sign is written exactly as given.
+    pub fn set_material_fraction(
+        &mut self,
+        slot: u32,
+        entry: usize,
+        value: f64,
+    ) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        let head = data::head(card).ok_or(EditError::WrongKind)?;
+        if data::material_id(&head).is_none() {
+            return Err(EditError::WrongKind);
+        }
+        let (_, frac_tok) = *data::material_entry_tokens(card, &head)
+            .get(entry)
+            .ok_or(EditError::NoSuchField)?;
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .set_token_text(frac_tok, &fmt_num(value));
+        Ok(())
+    }
+
+    /// Set the ZAID of one material entry, addressed by position. The library
+    /// suffix is part of the string the caller supplies (`"1001.31c"`).
+    pub fn set_material_zaid(
+        &mut self,
+        slot: u32,
+        entry: usize,
+        zaid: &str,
+    ) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        let head = data::head(card).ok_or(EditError::WrongKind)?;
+        if data::material_id(&head).is_none() {
+            return Err(EditError::WrongKind);
+        }
+        let (zaid_tok, _) = *data::material_entry_tokens(card, &head)
+            .get(entry)
+            .ok_or(EditError::NoSuchField)?;
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .set_token_text(zaid_tok, zaid);
+        Ok(())
+    }
+
+    // --- transforms ---------------------------------------------------------
+
+    /// Replace a transform's entire coefficient list. Same in-place vs. resplice
+    /// strategy as [`Model::set_surface_coeffs`].
+    pub fn set_transform_coeffs(&mut self, slot: u32, values: &[f64]) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        let head = data::head(card).ok_or(EditError::WrongKind)?;
+        if data::transform_id(&head).is_none() {
+            return Err(EditError::WrongKind);
+        }
+        let Some((first, last)) = data::values_span(card, head.values_start) else {
+            return Err(EditError::NoSuchField);
+        };
+        // Count the existing coefficients so an unchanged count edits in place.
+        let existing = data::values(card, head.values_start).len();
+        if existing == values.len() {
+            let mut i = first;
+            let mut edits: Vec<(usize, String)> = Vec::with_capacity(values.len());
+            let mut vi = 0;
+            let toks = card.tokens();
+            while i <= last && vi < values.len() {
+                if !toks[i].is_trivia() {
+                    edits.push((i, fmt_num(values[vi])));
+                    vi += 1;
+                }
+                i += 1;
+            }
+            let refs: Vec<(usize, &str)> = edits.iter().map(|(t, s)| (*t, s.as_str())).collect();
+            self.cst.card_mut(slot).unwrap().rewrite_tokens(&refs);
+        } else {
+            let from = card.tokens()[first].start as usize;
+            let to = card.tokens()[last].end() as usize;
+            self.cst
+                .card_mut(slot)
+                .unwrap()
+                .splice(from..to, &join_nums(values));
+        }
+        Ok(())
+    }
+
+    // --- in-card structural edits on a cell ---------------------------------
+
+    /// Append a keyword parameter (`"imp:n=1"`, `"vol=3"`) to a cell, placing it
+    /// after the last significant token and therefore before any trailing `$`
+    /// comment. Whitespace and the comment are preserved.
+    pub fn add_cell_param(&mut self, slot: u32, text: &str) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Cell {
+            return Err(EditError::WrongKind);
+        }
+        let pos = last_significant_end(card).unwrap_or_else(|| content_end(card.text()));
+        let insert = format!(" {}", text.trim());
+        self.cst.card_mut(slot).unwrap().splice(pos..pos, &insert);
+        Ok(())
+    }
+
+    /// Remove a cell's keyword parameter by qualified key. Returns `false` if the
+    /// cell has no such parameter. Drops the keyword, its value, and one leading
+    /// separator space.
+    pub fn remove_cell_param(&mut self, slot: u32, key: &str) -> Result<bool, EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Cell {
+            return Err(EditError::WrongKind);
+        }
+        let l = cell::layout(card);
+        let params = cell::params(card, &l.params);
+        let Some(p) = params
+            .iter()
+            .find(|p| p.qualified_key().eq_ignore_ascii_case(key))
+        else {
+            return Ok(false);
+        };
+        let toks = card.tokens();
+        let mut start = toks[p.key_token].start as usize;
+        let end = if p.value_tokens.end > p.value_tokens.start {
+            toks[p.value_tokens.end - 1].end() as usize
+        } else {
+            toks[p.key_token].end() as usize
+        };
+        if start > 0 && card.text().as_bytes()[start - 1] == b' ' {
+            start -= 1;
+        }
+        self.cst.card_mut(slot).unwrap().splice(start..end, "");
+        Ok(true)
+    }
+
+    /// Append an inline `$` comment to any card, before its line terminator. A
+    /// `$` is prepended if the text does not already start with one.
+    pub fn append_inline_comment(&mut self, slot: u32, text: &str) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        let t = text.trim();
+        let body = if t.starts_with('$') {
+            t.to_owned()
+        } else {
+            format!("$ {t}")
+        };
+        let pos = content_end(card.text());
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .splice(pos..pos, &format!(" {body}"));
+        Ok(())
+    }
+
+    /// Append an inline `$` comment to a cell specifically. See
+    /// [`Model::append_inline_comment`] for the card-kind-agnostic version.
+    pub fn append_cell_comment(&mut self, slot: u32, text: &str) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Cell {
+            return Err(EditError::WrongKind);
+        }
+        self.append_inline_comment(slot, text)
+    }
+
+    // --- structural edits (add / remove whole cards) ------------------------
+
+    /// Give a snippet the file's line terminator, normalising any the caller
+    /// supplied. An added card is a proper line, and — crucially — an add of a
+    /// snippet followed by its removal restores the source byte-for-byte, because
+    /// the inserted card and its terminator vanish together.
+    fn terminate(&self, text: &str) -> String {
+        let body = text
+            .strip_suffix('\n')
+            .map(|s| s.strip_suffix('\r').unwrap_or(s))
+            .unwrap_or(text);
+        let mut out = String::with_capacity(body.len() + 2);
+        out.push_str(body);
+        out.push_str(self.cst.eol().as_str());
+        out
+    }
+
+    /// Lex `text` as one card of `kind` and insert it at the end of that block.
+    /// Pure `Vec<u32>` insert — no other card is touched and nothing is re-lexed.
+    fn add_card(&mut self, kind: CardKind, text: &str) -> Result<u32, EditError> {
+        let at = self.cst.end_of_block(kind).ok_or(EditError::NoBlock)?;
+        let card = Cst::new_card(kind, self.terminate(text));
+        Ok(self.cst.insert_at(at, card))
+    }
+
+    /// Add a cell at the end of the cell block. Its id is indexed immediately, so
+    /// the very next `cell(id)` finds it without any flush step.
+    pub fn add_cell(&mut self, text: &str) -> Result<u32, EditError> {
+        let slot = self.add_card(CardKind::Cell, text)?;
+        if let Some(id) = self.cst.card(slot).map(cell::layout).and_then(|l| l.id) {
+            self.cell_index.entry(id).or_insert(slot);
+        }
+        Ok(slot)
+    }
+
+    /// Add a surface at the end of the surface block.
+    pub fn add_surface(&mut self, text: &str) -> Result<u32, EditError> {
+        let slot = self.add_card(CardKind::Surface, text)?;
+        if let Some(id) = self.cst.card(slot).map(surface::layout).and_then(|l| l.id) {
+            self.surface_index.entry(id).or_insert(slot);
+        }
+        Ok(slot)
+    }
+
+    /// Add a material (`Mn`) card at the end of the data block.
+    pub fn add_material(&mut self, text: &str) -> Result<u32, EditError> {
+        let slot = self.add_card(CardKind::Data, text)?;
+        if let Some(id) = self
+            .cst
+            .card(slot)
+            .and_then(data::head)
+            .and_then(|h| data::material_id(&h))
+        {
+            self.material_index.entry(id).or_insert(slot);
+        }
+        Ok(slot)
+    }
+
+    /// Remove a cell by id. Returns `false` if no such cell is indexed. The slot
+    /// is tombstoned, so any live handle to it fails cleanly rather than silently
+    /// reading a different card.
+    pub fn remove_cell(&mut self, id: i64) -> bool {
+        remove_by_id(&mut self.cst, &mut self.cell_index, id)
+    }
+
+    pub fn remove_surface(&mut self, id: i64) -> bool {
+        remove_by_id(&mut self.cst, &mut self.surface_index, id)
+    }
+
+    pub fn remove_material(&mut self, id: i64) -> bool {
+        remove_by_id(&mut self.cst, &mut self.material_index, id)
+    }
+
+    pub fn remove_transform(&mut self, id: i64) -> bool {
+        remove_by_id(&mut self.cst, &mut self.transform_index, id)
+    }
+}
+
+/// Remove the card an id resolves to and drop the index entry, but only the entry
+/// that actually points at the removed slot — a duplicate id defined elsewhere
+/// keeps its (separate) mapping.
+fn remove_by_id(cst: &mut Cst, index: &mut crate::model::IdIndex, id: i64) -> bool {
+    let Some(&slot) = index.get(&id) else {
+        return false;
+    };
+    let removed = cst.remove_slot(slot);
+    if removed {
+        index.remove(&id);
+    }
+    removed
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Model;
+
+    fn slot_of_cell(m: &Model, id: i64) -> u32 {
+        m.cell(id).unwrap().slot()
+    }
+
+    #[test]
+    fn set_material_crosses_void_boundary_both_ways() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1\n2 0 1 imp:n=0\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 2);
+
+        // void -> real: a density field appears, geometry and params intact.
+        m.set_cell_material(s, 5).unwrap();
+        assert_eq!(m.cell(2).unwrap().material(), Some(5));
+        assert!(!m.cell(2).unwrap().is_void());
+        assert!(m.to_source().contains("2 5 0 1 imp:n=0"));
+
+        // real -> void: the density field is dropped again.
+        m.set_cell_material(s, 0).unwrap();
+        assert!(m.cell(2).unwrap().is_void());
+        assert_eq!(m.cell(2).unwrap().density(), None);
+        assert!(m.to_source().contains("2 0 1 imp:n=0"));
+    }
+
+    #[test]
+    fn set_material_real_to_real_keeps_density() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        m.set_cell_material(s, 7).unwrap();
+        assert_eq!(m.cell(1).unwrap().material(), Some(7));
+        assert_eq!(m.cell(1).unwrap().density(), Some(-1.0));
+        assert!(m.to_source().contains("1 7 -1.0 -1 imp:n=1"));
+    }
+
+    #[test]
+    fn set_density_replaces_only_the_density_field() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        m.set_cell_density(s, -10.5).unwrap();
+        assert_eq!(m.cell(1).unwrap().density(), Some(-10.5));
+        assert!(m.to_source().contains("1 1 -10.5 -1 imp:n=1"));
+        // void cell has no density to set
+        let void = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let mut void = void;
+        let vs = slot_of_cell(&void, 1);
+        assert!(void.set_cell_density(vs, 1.0).is_err());
+    }
+
+    #[test]
+    fn set_param_preserves_the_rest_of_the_card() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1 vol=3 $ keep\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        assert_eq!(m.set_cell_param(s, "imp:n", "2"), Ok(true));
+        let out = m.to_source();
+        assert!(out.contains("imp:n=2"), "{out}");
+        assert!(out.contains("vol=3"), "{out}");
+        assert!(out.contains("$ keep"), "{out}");
+        // an absent parameter is reported, not invented
+        assert_eq!(m.set_cell_param(s, "tmp", "300"), Ok(false));
+    }
+
+    #[test]
+    fn read_after_write_sees_the_write() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        m.set_cell_material(s, 3).unwrap();
+        // No flush/materialize: the very next read reflects the edit.
+        assert_eq!(m.cell(1).unwrap().material(), Some(3));
+    }
+
+    #[test]
+    fn set_surface_coeff_and_coeffs() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 RPP -1 1 -2 2 -3 3\n\nm1 1001 1\n");
+        let s = m.surface(1).unwrap().slot();
+        m.set_surface_coeff(s, 0, -5.0).unwrap();
+        assert_eq!(m.surface(1).unwrap().coeffs()[0], -5.0);
+        assert!(m.to_source().contains("RPP -5 1 -2 2 -3 3"));
+
+        // same-count replacement keeps the layout
+        m.set_surface_coeffs(s, &[-1.0, 1.0, -2.0, 2.0, -3.0, 3.0])
+            .unwrap();
+        assert!(m.to_source().contains("RPP -1 1 -2 2 -3 3"));
+
+        // different count reshapes the coefficient list
+        m.set_surface_coeffs(s, &[9.0]).unwrap();
+        assert_eq!(m.surface(1).unwrap().coeffs(), vec![9.0]);
+    }
+
+    #[test]
+    fn set_surface_transform_set_insert_remove() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = m.surface(1).unwrap().slot();
+        // insert
+        m.set_surface_transform(s, Some(4)).unwrap();
+        assert_eq!(m.surface(1).unwrap().transform(), Some(4));
+        assert!(m.to_source().contains("1 4 SO 5"));
+        // replace
+        m.set_surface_transform(s, Some(-4)).unwrap();
+        assert_eq!(m.surface(1).unwrap().transform(), Some(-4));
+        // remove
+        m.set_surface_transform(s, None).unwrap();
+        assert_eq!(m.surface(1).unwrap().transform(), None);
+        assert!(m.to_source().contains("1 SO 5"));
+    }
+
+    #[test]
+    fn set_material_entry_fields() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001.31c 1 8016 2\n");
+        let s = m.material(1).unwrap().slot();
+        m.set_material_fraction(s, 1, -0.5).unwrap();
+        m.set_material_zaid(s, 0, "1002.31c").unwrap();
+        let entries = m.material(1).unwrap().entries();
+        assert_eq!(entries[0].0, "1002.31c");
+        assert_eq!(entries[1].1, -0.5);
+        assert!(m.to_source().contains("m1 1002.31c 1 8016 -0.5"));
+    }
+
+    #[test]
+    fn set_transform_coeffs_replaces_the_list() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\ntr1 0 0 5\n");
+        let s = m.transform(1).unwrap().slot();
+        m.set_transform_coeffs(s, &[1.0, 2.0, 3.0]).unwrap();
+        assert_eq!(m.transform(1).unwrap().coeffs(), vec![1.0, 2.0, 3.0]);
+        assert!(m.to_source().contains("tr1 1 2 3"));
+    }
+
+    #[test]
+    fn wrong_kind_is_rejected() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let surf = m.surface(1).unwrap().slot();
+        assert_eq!(
+            m.set_cell_material(surf, 2),
+            Err(super::EditError::WrongKind)
+        );
+    }
+
+    // --- M3: structural edits ----------------------------------------------
+
+    const SRC: &str = "t\n1 1 -1.0 -1 imp:n=1\n2 0 1 imp:n=0\n\n1 SO 5\n\nm1 1001 1\n";
+
+    #[test]
+    fn add_cell_appends_and_is_visible() {
+        let mut m = Model::parse(SRC);
+        let before = m.num_cells();
+        m.add_cell("3 1 -1.0 -1 imp:n=1").unwrap();
+        assert_eq!(m.num_cells(), before + 1);
+        assert_eq!(m.cell(3).unwrap().id(), Some(3));
+        assert!(m.to_source().contains("3 1 -1.0 -1 imp:n=1"));
+        // it landed inside the cell block, before the blank delimiter
+        assert!(m
+            .to_source()
+            .contains("2 0 1 imp:n=0\n3 1 -1.0 -1 imp:n=1\n\n1 SO 5"));
+    }
+
+    #[test]
+    fn remove_cell_by_id() {
+        let mut m = Model::parse(SRC);
+        assert!(m.remove_cell(2));
+        assert!(m.cell(2).is_none());
+        assert_eq!(m.num_cells(), 1);
+        // an absent id is a no-op, reported as false
+        assert!(!m.remove_cell(999));
+    }
+
+    #[test]
+    fn add_then_remove_is_byte_identity() {
+        let mut m = Model::parse(SRC);
+        let src = m.to_source();
+        m.add_cell("42 0 -1 imp:n=1").unwrap();
+        assert!(m.remove_cell(42));
+        assert_eq!(m.to_source(), src);
+    }
+
+    #[test]
+    fn interleaved_edits_and_reads_stay_consistent() {
+        let mut m = Model::parse(SRC);
+        m.add_cell("3 0 -1 imp:n=1").unwrap();
+        assert!(m.cell(3).unwrap().is_void());
+        // read-modify-write across the model, then read again — no explicit flush
+        let s = m.cell(3).unwrap().slot();
+        m.set_cell_material(s, 1).unwrap();
+        assert_eq!(m.cell(3).unwrap().material(), Some(1));
+        assert!(m.remove_cell(3));
+        assert!(m.cell(3).is_none());
+    }
+
+    #[test]
+    fn removed_handle_fails_cleanly() {
+        let mut m = Model::parse(SRC);
+        let view = m.cell(2).unwrap();
+        let slot = view.slot();
+        assert!(m.remove_cell(2));
+        // the tombstoned slot resolves to nothing, rather than a different card
+        assert!(m.cst().card(slot).is_none());
+    }
+
+    #[test]
+    fn add_surface_and_material_index_immediately() {
+        let mut m = Model::parse(SRC);
+        m.add_surface("2 PX 3").unwrap();
+        assert_eq!(m.surface(2).unwrap().kind(), Some("PX"));
+        assert!(m.to_source().contains("1 SO 5\n2 PX 3\n\nm1 1001 1"));
+
+        m.add_material("m2 8016 1").unwrap();
+        assert_eq!(m.material(2).unwrap().id(), Some(2));
+        assert!(m.to_source().contains("m2 8016 1"));
+    }
+
+    #[test]
+    fn remove_surface_material_transform() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n2 PX 3\n\nm1 1001 1\ntr1 0 0 5\n");
+        assert!(m.remove_surface(2));
+        assert!(m.surface(2).is_none());
+        assert!(m.remove_material(1));
+        assert!(m.material(1).is_none());
+        assert!(m.remove_transform(1));
+        assert!(m.transform(1).is_none());
+        assert!(!m.remove_transform(1)); // already gone
+    }
+
+    #[test]
+    fn add_param_lands_before_a_trailing_comment() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1 $ keep\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        m.add_cell_param(s, "vol=3").unwrap();
+        assert!(
+            m.to_source().contains("1 0 -1 imp:n=1 vol=3 $ keep"),
+            "{}",
+            m.to_source()
+        );
+        assert_eq!(m.cell(1).unwrap().param("vol").unwrap().value, "3");
+    }
+
+    #[test]
+    fn add_param_to_a_void_cell_without_params() {
+        let mut m = Model::parse("t\n2 0 1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 2);
+        m.add_cell_param(s, "imp:n=1").unwrap();
+        assert!(m.to_source().contains("2 0 1 imp:n=1"));
+    }
+
+    #[test]
+    fn remove_param_drops_key_and_value() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1 vol=3 $ keep\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        assert_eq!(m.remove_cell_param(s, "vol"), Ok(true));
+        let out = m.to_source();
+        assert!(out.contains("1 0 -1 imp:n=1 $ keep"), "{out}");
+        assert!(!out.contains("vol=3"), "{out}");
+        assert_eq!(m.remove_cell_param(s, "nope"), Ok(false));
+    }
+
+    #[test]
+    fn append_comment_goes_before_the_newline() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        m.append_cell_comment(s, "added shim").unwrap();
+        assert!(
+            m.to_source().contains("1 0 -1 imp:n=1 $ added shim\n"),
+            "{}",
+            m.to_source()
+        );
+    }
+
+    #[test]
+    fn append_inline_comment_works_on_any_card_kind() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let surf = m.surface(1).unwrap().slot();
+        m.append_inline_comment(surf, "added shim").unwrap();
+        assert!(
+            m.to_source().contains("1 SO 5 $ added shim\n"),
+            "{}",
+            m.to_source()
+        );
+
+        let mat = m.material(1).unwrap().slot();
+        m.append_inline_comment(mat, "$ already prefixed").unwrap();
+        assert!(
+            m.to_source().contains("m1 1001 1 $ already prefixed\n"),
+            "{}",
+            m.to_source()
+        );
+    }
+
+    #[test]
+    fn edit_error_has_a_readable_display() {
+        assert_eq!(
+            super::EditError::WrongKind.to_string(),
+            "card is missing or is not the right kind for this edit"
+        );
+        assert_eq!(
+            super::EditError::NoSuchField.to_string(),
+            "the addressed field does not exist on this card"
+        );
+        assert_eq!(
+            super::EditError::NoBlock.to_string(),
+            "the model has no block of this kind to add the card into"
+        );
+        let e: Box<dyn std::error::Error> = Box::new(super::EditError::NoBlock);
+        assert!(e.to_string().contains("no block"));
+    }
+
+    #[test]
+    fn add_normalises_a_trailing_newline() {
+        let mut m = Model::parse(SRC);
+        m.add_cell("7 0 -1 imp:n=1\n").unwrap();
+        // exactly one terminator, no blank line introduced
+        assert!(m.to_source().contains("7 0 -1 imp:n=1\n\n1 SO 5"));
+        assert!(m.remove_cell(7));
+        assert_eq!(m.to_source(), SRC);
+    }
+}

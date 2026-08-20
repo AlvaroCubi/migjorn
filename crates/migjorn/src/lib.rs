@@ -1,41 +1,56 @@
-//! `migjorn` — the typed AST layer over the lossless `migjorn-syntax` CST.
+//! `migjorn` — a fast, lossless MCNP input parser and editor.
 //!
-//! Typed views (`Surface`, `Transform`, …) are projected on demand from the
-//! flat CST. They carry the token indices they were built from, so higher-level
-//! edits (e.g. renumbering) can rewrite the exact tokens while the CST keeps the
-//! rest of the model byte-for-byte intact.
+//! Parse a model, read it as typed cells / surfaces / materials / transforms,
+//! and write it back byte-for-byte identical except where you changed it.
+//!
+//! ```
+//! let model = migjorn::Model::parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+//! assert_eq!(model.cell(1).unwrap().material(), Some(1));
+//! assert_eq!(model.surface(1).unwrap().kind(), Some("SO"));
+//! ```
+//!
+//! The core invariants — losslessness, recoverability, no whole-file reparse on
+//! any edit, and consistent reads — are described in
+//! `docs/01-goals-and-invariants.md`.
+//!
+//! # Composing many models in one process
+//!
+//! `migjorn` parallelizes some of its own internal work (parsing, index
+//! construction) on the global rayon pool, sized off `num_cpus` by default. A
+//! caller that itself parses many models in parallel — one rayon task per
+//! file, as `gitronics::load_fillers` does — ends up nesting migjorn's
+//! internal fan-out inside its own, which mostly just burns kernel time
+//! waking and parking threads rather than doing useful work. If your process
+//! does file-level parallelism over `migjorn` calls, cap the pool once at
+//! startup rather than accepting the default:
+//!
+//! ```no_run
+//! rayon::ThreadPoolBuilder::new().num_threads(8).build_global().unwrap();
+//! ```
+//!
+//! or set `RAYON_NUM_THREADS`. See `docs/05-parallelism-overhead.md` for the
+//! measurements behind this.
 
 mod cell;
 mod compose;
-mod datacard;
-mod emit;
-mod material;
+mod data;
+mod diagnostic;
+mod edit;
 mod model;
-mod num;
 mod renumber;
+mod scan;
 mod surface;
-mod transform;
+mod view;
 
-// The public API is `Model` (the facade) plus the `ModelView` its `view()`
-// hands out, the owned typed views those return, and the structured
-// error/diagnostic types. The typed-projection functions, the emitter, numeric
-// parsing, renumbering internals, and the whole CST layer are implementation
-// details and are intentionally *not* re-exported here — all capability is
-// reached through `Model`/`ModelView`.
-//
-// The split is the editing/reading boundary: `Model` owns the edits, and
-// `Model::view` materialises any pending splices once and returns a `ModelView`
-// whose readers are all `&self`. Reads therefore compose and can be shared, and
-// a reader can never observe a tree that disagrees with `to_source()`.
-pub use cell::{Cell, CellParam, CellRef, Fill, GeomExpr, OwnedCell, SurfaceRef};
-pub use compose::{ConflictKind, MergeConflict};
-pub use datacard::DataCard;
-pub use material::{Material, MaterialEntry};
-pub use model::{EditError, Model, ModelIndex, ModelView};
-pub use surface::{Surface, SurfaceKind};
-pub use transform::Transform;
+pub use cell::{CellParam, Fill, GeometryTerm, GeometryTermKind};
+pub use diagnostic::{Diagnostic, Severity};
+pub use edit::EditError;
+pub use model::Model;
+pub use view::{CellView, DataCardView, MaterialView, SurfaceView, TransformView};
 
-// Parser diagnostics are part of the public contract (see `Model::diagnostics`).
-// They originate in the internal `migjorn-syntax` layer; re-export just these so
-// downstream users depend only on `migjorn` and never see the CST.
-pub use migjorn_syntax::{Diagnostic, Severity, Span};
+pub use migjorn_syntax::{Card, CardKind, Cst, Eol, SyntaxKind, Token};
+
+/// Parse MCNP source text.
+pub fn parse(src: &str) -> Model {
+    Model::parse(src)
+}

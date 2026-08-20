@@ -10,8 +10,10 @@ bindings.
 - **Lossless** — parse → edit → re-emit reproduces the input byte-for-byte
   except where you changed it (comments, spacing, and continuations are all
   preserved).
-- **Fast** — a custom flat-arena syntax tree; the full 360 MB / 6.47 M-line
-  reference model parses in ~0.8 s, and 1 M+ surfaces read well under a second.
+- **Fast** — a custom flat-arena syntax tree; the ~380 MB / ~1.09 M-card
+  reference model parses in about a second, and edits, renumbering, and
+  emission all stay sub-second — most well under a millisecond (see
+  `docs/04-performance-budget.md`).
 - **General-purpose** — typed views of cells (with geometry expressions),
   surfaces, transforms, materials, and a generic view of every other data card.
 - **Editable** — whole-geometry renumbering updates definitions *and* every
@@ -53,30 +55,32 @@ model.offset_surfaces(1_000_000)     # or model.renumber_surfaces({1: 100, ...})
 model.save("out.mcnp")
 ```
 
-To build from source instead, open the showcase notebook with
-[uv](https://docs.astral.sh/uv/) — it builds the extension for you:
+To build from source instead, build the extension with maturin and run the
+self-contained showcase (no external model file needed):
 
 ```bash
-uv run --with "./crates/migjorn-py[notebook]" \
-  jupyter lab crates/migjorn-py/examples/showcase.ipynb
+cd crates/migjorn-py && maturin build --release --out ../../dist
+pip install --force-reinstall --no-deps ../../dist/migjorn-*.whl
+python crates/migjorn-py/examples/showcase.py
 ```
 
-The Rust API has an equivalent tour: `cargo run -p migjorn --example showcase`.
-
-See `crates/migjorn-py/README.md` for the full Python API and more uv commands.
+See `docs/README.md` for the full build & test workflow.
 
 ## Testing
 
 ```bash
-cargo test                      # Rust unit + corpus snapshot tests
+cargo test                      # Rust unit + integration tests (round-trip, expectations)
 ```
 
 Regression corpus: drop any `.mcnp` file (or a one-card snippet) into
-`crates/migjorn-syntax/tests/corpus/` and run `cargo insta review` — it is
-asserted lossless and snapshotted automatically, no test code required.
+`tests/corpus/` — it is asserted lossless by both the Rust and Python
+round-trip suites automatically, no test code required. For structural
+assertions (cell/surface counts, materials, geometry, …), add matching entries
+to `tests/expectations.toml`.
 
-Python tests: see `crates/migjorn-py/README.md#development-persistent-venv`
-(`maturin develop --release` before every `pytest` run — the compiled
-extension doesn't rebuild itself).
+Python tests: the acceptance suite lives in `tests/` (parsing, round-trip,
+editing, stub drift) and the PyO3-boundary suite in `crates/migjorn-py/tests/`
+— run both with `pytest tests crates/migjorn-py/tests -q` against a build of
+this checkout's bindings (see `docs/README.md` for the build steps).
 
 Design notes and benchmark results: `docs/`.

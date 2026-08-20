@@ -1,0 +1,14 @@
+Comments and continuations exercised together
+c full-line comment (lowercase c in column 1)
+C full-line comment (uppercase C)
+10 0 -1 2 -3 &
+   4 -5 imp:n=1        $ ampersand continuation, trailing inline comment
+20 0 -10 11 -12
+     13 -14 imp:n=1    $ blank-column (5+ spaces) continuation
+
+1 PX 0
+2 PY 0
+c a comment between surface cards
+3 PZ 0
+
+m1 1001 1

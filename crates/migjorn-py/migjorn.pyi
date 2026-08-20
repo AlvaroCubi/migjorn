@@ -46,6 +46,14 @@ class Model:
         Empty on clean input; a model with diagnostics still round-trips."""
 
     @property
+    def title(self) -> str | None:
+        """The model's title line, or ``None`` if the model has no title card
+        (e.g. an empty input). Assigning replaces it, creating one — positioned
+        correctly relative to a leading ``MESSAGE`` block — if none exists."""
+
+    @title.setter
+    def title(self, value: str) -> None: ...
+    @property
     def num_cells(self) -> int:
         """Number of cell cards."""
 
@@ -85,6 +93,10 @@ class Model:
     def transforms(self) -> list[Transform]:
         """All ``TRn`` / ``*TRn`` transform cards, in file order."""
 
+    def data_cards(self) -> list[DataCard]:
+        """All data cards, in file order — a superset of :meth:`materials` and
+        :meth:`transforms` (``Mn``/``TRn`` are ``Data`` cards too), generically."""
+
     def add_cell(self, text: str) -> Cell:
         """Append a cell card (given as one line of MCNP, no terminator needed) at
         the end of the cell block and return a live handle to it. Local: no
@@ -95,6 +107,16 @@ class Model:
 
     def add_material(self, text: str) -> Material:
         """Append an ``Mn`` card at the end of the data block; returns a handle."""
+
+    def add_transform(self, text: str) -> Transform:
+        """Append a ``TRn`` card at the end of the data block; returns a handle."""
+
+    def add_data_card(self, text: str) -> DataCard:
+        """Append a generic data card at the end of the data block; returns a
+        handle. Cards with a dedicated constructor (``Mn``, ``TRn``) should
+        normally go through :meth:`add_material` / :meth:`add_transform`
+        instead, so their id is indexed immediately — this is for everything
+        else (``sdef``, ``mode``, ``kcode``, ``print``, ...)."""
 
     def remove_cell(self, id: int) -> bool:
         """Remove the cell with this id. Returns ``True`` if one was removed,
@@ -343,6 +365,37 @@ class Transform:
     @property
     def text(self) -> str:
         """The card's exact current source text."""
+
+class DataCard:
+    """A live handle onto any data card — the generic superset view. This
+    includes ``Mn`` and ``TRn`` cards too (they are ``Data`` cards like
+    everything else); prefer :class:`Material` / :class:`Transform` for
+    those, since they have an id maintained in the model's index. ``DataCard``
+    has none, so it is addressed and removed by its own handle instead."""
+
+    @property
+    def text(self) -> str:
+        """The card's exact current source text. Assigning replaces the whole
+        card in place."""
+
+    @text.setter
+    def text(self, value: str) -> None: ...
+    @property
+    def name(self) -> str | None:
+        """The card's name as written, id included: ``m1``, ``f4``, ``sdef``."""
+
+    @property
+    def particle(self) -> str | None:
+        """The ``:particle`` designator after the name, if any."""
+
+    @property
+    def starred(self) -> bool:
+        """Whether the card has a leading ``*`` (e.g. ``*tr1``)."""
+
+    def remove(self) -> bool:
+        """Remove this card. Returns ``True`` if it was removed, ``False`` if
+        it had already been removed. If this handle happens to address a
+        material or transform, the model's id index is cleaned up too."""
 
 class Fill:
     """A cell's single-universe ``fill=`` entry."""

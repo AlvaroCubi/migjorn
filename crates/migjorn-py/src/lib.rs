@@ -99,6 +99,15 @@ impl Model {
     }
 
     #[getter]
+    fn title(&self) -> Option<String> {
+        self.inner.borrow().title().map(str::to_owned)
+    }
+    #[setter]
+    fn set_title(&self, value: &str) {
+        self.inner.borrow_mut().set_title(value);
+    }
+
+    #[getter]
     fn num_cells(&self) -> usize {
         self.inner.borrow().num_cells()
     }
@@ -180,6 +189,15 @@ impl Model {
             })
             .collect()
     }
+    fn data_cards(&self) -> Vec<DataCard> {
+        let m = self.inner.borrow();
+        m.data_cards()
+            .map(|v| DataCard {
+                inner: self.inner.clone(),
+                slot: v.slot(),
+            })
+            .collect()
+    }
 
     // --- structural edits ---------------------------------------------------
     fn add_cell(&self, text: &str) -> PyResult<Cell> {
@@ -207,6 +225,28 @@ impl Model {
             .add_material(text)
             .map_err(edit_err)?;
         Ok(Material {
+            inner: self.inner.clone(),
+            slot,
+        })
+    }
+    fn add_transform(&self, text: &str) -> PyResult<Transform> {
+        let slot = self
+            .inner
+            .borrow_mut()
+            .add_transform(text)
+            .map_err(edit_err)?;
+        Ok(Transform {
+            inner: self.inner.clone(),
+            slot,
+        })
+    }
+    fn add_data_card(&self, text: &str) -> PyResult<DataCard> {
+        let slot = self
+            .inner
+            .borrow_mut()
+            .add_data_card(text)
+            .map_err(edit_err)?;
+        Ok(DataCard {
             inner: self.inner.clone(),
             slot,
         })
@@ -753,6 +793,74 @@ impl Transform {
 }
 
 // ===========================================================================
+// DataCard
+// ===========================================================================
+
+/// A live handle onto any data card — the generic superset view. This
+/// includes `Mn` and `TRn` cards too (they are `Data` cards like everything
+/// else); prefer `Material` / `Transform` for those, since they have an id
+/// to address by and get maintained in the model's id index. `DataCard` has
+/// none, so it is addressed and removed by its own handle instead.
+#[pyclass(unsendable)]
+struct DataCard {
+    inner: Shared,
+    slot: u32,
+}
+
+#[pymethods]
+impl DataCard {
+    #[getter]
+    fn text(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .data_card_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
+    }
+    #[setter]
+    fn set_text(&self, value: &str) -> PyResult<()> {
+        self.inner
+            .borrow_mut()
+            .set_data_card_text(self.slot, value)
+            .map_err(edit_err)
+    }
+    #[getter]
+    fn name(&self) -> PyResult<Option<String>> {
+        Ok(self
+            .inner
+            .borrow()
+            .data_card_at(self.slot)
+            .ok_or_else(removed)?
+            .name()
+            .map(str::to_owned))
+    }
+    #[getter]
+    fn particle(&self) -> PyResult<Option<String>> {
+        Ok(self
+            .inner
+            .borrow()
+            .data_card_at(self.slot)
+            .ok_or_else(removed)?
+            .particle())
+    }
+    #[getter]
+    fn starred(&self) -> PyResult<bool> {
+        Ok(self
+            .inner
+            .borrow()
+            .data_card_at(self.slot)
+            .ok_or_else(removed)?
+            .starred())
+    }
+
+    fn remove(&self) -> bool {
+        self.inner.borrow_mut().remove_data_card(self.slot)
+    }
+}
+
+// ===========================================================================
 // Value objects
 // ===========================================================================
 
@@ -814,6 +922,7 @@ fn migjorn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Surface>()?;
     m.add_class::<Material>()?;
     m.add_class::<Transform>()?;
+    m.add_class::<DataCard>()?;
     m.add_class::<Fill>()?;
     m.add_class::<CellParam>()?;
     m.add_class::<Diagnostic>()?;

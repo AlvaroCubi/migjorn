@@ -244,6 +244,54 @@ def test_transform_set_coeffs() -> None:
     assert tr.coeffs == [1.0, 2.0, 3.0]
 
 
+def test_add_transform_appends_and_is_visible() -> None:
+    model = migjorn.parse(MODEL)
+    before = model.num_transforms
+    tr = model.add_transform("tr2 0 0 5")
+    assert model.num_transforms == before + 1
+    assert tr.id == 2
+    assert model.transform(2) is not None
+    assert "tr2 0 0 5" in model.to_source()
+
+
+def test_data_cards_reads_generic_cards_including_sdef() -> None:
+    model = migjorn.parse(MODEL)
+    names = {dc.name for dc in model.data_cards()}
+    assert "sdef" in names
+    assert "m1" in names  # superset: Mn/TRn are Data cards too
+    assert "tr1" in names
+    sdef = next(dc for dc in model.data_cards() if dc.name == "sdef")
+    assert sdef.particle is None
+    assert sdef.starred is False
+    assert "sdef" in sdef.text
+
+
+def test_add_data_card_appends_and_is_readable() -> None:
+    model = migjorn.parse(MODEL)
+    dc = model.add_data_card("mode n")
+    assert dc.name == "mode"
+    assert dc.particle is None
+    assert dc.starred is False
+    assert "mode n" in model.to_source()
+
+
+def test_data_card_set_text() -> None:
+    model = migjorn.parse(MODEL)
+    dc = model.add_data_card("sdef pos=0 0 0")
+    dc.text = "sdef pos=1 1 1"
+    assert "sdef pos=1 1 1" in dc.text
+    assert "sdef pos=1 1 1" in model.to_source()
+
+
+def test_data_card_remove() -> None:
+    model = migjorn.parse(MODEL)
+    dc = model.add_data_card("mode n")
+    assert dc.remove() is True
+    assert dc.remove() is False
+    with pytest.raises(ValueError, match="removed"):
+        _ = dc.text
+
+
 def test_cell_param_lifecycle_through_bindings() -> None:
     model = migjorn.parse(MODEL)
     cell = model.cell(3)

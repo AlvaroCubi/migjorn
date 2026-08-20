@@ -356,6 +356,47 @@ impl Model {
         Ok(())
     }
 
+    // --- title ---------------------------------------------------------------
+
+    /// Where a synthesized title card belongs when none exists: position 0,
+    /// or — if the model opens with a MESSAGE block — just after it. A
+    /// MESSAGE block is zero-or-more `Message` cards (one per line unless
+    /// continued, see segment.rs) followed by exactly one `Blank` card. A
+    /// fixed-index guess ("Message ⇒ insert at 2") breaks on a multi-line
+    /// message block.
+    fn title_insert_pos(&self) -> usize {
+        let mut i = 0;
+        while self.cst.at(i).map(|c| c.kind()) == Some(CardKind::Message) {
+            i += 1;
+        }
+        if i > 0 && self.cst.at(i).map(|c| c.kind()) == Some(CardKind::Blank) {
+            i += 1;
+        }
+        i
+    }
+
+    /// Replace the model's title line, creating one if none exists. Title
+    /// cards are lexically opaque (zero tokens — see lex.rs), so `splice`
+    /// over the whole byte range is the only edit primitive that applies.
+    pub fn set_title(&mut self, title: &str) {
+        let text = self.terminate(title);
+        let existing = self
+            .cst
+            .cards()
+            .find(|c| c.kind() == CardKind::Title)
+            .map(|c| c.slot());
+        match existing {
+            Some(slot) => {
+                let len = self.cst.card(slot).unwrap().len_bytes();
+                self.cst.card_mut(slot).unwrap().splice(0..len, &text);
+            }
+            None => {
+                let at = self.title_insert_pos();
+                self.cst.insert_at(at, Cst::new_card(CardKind::Title, text));
+            }
+        }
+    }
+
     // --- in-card structural edits on a cell ---------------------------------
 
     /// Append a keyword parameter (`"imp:n=1"`, `"vol=3"`) to a cell, placing it
@@ -486,6 +527,76 @@ impl Model {
             self.material_index.entry(id).or_insert(slot);
         }
         Ok(slot)
+    }
+
+    /// Add a transform (`TRn` / `*TRn`) card at the end of the data block.
+    pub fn add_transform(&mut self, text: &str) -> Result<u32, EditError> {
+        let slot = self.add_card(CardKind::Data, text)?;
+        if let Some(id) = self
+            .cst
+            .card(slot)
+            .and_then(data::head)
+            .and_then(|h| data::transform_id(&h))
+        {
+            self.transform_index.entry(id).or_insert(slot);
+        }
+        Ok(slot)
+    }
+
+    // --- generic data cards ---------------------------------------------------
+
+    /// Add a generic data card at the end of the data block. Cards with a
+    /// dedicated typed constructor — `Mn` material, `TRn` transform — should
+    /// normally go through `add_material`/`add_transform` instead, so their id
+    /// is indexed immediately; this is for everything else (`sdef`, `mode`,
+    /// `kcode`, `print`, `fmesh`, ...) that has no id to index at all.
+    pub fn add_data_card(&mut self, text: &str) -> Result<u32, EditError> {
+        self.add_card(CardKind::Data, text)
+    }
+
+    /// Replace a data card's entire text in place, addressed by slot (a
+    /// `DataCard` handle's own slot — most data cards have no id to address
+    /// by). Caveat: if `slot` happens to be a material or transform card and
+    /// `text` changes its id, the model's id index is *not* updated to match
+    /// — use a typed edit, or remove-and-re-add, for that.
+    pub fn set_data_card_text(&mut self, slot: u32, text: &str) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Data {
+            return Err(EditError::WrongKind);
+        }
+        let len = card.len_bytes();
+        let text = self.terminate(text);
+        self.cst.card_mut(slot).unwrap().splice(0..len, &text);
+        Ok(())
+    }
+
+    /// Remove a data card by slot. This is the slot-addressed counterpart to
+    /// `remove_material`/`remove_transform` (which are id-addressed) — most
+    /// data cards have no id, so a `DataCard`'s own slot is its only handle.
+    /// If the slot happens to be an indexed material or transform, that id's
+    /// index entry is cleaned up too (guarded against the duplicate-id
+    /// "first wins" case, same as [`remove_by_id`]), so removing through the
+    /// generic handle behaves identically to removing through the typed one
+    /// — no dangling index entry left pointing at a tombstoned slot.
+    pub fn remove_data_card(&mut self, slot: u32) -> bool {
+        let Some(card) = self.cst.card(slot) else {
+            return false;
+        };
+        if card.kind() != CardKind::Data {
+            return false;
+        }
+        let head = data::head(card);
+        if let Some(id) = head.as_ref().and_then(data::material_id) {
+            if self.material_index.get(&id) == Some(&slot) {
+                self.material_index.remove(&id);
+            }
+        }
+        if let Some(id) = head.as_ref().and_then(data::transform_id) {
+            if self.transform_index.get(&id) == Some(&slot) {
+                self.transform_index.remove(&id);
+            }
+        }
+        self.cst.remove_slot(slot)
     }
 
     /// Remove a cell by id. Returns `false` if no such cell is indexed. The slot
@@ -834,5 +945,160 @@ mod tests {
         assert!(m.to_source().contains("7 0 -1 imp:n=1\n\n1 SO 5"));
         assert!(m.remove_cell(7));
         assert_eq!(m.to_source(), SRC);
+    }
+
+    // --- title ---------------------------------------------------------------
+
+    #[test]
+    fn title_reads_the_positional_title_card() {
+        assert_eq!(Model::parse(SRC).title(), Some("t"));
+    }
+
+    #[test]
+    fn title_is_none_when_absent() {
+        assert_eq!(Model::parse("").title(), None);
+    }
+
+    #[test]
+    fn title_after_leading_message_block() {
+        let m =
+            Model::parse("MESSAGE: outp=o\n\nMy Title\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        assert_eq!(m.title(), Some("My Title"));
+    }
+
+    #[test]
+    fn set_title_replaces_existing() {
+        let mut m = Model::parse(SRC);
+        m.set_title("New Title");
+        assert_eq!(m.title(), Some("New Title"));
+        assert!(m.to_source().starts_with("New Title\n"));
+    }
+
+    #[test]
+    fn set_title_creates_at_front_when_absent() {
+        let mut m = Model::parse("");
+        m.set_title("Fresh");
+        assert_eq!(m.title(), Some("Fresh"));
+        assert_eq!(m.to_source(), "Fresh\n");
+    }
+
+    #[test]
+    fn set_title_inserts_after_leading_message_and_blank() {
+        let mut m = Model::parse("MESSAGE: outp=o\n\n");
+        m.set_title("New Title");
+        assert_eq!(m.to_source(), "MESSAGE: outp=o\n\nNew Title\n");
+    }
+
+    // Regression for the naive "first card is Message -> fixed index 2" design
+    // this rejects: an unmarked, multi-line MESSAGE block segments into one
+    // Message card per line (segment.rs), not one card for the whole block.
+    #[test]
+    fn set_title_inserts_after_a_multiline_leading_message_block() {
+        let mut m = Model::parse("MESSAGE: outp=o\nrun continues\n\n");
+        m.set_title("New Title");
+        assert_eq!(
+            m.to_source(),
+            "MESSAGE: outp=o\nrun continues\n\nNew Title\n"
+        );
+    }
+
+    // --- add_transform ---------------------------------------------------------
+
+    #[test]
+    fn add_transform_is_indexed_immediately() {
+        let mut m = Model::parse(SRC);
+        m.add_transform("tr2 0 0 5").unwrap();
+        assert_eq!(m.transform(2).unwrap().coeffs(), vec![0.0, 0.0, 5.0]);
+        assert!(m.to_source().contains("tr2 0 0 5"));
+    }
+
+    #[test]
+    fn add_transform_then_remove_is_byte_identity() {
+        let mut m = Model::parse(SRC);
+        let src = m.to_source();
+        m.add_transform("tr9 0 0 1").unwrap();
+        assert!(m.remove_transform(9));
+        assert_eq!(m.to_source(), src);
+    }
+
+    // --- generic data cards ------------------------------------------------
+
+    #[test]
+    fn data_cards_is_a_superset_including_sdef() {
+        let m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\nsdef pos=0 0 0\n");
+        let names: Vec<Option<&str>> = m.data_cards().map(|d| d.name()).collect();
+        assert_eq!(names, vec![Some("m1"), Some("sdef")]);
+        let sdef = m.data_cards().find(|d| d.name() == Some("sdef")).unwrap();
+        assert_eq!(sdef.particle(), None);
+        assert!(!sdef.starred());
+        assert!(sdef.text().starts_with("sdef pos=0 0 0"));
+    }
+
+    #[test]
+    fn add_data_card_appends_a_generic_card() {
+        let mut m = Model::parse(SRC);
+        let slot = m.add_data_card("sdef pos=0 0 0").unwrap();
+        assert_eq!(m.data_card_at(slot).unwrap().name(), Some("sdef"));
+        assert!(m.to_source().contains("sdef pos=0 0 0"));
+    }
+
+    #[test]
+    fn add_data_card_then_remove_is_byte_identity() {
+        let mut m = Model::parse(SRC);
+        let src = m.to_source();
+        let slot = m.add_data_card("mode n").unwrap();
+        assert!(m.remove_data_card(slot));
+        assert_eq!(m.to_source(), src);
+    }
+
+    #[test]
+    fn set_data_card_text_replaces_the_whole_card() {
+        let mut m = Model::parse(SRC);
+        let slot = m.add_data_card("sdef pos=0 0 0").unwrap();
+        m.set_data_card_text(slot, "sdef pos=1 1 1").unwrap();
+        assert_eq!(m.data_card_at(slot).unwrap().text(), "sdef pos=1 1 1\n");
+        assert!(m.to_source().contains("sdef pos=1 1 1"));
+        assert!(!m.to_source().contains("sdef pos=0 0 0"));
+    }
+
+    #[test]
+    fn set_data_card_text_wrong_kind_errors() {
+        let mut m = Model::parse(SRC);
+        let cell_slot = m.cell(1).unwrap().slot();
+        assert_eq!(
+            m.set_data_card_text(cell_slot, "sdef pos=0 0 0"),
+            Err(super::EditError::WrongKind)
+        );
+    }
+
+    #[test]
+    fn remove_data_card_by_slot() {
+        let mut m = Model::parse(SRC);
+        let slot = m.add_data_card("sdef pos=0 0 0").unwrap();
+        assert!(m.remove_data_card(slot));
+        assert!(m.data_card_at(slot).is_none());
+        assert!(!m.remove_data_card(slot)); // already gone
+    }
+
+    #[test]
+    fn remove_data_card_cleans_up_material_index() {
+        let mut m = Model::parse(SRC);
+        let slot = m.add_material("m2 8016 1").unwrap();
+        assert!(m.material(2).is_some());
+        assert!(m.remove_data_card(slot));
+        assert!(m.material(2).is_none());
+    }
+
+    #[test]
+    fn remove_data_card_respects_duplicate_id_first_wins() {
+        let mut m = Model::parse(SRC);
+        let first = m.material(1).unwrap().slot();
+        let dup = m.add_material("m1 8016 1").unwrap();
+        assert_ne!(first, dup);
+        // the index still points at the first-wins slot
+        assert_eq!(m.material(1).unwrap().slot(), first);
+        assert!(m.remove_data_card(dup));
+        // removing the unindexed duplicate must not touch the live entry
+        assert_eq!(m.material(1).unwrap().slot(), first);
     }
 }

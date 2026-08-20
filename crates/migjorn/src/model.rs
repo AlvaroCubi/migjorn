@@ -73,6 +73,20 @@ impl Model {
 
     // --- iteration & lookup -------------------------------------------------
 
+    /// The model's title line, if one exists — the single line immediately
+    /// following an optional leading `MESSAGE` block (`CardKind::Title`, see
+    /// `segment.rs`). `None` for a model with no title card (e.g. empty
+    /// input). Never at a fixed CST position — a leading `MESSAGE` block
+    /// displaces it.
+    pub fn title(&self) -> Option<&str> {
+        let text = self
+            .cst
+            .cards()
+            .find(|c| c.kind() == CardKind::Title)?
+            .text();
+        Some(strip_eol(text))
+    }
+
     pub fn cells(&self) -> impl Iterator<Item = CellView<'_>> + '_ {
         self.cst
             .cards()
@@ -193,6 +207,13 @@ impl Model {
         .then(|| TransformView::new(self, slot))
     }
 
+    /// A generic data-card view for a slot — a superset of `material_at`/
+    /// `transform_at` (doesn't distinguish `Mn`/`TRn` from anything else).
+    pub fn data_card_at(&self, slot: u32) -> Option<DataCardView<'_>> {
+        self.kind_at(slot, CardKind::Data)
+            .map(|_| DataCardView::new(self, slot))
+    }
+
     fn kind_at(&self, slot: u32, kind: CardKind) -> Option<()> {
         (self.cst.card(slot)?.kind() == kind).then_some(())
     }
@@ -292,6 +313,13 @@ impl Model {
             }
         }
     }
+}
+
+/// Trailing `\r\n` / `\n` removed, if present.
+fn strip_eol(text: &str) -> &str {
+    text.strip_suffix('\n')
+        .map(|s| s.strip_suffix('\r').unwrap_or(s))
+        .unwrap_or(text)
 }
 
 /// One chunk's worth of scan results.

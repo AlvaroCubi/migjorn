@@ -41,6 +41,7 @@ def main() -> None:
     model = migjorn.parse(MODEL)
 
     rule("parse & explore (O(1) id lookup, typed projection)")
+    print(f"title: {model.title!r}")
     print(
         f"{model.num_cells} cells, {model.num_surfaces} surfaces, "
         f"{model.num_materials} materials, {model.num_transforms} transforms"
@@ -74,6 +75,15 @@ def main() -> None:
     print(f"handle to cell 3 still valid after the add: id={clad.id}")
     model.remove_cell(99)
     print(f"removed cell 99 -> lookup returns {model.cell(99)}")
+    tr2 = model.add_transform("tr2 0 0 -5")
+    print(f"added transform {tr2.id}; num_transforms now {model.num_transforms}")
+
+    rule("generic data cards (sdef, mode, ... — no bespoke typed view)")
+    source = model.add_data_card("sdef pos=0 0 0")
+    print(f"added data card {source.name!r}: {source.text.strip()!r}")
+    source.text = "sdef pos=0 0 1"
+    print(f"edited in place: {source.text.strip()!r}")
+    print(f"removed: {source.remove()}")
 
     rule("renumbering (definitions AND references move together)")
     model.offset_surfaces(1000)  # constant shift

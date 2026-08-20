@@ -358,8 +358,7 @@ def test_append_comment() -> None:
 def test_model_repr_is_a_short_summary_and_str_is_the_full_source() -> None:
     model = migjorn.parse(MODEL)
     assert repr(model) == (
-        "Model(title=\"Example model\", 3 cells, 2 surfaces, 1 materials, "
-        "1 transforms)"
+        'Model(title="Example model", 3 cells, 2 surfaces, 1 materials, 1 transforms)'
     )
     assert str(model) == model.to_source()
 

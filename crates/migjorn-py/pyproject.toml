@@ -4,11 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "migjorn"
-version = "0.1.0"
 description = "Fast, lossless MCNP input parser and editor"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 classifiers = ["Programming Language :: Rust"]
+dynamic = ["version"]
 
 [tool.maturin]
 module-name = "migjorn"

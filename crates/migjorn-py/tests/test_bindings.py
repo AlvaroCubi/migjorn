@@ -11,8 +11,9 @@ specifically:
 - live-handle semantics: a handle into a removed card must raise, not read
   garbage or panic across the boundary
 - diagnostics content surviving the boundary intact
-- the composition API (validate / merge / extract_universe / extract_level0)
-  and the per-field mutators (set_coeff(s), set_fraction, set_zaid, ...)
+- the composition API (validate / merge / extract_universe / extract_level0 /
+  extract_cells) and the per-field mutators (set_coeff(s), set_fraction,
+  set_zaid, ...)
 
 Run against a build of *this* checkout's bindings, e.g.:
     cd crates/migjorn-py && maturin build --release --out ../../dist
@@ -202,6 +203,44 @@ def test_extract_level0_takes_only_rootless_cells() -> None:
     assert root.cell(2) is None
 
 
+def test_extract_universe_does_not_recurse_into_filled_sub_universes() -> None:
+    # extract_universe pulls only universe 5's own cell and leaves the fill=
+    # dangling; recursing across universe boundaries is extract_cells' job.
+    model = migjorn.parse(
+        "t\n"
+        "1 0 -1 u=5 fill=7 imp:n=1\n"
+        "2 1 -1.0 -2 u=7 imp:n=1\n"
+        "\n1 SO 5\n2 SO 6\n\nm1 1001 1\n"
+    )
+    u5 = model.extract_universe(5)
+    assert u5.num_cells == 1
+    assert u5.cell(1) is not None
+    assert u5.cell(2) is None
+
+
+def test_extract_cells_recurses_through_fill_like_and_complement() -> None:
+    model = migjorn.parse(
+        "t\n"
+        "1 0 -1 fill=5 imp:n=1\n"
+        "2 1 -1.0 -2 u=5 imp:n=1\n"
+        "3 0 -3 #2 imp:n=1\n"
+        "4 LIKE 3 BUT trcl=1 imp:n=1\n"
+        "\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n"
+    )
+    extracted = model.extract_cells([4])
+    assert extracted.num_cells == 3
+    assert extracted.cell(4) is not None
+    assert extracted.cell(3) is not None
+    assert extracted.cell(2) is not None
+    assert extracted.cell(1) is None
+
+
+def test_extract_cells_ignores_unknown_ids() -> None:
+    model = migjorn.parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
+    extracted = model.extract_cells([1, 999])
+    assert extracted.num_cells == 1
+
+
 def test_merge_combines_disjoint_models() -> None:
     a = migjorn.parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
     b = migjorn.parse("t\n2 0 -2 imp:n=1\n\n2 SO 6\n\nm2 8016 1\n")
@@ -244,6 +283,54 @@ def test_transform_set_coeffs() -> None:
     assert tr.coeffs == [1.0, 2.0, 3.0]
 
 
+def test_add_transform_appends_and_is_visible() -> None:
+    model = migjorn.parse(MODEL)
+    before = model.num_transforms
+    tr = model.add_transform("tr2 0 0 5")
+    assert model.num_transforms == before + 1
+    assert tr.id == 2
+    assert model.transform(2) is not None
+    assert "tr2 0 0 5" in model.to_source()
+
+
+def test_data_cards_reads_generic_cards_including_sdef() -> None:
+    model = migjorn.parse(MODEL)
+    names = {dc.name for dc in model.data_cards()}
+    assert "sdef" in names
+    assert "m1" in names  # superset: Mn/TRn are Data cards too
+    assert "tr1" in names
+    sdef = next(dc for dc in model.data_cards() if dc.name == "sdef")
+    assert sdef.particle is None
+    assert sdef.starred is False
+    assert "sdef" in sdef.text
+
+
+def test_add_data_card_appends_and_is_readable() -> None:
+    model = migjorn.parse(MODEL)
+    dc = model.add_data_card("mode n")
+    assert dc.name == "mode"
+    assert dc.particle is None
+    assert dc.starred is False
+    assert "mode n" in model.to_source()
+
+
+def test_data_card_set_text() -> None:
+    model = migjorn.parse(MODEL)
+    dc = model.add_data_card("sdef pos=0 0 0")
+    dc.text = "sdef pos=1 1 1"
+    assert "sdef pos=1 1 1" in dc.text
+    assert "sdef pos=1 1 1" in model.to_source()
+
+
+def test_data_card_remove() -> None:
+    model = migjorn.parse(MODEL)
+    dc = model.add_data_card("mode n")
+    assert dc.remove() is True
+    assert dc.remove() is False
+    with pytest.raises(ValueError, match="removed"):
+        _ = dc.text
+
+
 def test_cell_param_lifecycle_through_bindings() -> None:
     model = migjorn.parse(MODEL)
     cell = model.cell(3)
@@ -263,6 +350,50 @@ def test_append_comment() -> None:
     assert cell is not None
     cell.append_comment("note")
     assert "note" in model.to_source()
+
+
+# --- __repr__ / __str__ -------------------------------------------------------
+
+
+def test_model_repr_is_a_short_summary_and_str_is_the_full_source() -> None:
+    model = migjorn.parse(MODEL)
+    assert repr(model) == (
+        "Model(title=\"Example model\", 3 cells, 2 surfaces, 1 materials, "
+        "1 transforms)"
+    )
+    assert str(model) == model.to_source()
+
+
+def test_handle_str_is_the_card_text_and_repr_shows_the_id() -> None:
+    model = migjorn.parse(MODEL)
+    cell = model.cell(1)
+    assert repr(cell) == "Cell(id=1)"
+    assert str(cell) == cell.text
+
+    surf = model.surface(1)
+    assert repr(surf) == "Surface(id=1)"
+    assert str(surf) == surf.text
+
+    mat = model.material(1)
+    assert repr(mat) == "Material(id=1)"
+    assert str(mat) == mat.text
+
+    tr = model.transform(1)
+    assert repr(tr) == "Transform(id=1)"
+    assert str(tr) == tr.text
+
+    dc = next(d for d in model.data_cards() if d.name == "sdef")
+    assert repr(dc) == 'DataCard(name="sdef")'
+    assert str(dc) == dc.text
+
+
+def test_removed_handle_repr_is_safe_but_str_still_raises() -> None:
+    model = migjorn.parse(MODEL)
+    cell = model.cell(1)
+    model.remove_cell(1)
+    assert repr(cell) == "Cell(<removed>)"
+    with pytest.raises(ValueError, match="removed"):
+        str(cell)
 
 
 # --- module-level surface -----------------------------------------------------

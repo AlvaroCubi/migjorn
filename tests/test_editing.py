@@ -63,6 +63,29 @@ def test_interleaved_edits_and_reads_stay_consistent(model: migjorn.Model) -> No
     assert model.cell(3) is None
 
 
+# --- title -------------------------------------------------------------------
+
+
+def test_title_getter_reads_the_title(model: migjorn.Model) -> None:
+    assert model.title == "Minimal valid model"
+
+
+def test_title_getter_is_none_when_absent() -> None:
+    assert migjorn.parse("").title is None
+
+
+def test_title_setter_replaces_existing(model: migjorn.Model) -> None:
+    model.title = "New Title"
+    assert model.title == "New Title"
+    assert model.to_source().startswith("New Title\n")
+
+
+def test_title_setter_creates_when_absent() -> None:
+    m = migjorn.parse("")
+    m.title = "Fresh"
+    assert m.title == "Fresh"
+
+
 # --- in-card value edits ----------------------------------------------------
 
 

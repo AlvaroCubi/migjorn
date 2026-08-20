@@ -23,6 +23,7 @@ CLASSES = [
     "Surface",
     "Material",
     "Transform",
+    "DataCard",
     "Fill",
     "CellParam",
     "Diagnostic",

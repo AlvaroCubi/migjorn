@@ -41,6 +41,14 @@ fn edit_err(e: EditError) -> PyErr {
     PyValueError::new_err(msg)
 }
 
+/// Render an `Option<i64>` the way a Python repr would: the int, or `None`.
+fn py_opt_i64(v: Option<i64>) -> String {
+    match v {
+        Some(n) => n.to_string(),
+        None => "None".to_owned(),
+    }
+}
+
 // ===========================================================================
 // Model
 // ===========================================================================
@@ -96,6 +104,15 @@ impl Model {
                 end: d.span.end,
             })
             .collect()
+    }
+
+    #[getter]
+    fn title(&self) -> Option<String> {
+        self.inner.borrow().title().map(str::to_owned)
+    }
+    #[setter]
+    fn set_title(&self, value: &str) {
+        self.inner.borrow_mut().set_title(value);
     }
 
     #[getter]
@@ -180,6 +197,15 @@ impl Model {
             })
             .collect()
     }
+    fn data_cards(&self) -> Vec<DataCard> {
+        let m = self.inner.borrow();
+        m.data_cards()
+            .map(|v| DataCard {
+                inner: self.inner.clone(),
+                slot: v.slot(),
+            })
+            .collect()
+    }
 
     // --- structural edits ---------------------------------------------------
     fn add_cell(&self, text: &str) -> PyResult<Cell> {
@@ -207,6 +233,28 @@ impl Model {
             .add_material(text)
             .map_err(edit_err)?;
         Ok(Material {
+            inner: self.inner.clone(),
+            slot,
+        })
+    }
+    fn add_transform(&self, text: &str) -> PyResult<Transform> {
+        let slot = self
+            .inner
+            .borrow_mut()
+            .add_transform(text)
+            .map_err(edit_err)?;
+        Ok(Transform {
+            inner: self.inner.clone(),
+            slot,
+        })
+    }
+    fn add_data_card(&self, text: &str) -> PyResult<DataCard> {
+        let slot = self
+            .inner
+            .borrow_mut()
+            .add_data_card(text)
+            .map_err(edit_err)?;
+        Ok(DataCard {
             inner: self.inner.clone(),
             slot,
         })
@@ -267,6 +315,11 @@ impl Model {
             inner: Rc::new(RefCell::new(self.inner.borrow().extract_level0())),
         }
     }
+    fn extract_cells(&self, ids: Vec<i64>) -> Model {
+        Model {
+            inner: Rc::new(RefCell::new(self.inner.borrow().extract_cells(&ids))),
+        }
+    }
     fn merge(&self, others: Vec<Bound<'_, Model>>) -> PyResult<()> {
         // Deref the `Ref` to the `Model` before cloning, so this is unambiguously
         // `Model::clone` (a bare `.clone()` on a `Ref` reads as `Ref::clone`).
@@ -278,6 +331,21 @@ impl Model {
             .borrow_mut()
             .merge(owned)
             .map_err(|errs| MergeError::new_err(errs.join("; ")))
+    }
+
+    fn __repr__(&self) -> String {
+        let m = self.inner.borrow();
+        let title = match m.title() {
+            Some(t) => format!("{t:?}"),
+            None => "None".to_owned(),
+        };
+        format!(
+            "Model(title={title}, {} cells, {} surfaces, {} materials, {} transforms)",
+            m.num_cells(),
+            m.num_surfaces(),
+            m.num_materials(),
+            m.num_transforms()
+        )
     }
 
     fn __str__(&self) -> String {
@@ -498,6 +566,22 @@ impl Cell {
             .append_cell_comment(self.slot, text)
             .map_err(edit_err)
     }
+
+    fn __repr__(&self) -> String {
+        match self.inner.borrow().cell_at(self.slot) {
+            Some(v) => format!("Cell(id={})", py_opt_i64(v.id())),
+            None => "Cell(<removed>)".to_owned(),
+        }
+    }
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .cell_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
+    }
 }
 
 fn cell_param(p: migjorn_core::CellParam) -> CellParam {
@@ -617,6 +701,22 @@ impl Surface {
             .set_surface_coeff(self.slot, index, value)
             .map_err(edit_err)
     }
+
+    fn __repr__(&self) -> String {
+        match self.inner.borrow().surface_at(self.slot) {
+            Some(v) => format!("Surface(id={})", py_opt_i64(v.id())),
+            None => "Surface(<removed>)".to_owned(),
+        }
+    }
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .surface_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
+    }
 }
 
 // ===========================================================================
@@ -681,6 +781,22 @@ impl Material {
             .borrow_mut()
             .set_material_zaid(self.slot, entry, zaid)
             .map_err(edit_err)
+    }
+
+    fn __repr__(&self) -> String {
+        match self.inner.borrow().material_at(self.slot) {
+            Some(v) => format!("Material(id={})", py_opt_i64(v.id())),
+            None => "Material(<removed>)".to_owned(),
+        }
+    }
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .material_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
     }
 }
 
@@ -750,6 +866,109 @@ impl Transform {
             .text()
             .to_owned())
     }
+
+    fn __repr__(&self) -> String {
+        match self.inner.borrow().transform_at(self.slot) {
+            Some(v) => format!("Transform(id={})", py_opt_i64(v.id())),
+            None => "Transform(<removed>)".to_owned(),
+        }
+    }
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .transform_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
+    }
+}
+
+// ===========================================================================
+// DataCard
+// ===========================================================================
+
+/// A live handle onto any data card — the generic superset view. This
+/// includes `Mn` and `TRn` cards too (they are `Data` cards like everything
+/// else); prefer `Material` / `Transform` for those, since they have an id
+/// to address by and get maintained in the model's id index. `DataCard` has
+/// none, so it is addressed and removed by its own handle instead.
+#[pyclass(unsendable)]
+struct DataCard {
+    inner: Shared,
+    slot: u32,
+}
+
+#[pymethods]
+impl DataCard {
+    #[getter]
+    fn text(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .data_card_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
+    }
+    #[setter]
+    fn set_text(&self, value: &str) -> PyResult<()> {
+        self.inner
+            .borrow_mut()
+            .set_data_card_text(self.slot, value)
+            .map_err(edit_err)
+    }
+    #[getter]
+    fn name(&self) -> PyResult<Option<String>> {
+        Ok(self
+            .inner
+            .borrow()
+            .data_card_at(self.slot)
+            .ok_or_else(removed)?
+            .name()
+            .map(str::to_owned))
+    }
+    #[getter]
+    fn particle(&self) -> PyResult<Option<String>> {
+        Ok(self
+            .inner
+            .borrow()
+            .data_card_at(self.slot)
+            .ok_or_else(removed)?
+            .particle())
+    }
+    #[getter]
+    fn starred(&self) -> PyResult<bool> {
+        Ok(self
+            .inner
+            .borrow()
+            .data_card_at(self.slot)
+            .ok_or_else(removed)?
+            .starred())
+    }
+
+    fn remove(&self) -> bool {
+        self.inner.borrow_mut().remove_data_card(self.slot)
+    }
+
+    fn __repr__(&self) -> String {
+        match self.inner.borrow().data_card_at(self.slot) {
+            Some(v) => match v.name() {
+                Some(name) => format!("DataCard(name={name:?})"),
+                None => "DataCard(name=None)".to_owned(),
+            },
+            None => "DataCard(<removed>)".to_owned(),
+        }
+    }
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .data_card_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
+    }
 }
 
 // ===========================================================================
@@ -814,6 +1033,7 @@ fn migjorn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Surface>()?;
     m.add_class::<Material>()?;
     m.add_class::<Transform>()?;
+    m.add_class::<DataCard>()?;
     m.add_class::<Fill>()?;
     m.add_class::<CellParam>()?;
     m.add_class::<Diagnostic>()?;

@@ -100,17 +100,64 @@ impl Model {
     /// A standalone model containing just universe `u`'s cells and the surfaces,
     /// materials and transforms they use.
     ///
-    /// It does **not** recurse into universes those cells `fill=` — it is the one
+    /// It does **not** recurse into universes those cells `fill=`, it is the one
     /// universe's own cards, so a `fill=` to a sub-universe will dangle (which
-    /// [`Model::validate`] reports). Pull sub-universes with further calls.
+    /// [`Model::validate`] reports). Pull sub-universes with further calls, or
+    /// use [`Model::extract_cells`] for a recursive walk.
     pub fn extract_universe(&self, u: i64) -> Model {
-        self.extract(|universe| universe == Some(u))
+        let keep: FxHashSet<i64> = self
+            .cells()
+            .filter(|c| c.universe() == Some(u))
+            .filter_map(|c| c.id())
+            .collect();
+        self.extract(&keep)
     }
 
     /// A standalone model of the level-0 (root) cells — those with no `u=` — and
     /// the surfaces, materials and transforms they use.
+    ///
+    /// Like [`Model::extract_universe`], this does **not** recurse into filled
+    /// sub-universes; use [`Model::extract_cells`] for that.
     pub fn extract_level0(&self) -> Model {
-        self.extract(|universe| universe.is_none())
+        let keep: FxHashSet<i64> = self
+            .cells()
+            .filter(|c| c.universe().is_none())
+            .filter_map(|c| c.id())
+            .collect();
+        self.extract(&keep)
+    }
+
+    /// A standalone model of the given cells and everything they need to be
+    /// self-contained: their surfaces, materials and transforms, plus —
+    /// recursively — any cell reached through a `fill=` (which pulls in that
+    /// universe's own cells), a `LIKE n BUT` base, or a `#n` complement. Ids
+    /// that don't name an existing cell are silently ignored.
+    pub fn extract_cells(&self, ids: &[i64]) -> Model {
+        // Cells grouped by declared universe, so a `fill=` pull is a lookup
+        // rather than a rescan of every cell.
+        let mut by_universe: FxHashMap<i64, Vec<i64>> = FxHashMap::default();
+        for c in self.cells() {
+            if let (Some(u), Some(id)) = (c.universe(), c.id()) {
+                by_universe.entry(u).or_default().push(id);
+            }
+        }
+
+        let mut keep: FxHashSet<i64> = FxHashSet::default();
+        let mut stack: Vec<i64> = ids.to_vec();
+        while let Some(id) = stack.pop() {
+            if !keep.insert(id) {
+                continue; // already visited: fill/like cycles terminate here
+            }
+            let Some(c) = self.cell(id) else { continue };
+            stack.extend(c.cell_refs());
+            if let Some(f) = c.fill() {
+                if let Some(children) = by_universe.get(&f.universe) {
+                    stack.extend(children.iter().copied());
+                }
+            }
+        }
+
+        self.extract(&keep)
     }
 
     /// A copy of this model with its title, cells and surfaces kept and its data
@@ -152,14 +199,14 @@ impl Model {
         Model::from_cst(Cst::from_cards(cards, eol))
     }
 
-    fn extract(&self, keep: impl Fn(Option<i64>) -> bool) -> Model {
+    fn extract(&self, keep: &FxHashSet<i64>) -> Model {
         let eol = self.cst.eol().as_str();
 
         let mut cell_src = String::new();
         let mut surf_ids: FxHashSet<i64> = FxHashSet::default();
         let mut mat_ids: FxHashSet<i64> = FxHashSet::default();
         for c in self.cells() {
-            if keep(c.universe()) {
+            if c.id().is_some_and(|id| keep.contains(&id)) {
                 cell_src.push_str(c.text());
                 surf_ids.extend(c.surface_ids());
                 if let Some(m) = c.material() {
@@ -449,6 +496,75 @@ mod tests {
         assert!(root.cell(2).is_none());
         assert!(root.surface(1).is_some());
         assert!(root.surface(2).is_none());
+    }
+
+    #[test]
+    fn extract_universe_does_not_recurse_into_filled_sub_universes() {
+        // cell 1 (universe 5) fills in universe 7; extract_universe(5) must
+        // pull only universe 5's own cell and leave the fill= dangling, per
+        // its documented contract. Callers that want the closure use
+        // extract_cells.
+        let m = Model::parse(
+            "t\n\
+             1 0 -1 u=5 fill=7 imp:n=1\n\
+             2 0 -2 u=7 imp:n=1\n\
+             \n\
+             1 SO 5\n2 SO 6\n\
+             \nm1 1001 1\n",
+        );
+        let u5 = m.extract_universe(5);
+        assert_eq!(u5.num_cells(), 1);
+        assert!(u5.cell(1).is_some());
+        assert!(u5.cell(2).is_none());
+        assert!(u5.surface(2).is_none());
+    }
+
+    #[test]
+    fn extract_level0_does_not_recurse_into_filled_sub_universes() {
+        let m = Model::parse(
+            "t\n\
+             1 0 -1 fill=5 imp:n=1\n\
+             2 0 -2 u=5 imp:n=1\n\
+             \n\
+             1 SO 5\n2 SO 6\n\
+             \nm1 1001 1\n",
+        );
+        let root = m.extract_level0();
+        assert_eq!(root.num_cells(), 1);
+        assert!(root.cell(1).is_some());
+        assert!(root.cell(2).is_none());
+        assert!(root.surface(2).is_none());
+    }
+
+    #[test]
+    fn extract_cells_recurses_into_fill_like_and_complement_refs() {
+        let m = Model::parse(
+            "t\n\
+             1 0 -1 fill=5 imp:n=1\n\
+             2 1 -1.0 -2 u=5 imp:n=1\n\
+             3 0 -3 #2 imp:n=1\n\
+             4 LIKE 3 BUT trcl=1 imp:n=1\n\
+             5 0 -4 imp:n=1\n\
+             \n\
+             1 SO 5\n2 SO 6\n3 SO 7\n4 SO 8\n\
+             \nm1 1001 1\n",
+        );
+        let extracted = m.extract_cells(&[4]);
+        // 4 -> LIKE 3, 3 -> #2 complement, 2 has no further refs; 1 and 5 are
+        // untouched.
+        assert_eq!(extracted.num_cells(), 3);
+        assert!(extracted.cell(4).is_some());
+        assert!(extracted.cell(3).is_some());
+        assert!(extracted.cell(2).is_some());
+        assert!(extracted.cell(1).is_none());
+        assert!(extracted.cell(5).is_none());
+    }
+
+    #[test]
+    fn extract_cells_ignores_unknown_ids() {
+        let m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let extracted = m.extract_cells(&[1, 999]);
+        assert_eq!(extracted.num_cells(), 1);
     }
 
     #[test]

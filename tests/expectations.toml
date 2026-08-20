@@ -1,0 +1,136 @@
+# Concrete, checkable parse facts for the corpus fixtures.
+#
+# `test_parsing.py` loads this file and asserts each fact through the public
+# API. This is the "guarantee correct parsing" contract: every fixture listed
+# here has its structure pinned down, independent of the lossless round-trip
+# (which `test_roundtrip.py` checks for *every* corpus file with no config).
+#
+# Fields per fixture:
+#   round_trips   : bool  — to_source() == original bytes (all true here; the
+#                           malformed fixture is checked in test_roundtrip.py
+#                           but deliberately not pinned structurally)
+#   num_cells / num_surfaces / num_materials / num_transforms : int
+#   cell.<id>     : per-cell expectations (see keys used below)
+#   surface.<id>  : per-surface expectations
+
+[minimal]
+round_trips = true
+num_cells = 2
+num_surfaces = 1
+num_materials = 1
+num_transforms = 0
+cell.1 = { material = 1, density = -1.0, void = false, signed_surfaces = [-1], imp_n = "1" }
+cell.2 = { material = 0, void = true, signed_surfaces = [1] }
+surface.1 = { kind = "SO", coeffs = [5.0], reflective = false, white = false }
+
+[comments_and_continuations]
+round_trips = true
+num_cells = 2
+num_surfaces = 3
+num_materials = 1
+cell.10 = { material = 0, signed_surfaces = [-1, 2, -3, 4, -5], imp_n = "1" }
+cell.20 = { material = 0, signed_surfaces = [-10, 11, -12, 13, -14], imp_n = "1" }
+
+[cell_geometry]
+round_trips = true
+num_cells = 5
+num_surfaces = 8
+num_materials = 2
+# Cell 2: (1 : (2 3)) -4  → surfaces 1,2,3,4 appear (magnitudes)
+cell.2 = { material = 0, surface_ids = [1, 2, 3, 4] }
+# Cell 3: #1 #(2 -3)  → cell complement {1}; the region complement #(2 -3)
+# contributes *surfaces* {2,3}, NOT cell refs (the #(...) form complements a
+# region of surfaces). This distinction is load-bearing for renumbering.
+cell.3 = { material = 0, cell_refs = [1], surface_ids = [2, 3] }
+# Cell 9 is a LIKE n BUT card: no material field; base cell 1.
+cell.9 = { like = 1 }
+
+[cell_params]
+round_trips = true
+num_cells = 4
+num_surfaces = 4
+num_transforms = 1
+cell.1 = { material = 1, universe = 5, imp_n = "1", imp_p = "0", vol = "3.0" }
+cell.2 = { material = 0, fill_universe = 7, fill_starred = true }
+cell.3 = { material = 0, fill_universe = 8 }
+cell.4 = { material = 0, universe = -3 }
+
+[surfaces]
+round_trips = true
+num_cells = 2
+num_surfaces = 8
+num_transforms = 1
+surface.1 = { kind = "SO", coeffs = [5.0] }
+surface.2 = { kind = "PX", reflective = true }
+surface.3 = { kind = "PY", white = true }
+surface.4 = { kind = "PZ", transform = 3 }
+surface.5 = { kind = "SO", transform = -3 }
+surface.6 = { kind = "GQ", coeffs = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -25.0] }
+surface.7 = { kind = "C/X", coeffs = [0.0, 0.0, 2.0] }
+surface.10 = { kind = "RPP", coeffs = [558.36, 902.0, -428.58, -105.42, 438.7, 662.54] }
+
+[data_cards]
+round_trips = true
+num_cells = 2
+num_surfaces = 1
+num_materials = 2
+num_transforms = 2
+material.1 = { entries = [["1001.31c", 2.0], ["8016.31c", 1.0]] }
+material.2 = { entries = [["26000", -0.98], ["6000", -0.02]] }
+transform.6 = { degrees = true, displacement = [0.0, 0.0, 0.0] }
+
+[shortcuts]
+round_trips = true
+num_cells = 3
+num_surfaces = 2
+num_materials = 1
+
+[lattice_fill]
+round_trips = true
+num_cells = 5
+num_surfaces = 3
+num_materials = 1
+cell.1 = { material = 0, universe = 10, lattice = true }
+cell.4 = { material = 0, fill_universe = 10 }
+
+# NOTE: MESSAGE-block handling is a known-hard case the *current* engine gets
+# wrong (it does not strip the block, so the block structure shifts). These pins
+# encode the CORRECT behavior a proper parser must produce, and are intentionally
+# aspirational — see docs/03-mcnp-reference.md "MESSAGE block".
+[message_block]
+round_trips = true
+num_cells = 2
+num_surfaces = 1
+num_materials = 1
+
+[implicit_exponent_numbers]
+round_trips = true
+num_cells = 2
+num_surfaces = 1
+num_materials = 1
+num_transforms = 0
+# `6.02+23`, `1.0-1` etc. are MCNP's Fortran-style exponent with the `e`
+# dropped; a plain `str::parse::<f64>()` rejects these outright.
+cell.1 = { material = 1, density = -6.02e23, void = false, signed_surfaces = [-1], imp_n = "1" }
+surface.1 = { kind = "SO", coeffs = [0.1] }
+material.1 = { entries = [["1001.31c", 0.1], ["8016.31c", 0.8]] }
+
+[bom_and_whitespace]
+round_trips = true
+num_cells = 2
+num_surfaces = 1
+num_materials = 1
+
+# CRLF line endings, a BOM-less file whose title card is the single letter `C`,
+# an absorbed comment between a card line and its continuation, and both
+# continuation mechanisms. Mirrors the shape of the real 380 MB reference model.
+[crlf_line_endings]
+round_trips = true
+num_cells = 3
+num_surfaces = 6
+num_materials = 1
+cell.1 = { material = 1, density = -1.0, void = false, signed_surfaces = [-1, 2, -3] }
+cell.2 = { material = 0, void = true, signed_surfaces = [1, -2, -4], imp_n = "0" }
+cell.3 = { material = 0, void = true, signed_surfaces = [-5, 6], imp_n = "1" }
+surface.1 = { kind = "SO", coeffs = [5.0] }
+surface.6 = { kind = "PY", coeffs = [1.0] }

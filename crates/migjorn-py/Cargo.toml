@@ -1,22 +1,20 @@
 [package]
 name = "migjorn-py"
-edition.workspace = true
 version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
-authors.workspace = true
-repository.workspace = true
 
 [lib]
-# The compiled extension is the private `migjorn._migjorn` submodule; the public
-# `migjorn` package (python/migjorn) re-exports it and carries the type stubs.
-name = "_migjorn"
+# The Python import name. maturin builds this into the `migjorn` extension module.
+name = "migjorn"
 crate-type = ["cdylib"]
 
+# Aliased so the crate's own lib name (`migjorn`, the Python module) does not
+# collide with the core crate's name.
 [dependencies]
-migjorn = { path = "../migjorn" }
-rustc-hash = "2"
-pyo3 = { version = "0.23", features = [
-    "abi3-py39",
-    "extension-module",
-    "generate-import-lib",
-] }
+migjorn_core = { package = "migjorn", path = "../migjorn" }
+
+[dependencies.pyo3]
+version = "0.23"
+features = ["abi3-py39", "extension-module"]

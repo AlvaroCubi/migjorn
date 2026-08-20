@@ -26,7 +26,8 @@ jobs:
                   VERSION="${GITHUB_REF_NAME#v}"
                   # Bumps both workspace.package.version and the versioned
                   # workspace path-dep on migjorn-syntax (both live in Cargo.toml).
-                  sed -i "s/version = \"[0-9][0-9.]*\"/version = \"$VERSION\"/g" Cargo.toml
+                  # `(^|[^-])` keeps this from also matching `rust-version = "..."`.
+                  sed -i -E "s/(^|[^-])version = \"[0-9][0-9.]*\"/\\1version = \"$VERSION\"/g" Cargo.toml
                   cargo update --workspace
 
             - name: Publish migjorn-syntax, then migjorn
@@ -70,10 +71,11 @@ jobs:
               shell: bash
               run: |
                   VERSION="${GITHUB_REF_NAME#v}"
+                  # `(^|[^-])` keeps this from also matching `rust-version = "..."`.
                   if [[ "$RUNNER_OS" == "macOS" ]]; then
-                    sed -i '' "s/version = \"[0-9][0-9.]*\"/version = \"$VERSION\"/g" Cargo.toml
+                    sed -i '' -E "s/(^|[^-])version = \"[0-9][0-9.]*\"/\\1version = \"$VERSION\"/g" Cargo.toml
                   else
-                    sed -i "s/version = \"[0-9][0-9.]*\"/version = \"$VERSION\"/g" Cargo.toml
+                    sed -i -E "s/(^|[^-])version = \"[0-9][0-9.]*\"/\\1version = \"$VERSION\"/g" Cargo.toml
                   fi
 
             - name: Set up Python
@@ -108,7 +110,8 @@ jobs:
             - name: Set version from tag
               run: |
                   VERSION="${GITHUB_REF_NAME#v}"
-                  sed -i "s/version = \"[0-9][0-9.]*\"/version = \"$VERSION\"/g" Cargo.toml
+                  # `(^|[^-])` keeps this from also matching `rust-version = "..."`.
+                  sed -i -E "s/(^|[^-])version = \"[0-9][0-9.]*\"/\\1version = \"$VERSION\"/g" Cargo.toml
 
             - name: Build sdist
               uses: PyO3/maturin-action@v1

@@ -1,0 +1,21 @@
+C
+c A CRLF file whose title card is the single letter C -- exactly the shape
+c of the real 380 MB model. Position decides the title, not content.
+1 1 -1.0 -1 2 -3 imp:n=1
+2 0 (1 : -2) -4
+c this comment sits between a card line and its continuation, so it is
+c absorbed into cell 2 rather than becoming its own comment card
+     imp:n=0             $ blank-column continuation
+3 0 -5 &
+   6 imp:n=1             $ ampersand continuation
+
+1 SO 5
+2 PX -1
+3 PX 1
+4 SO 9
+c a standalone comment between surface cards
+5 PY -1
+6 PY 1
+
+m1 1001.31c 1
+sdef pos=0 0 0

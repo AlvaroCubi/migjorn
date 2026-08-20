@@ -313,6 +313,50 @@ def test_append_comment() -> None:
     assert "note" in model.to_source()
 
 
+# --- __repr__ / __str__ -------------------------------------------------------
+
+
+def test_model_repr_is_a_short_summary_and_str_is_the_full_source() -> None:
+    model = migjorn.parse(MODEL)
+    assert repr(model) == (
+        "Model(title=\"Example model\", 3 cells, 2 surfaces, 1 materials, "
+        "1 transforms)"
+    )
+    assert str(model) == model.to_source()
+
+
+def test_handle_str_is_the_card_text_and_repr_shows_the_id() -> None:
+    model = migjorn.parse(MODEL)
+    cell = model.cell(1)
+    assert repr(cell) == "Cell(id=1)"
+    assert str(cell) == cell.text
+
+    surf = model.surface(1)
+    assert repr(surf) == "Surface(id=1)"
+    assert str(surf) == surf.text
+
+    mat = model.material(1)
+    assert repr(mat) == "Material(id=1)"
+    assert str(mat) == mat.text
+
+    tr = model.transform(1)
+    assert repr(tr) == "Transform(id=1)"
+    assert str(tr) == tr.text
+
+    dc = next(d for d in model.data_cards() if d.name == "sdef")
+    assert repr(dc) == 'DataCard(name="sdef")'
+    assert str(dc) == dc.text
+
+
+def test_removed_handle_repr_is_safe_but_str_still_raises() -> None:
+    model = migjorn.parse(MODEL)
+    cell = model.cell(1)
+    model.remove_cell(1)
+    assert repr(cell) == "Cell(<removed>)"
+    with pytest.raises(ValueError, match="removed"):
+        str(cell)
+
+
 # --- module-level surface -----------------------------------------------------
 
 

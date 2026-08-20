@@ -41,6 +41,14 @@ fn edit_err(e: EditError) -> PyErr {
     PyValueError::new_err(msg)
 }
 
+/// Render an `Option<i64>` the way a Python repr would: the int, or `None`.
+fn py_opt_i64(v: Option<i64>) -> String {
+    match v {
+        Some(n) => n.to_string(),
+        None => "None".to_owned(),
+    }
+}
+
 // ===========================================================================
 // Model
 // ===========================================================================
@@ -320,6 +328,21 @@ impl Model {
             .map_err(|errs| MergeError::new_err(errs.join("; ")))
     }
 
+    fn __repr__(&self) -> String {
+        let m = self.inner.borrow();
+        let title = match m.title() {
+            Some(t) => format!("{t:?}"),
+            None => "None".to_owned(),
+        };
+        format!(
+            "Model(title={title}, {} cells, {} surfaces, {} materials, {} transforms)",
+            m.num_cells(),
+            m.num_surfaces(),
+            m.num_materials(),
+            m.num_transforms()
+        )
+    }
+
     fn __str__(&self) -> String {
         self.inner.borrow().to_source()
     }
@@ -538,6 +561,22 @@ impl Cell {
             .append_cell_comment(self.slot, text)
             .map_err(edit_err)
     }
+
+    fn __repr__(&self) -> String {
+        match self.inner.borrow().cell_at(self.slot) {
+            Some(v) => format!("Cell(id={})", py_opt_i64(v.id())),
+            None => "Cell(<removed>)".to_owned(),
+        }
+    }
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .cell_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
+    }
 }
 
 fn cell_param(p: migjorn_core::CellParam) -> CellParam {
@@ -657,6 +696,22 @@ impl Surface {
             .set_surface_coeff(self.slot, index, value)
             .map_err(edit_err)
     }
+
+    fn __repr__(&self) -> String {
+        match self.inner.borrow().surface_at(self.slot) {
+            Some(v) => format!("Surface(id={})", py_opt_i64(v.id())),
+            None => "Surface(<removed>)".to_owned(),
+        }
+    }
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .surface_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
+    }
 }
 
 // ===========================================================================
@@ -722,6 +777,22 @@ impl Material {
             .set_material_zaid(self.slot, entry, zaid)
             .map_err(edit_err)
     }
+
+    fn __repr__(&self) -> String {
+        match self.inner.borrow().material_at(self.slot) {
+            Some(v) => format!("Material(id={})", py_opt_i64(v.id())),
+            None => "Material(<removed>)".to_owned(),
+        }
+    }
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .material_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
+    }
 }
 
 // ===========================================================================
@@ -782,6 +853,22 @@ impl Transform {
     }
     #[getter]
     fn text(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .transform_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
+    }
+
+    fn __repr__(&self) -> String {
+        match self.inner.borrow().transform_at(self.slot) {
+            Some(v) => format!("Transform(id={})", py_opt_i64(v.id())),
+            None => "Transform(<removed>)".to_owned(),
+        }
+    }
+    fn __str__(&self) -> PyResult<String> {
         Ok(self
             .inner
             .borrow()
@@ -857,6 +944,25 @@ impl DataCard {
 
     fn remove(&self) -> bool {
         self.inner.borrow_mut().remove_data_card(self.slot)
+    }
+
+    fn __repr__(&self) -> String {
+        match self.inner.borrow().data_card_at(self.slot) {
+            Some(v) => match v.name() {
+                Some(name) => format!("DataCard(name={name:?})"),
+                None => "DataCard(name=None)".to_owned(),
+            },
+            None => "DataCard(<removed>)".to_owned(),
+        }
+    }
+    fn __str__(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .data_card_at(self.slot)
+            .ok_or_else(removed)?
+            .text()
+            .to_owned())
     }
 }
 

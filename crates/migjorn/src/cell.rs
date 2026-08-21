@@ -134,6 +134,21 @@ pub struct GeometryTerm {
 /// a cell renumber silently corrupt surfaces, so it is resolved here once and
 /// every reader shares it.
 pub(crate) fn walk_geometry(card: &Card, range: &Range<usize>) -> Vec<GeometryTerm> {
+    walk_geometry_spans(card, range)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect()
+}
+
+/// Same walk as [`walk_geometry`], paired with each term's token index span
+/// (half-open; `Hash` included for a complement). `GeometryTerm::token` names
+/// only the token a reader cares about (the complement's digit, say); an edit
+/// that inserts before or after a whole term needs its full extent, which is
+/// what the span gives.
+pub(crate) fn walk_geometry_spans(
+    card: &Card,
+    range: &Range<usize>,
+) -> Vec<(GeometryTerm, Range<usize>)> {
     let mut out = Vec::new();
     let tokens = card.tokens();
     let mut i = range.start;
@@ -142,25 +157,33 @@ pub(crate) fn walk_geometry(card: &Card, range: &Range<usize>) -> Vec<GeometryTe
             i += 1;
             continue;
         }
-        let (kind, text, token) = match tokens[i].kind {
-            SyntaxKind::Number => (GeometryTermKind::Surface, card.token_text(i).to_owned(), i),
-            SyntaxKind::LParen => (GeometryTermKind::LParen, "(".to_owned(), i),
-            SyntaxKind::RParen => (GeometryTermKind::RParen, ")".to_owned(), i),
-            SyntaxKind::Colon => (GeometryTermKind::Union, ":".to_owned(), i),
+        let (kind, text, token, span) = match tokens[i].kind {
+            SyntaxKind::Number => (
+                GeometryTermKind::Surface,
+                card.token_text(i).to_owned(),
+                i,
+                i..i + 1,
+            ),
+            SyntaxKind::LParen => (GeometryTermKind::LParen, "(".to_owned(), i, i..i + 1),
+            SyntaxKind::RParen => (GeometryTermKind::RParen, ")".to_owned(), i, i..i + 1),
+            SyntaxKind::Colon => (GeometryTermKind::Union, ":".to_owned(), i, i..i + 1),
             SyntaxKind::Hash => {
                 // `#n` complements cell n; `#(` complements a region of surfaces.
                 match next(card, i).filter(|&j| kind_at(card, j) == Some(SyntaxKind::Number)) {
                     Some(j) => {
                         let text = format!("#{}", card.token_text(j));
-                        out.push(GeometryTerm {
-                            kind: GeometryTermKind::Complement,
-                            text,
-                            token: j,
-                        });
+                        out.push((
+                            GeometryTerm {
+                                kind: GeometryTermKind::Complement,
+                                text,
+                                token: j,
+                            },
+                            i..j + 1,
+                        ));
                         i = j + 1;
                         continue;
                     }
-                    None => (GeometryTermKind::Complement, "#".to_owned(), i),
+                    None => (GeometryTermKind::Complement, "#".to_owned(), i, i..i + 1),
                 }
             }
             _ => {
@@ -168,7 +191,7 @@ pub(crate) fn walk_geometry(card: &Card, range: &Range<usize>) -> Vec<GeometryTe
                 continue;
             }
         };
-        out.push(GeometryTerm { kind, text, token });
+        out.push((GeometryTerm { kind, text, token }, span));
         i += 1;
     }
     out

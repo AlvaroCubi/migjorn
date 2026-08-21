@@ -566,6 +566,24 @@ impl Cell {
             .append_cell_comment(self.slot, text)
             .map_err(edit_err)
     }
+    #[getter]
+    fn geometry(&self) -> PyResult<Vec<GeometryTerm>> {
+        let m = self.inner.borrow();
+        let v = m.cell_at(self.slot).ok_or_else(removed)?;
+        Ok(v.geometry().into_iter().map(geometry_term).collect())
+    }
+    fn set_geometry_term(&self, position: usize, text: &str) -> PyResult<()> {
+        self.inner
+            .borrow_mut()
+            .set_geometry_term(self.slot, position, text)
+            .map_err(edit_err)
+    }
+    fn insert_geometry_term(&self, position: usize, text: &str) -> PyResult<()> {
+        self.inner
+            .borrow_mut()
+            .insert_geometry_term(self.slot, position, text)
+            .map_err(edit_err)
+    }
 
     fn __repr__(&self) -> String {
         match self.inner.borrow().cell_at(self.slot) {
@@ -590,6 +608,20 @@ fn cell_param(p: migjorn_core::CellParam) -> CellParam {
         particle: p.particle.clone(),
         starred: p.starred,
         value: p.value.clone(),
+    }
+}
+
+fn geometry_term(t: migjorn_core::GeometryTerm) -> GeometryTerm {
+    let kind = match t.kind {
+        migjorn_core::GeometryTermKind::Surface => "surface",
+        migjorn_core::GeometryTermKind::Complement => "complement",
+        migjorn_core::GeometryTermKind::LParen => "lparen",
+        migjorn_core::GeometryTermKind::RParen => "rparen",
+        migjorn_core::GeometryTermKind::Union => "union",
+    };
+    GeometryTerm {
+        kind: kind.to_owned(),
+        text: t.text,
     }
 }
 
@@ -999,6 +1031,18 @@ struct CellParam {
     value: String,
 }
 
+/// One term of a cell's geometry expression, in file order: a signed surface, a
+/// `#n`/`#(...)` complement, `(`, `)`, or `:` (union). Addressed for editing by
+/// its position in this list — see `Cell.set_geometry_term` /
+/// `Cell.insert_geometry_term`.
+#[pyclass(unsendable)]
+struct GeometryTerm {
+    #[pyo3(get)]
+    kind: String,
+    #[pyo3(get)]
+    text: String,
+}
+
 /// A problem recorded while parsing; the offending bytes are still preserved.
 #[pyclass(unsendable)]
 struct Diagnostic {
@@ -1036,6 +1080,7 @@ fn migjorn(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DataCard>()?;
     m.add_class::<Fill>()?;
     m.add_class::<CellParam>()?;
+    m.add_class::<GeometryTerm>()?;
     m.add_class::<Diagnostic>()?;
     m.add("MergeError", m.py().get_type::<MergeError>())?;
     Ok(())

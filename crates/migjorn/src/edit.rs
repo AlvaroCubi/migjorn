@@ -175,6 +175,93 @@ impl Model {
         Ok(true)
     }
 
+    /// Replace one term of a cell's geometry expression with new literal text,
+    /// addressed by its position in the term list [`crate::CellView::geometry`]
+    /// returns (0-based; parentheses and unions count as terms there too). The
+    /// replacement need not be the same length — `"124"` for `"123"`, or
+    /// `"#457"` for `"#123"` — but the term count is unchanged; growing or
+    /// shrinking the geometry is [`Model::insert_geometry_term`].
+    pub fn set_geometry_term(
+        &mut self,
+        slot: u32,
+        position: usize,
+        text: &str,
+    ) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Cell {
+            return Err(EditError::WrongKind);
+        }
+        let l = cell::layout(card);
+        let spans = cell::walk_geometry_spans(card, &l.geometry);
+        let (_, span) = spans.get(position).ok_or(EditError::NoSuchField)?;
+        let toks = card.tokens();
+        let from = toks[span.start].start as usize;
+        let to = toks[span.end - 1].end() as usize;
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .splice(from..to, text.trim());
+        Ok(())
+    }
+
+    /// Insert a new term into a cell's geometry expression, addressed the same
+    /// way as [`Model::set_geometry_term`]: `position` is where in the term list
+    /// the new term lands, `position == terms.len()` appends after the last one
+    /// — the same convention as `Vec::insert`. This is the one structural
+    /// geometry primitive; anything else (wrapping in parentheses, adding a
+    /// union or a cell complement) composes from repeated calls, e.g. hashing a
+    /// cell's geometry with cell 123:
+    ///
+    /// ```ignore
+    /// let n = model.cell(id).unwrap().geometry().len();
+    /// model.insert_geometry_term(slot, 0, "(")?;
+    /// model.insert_geometry_term(slot, n + 1, ")")?;
+    /// model.insert_geometry_term(slot, n + 2, "#123")?;
+    /// ```
+    ///
+    /// `n` is read once, before any insert, since each insert grows the term
+    /// list by the one term it adds.
+    pub fn insert_geometry_term(
+        &mut self,
+        slot: u32,
+        position: usize,
+        text: &str,
+    ) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Cell {
+            return Err(EditError::WrongKind);
+        }
+        let l = cell::layout(card);
+        let spans = cell::walk_geometry_spans(card, &l.geometry);
+        if position > spans.len() {
+            return Err(EditError::NoSuchField);
+        }
+        let toks = card.tokens();
+        let text = text.trim();
+        let (at, insert) = if position < spans.len() {
+            let start = toks[spans[position].1.start].start as usize;
+            (start, format!("{text} "))
+        } else if let Some((_, last_span)) = spans.last() {
+            let end = toks[last_span.end - 1].end() as usize;
+            (end, format!(" {text}"))
+        } else {
+            // No existing term to anchor on (the geometry is empty). If a
+            // keyword parameter follows immediately, land right before it with
+            // a trailing separator, same as the "insert before" case above;
+            // otherwise there is nothing after the geometry at all, and this
+            // is really an append, like `add_cell_param`.
+            match toks.get(l.geometry.start) {
+                Some(t) => (t.start as usize, format!("{text} ")),
+                None => {
+                    let at = last_significant_end(card).unwrap_or_else(|| content_end(card.text()));
+                    (at, format!(" {text}"))
+                }
+            }
+        };
+        self.cst.card_mut(slot).unwrap().splice(at..at, &insert);
+        Ok(())
+    }
+
     // --- surfaces -----------------------------------------------------------
 
     /// Replace one coefficient of a surface, addressed by position.
@@ -1087,6 +1174,102 @@ mod tests {
         assert!(m.material(2).is_some());
         assert!(m.remove_data_card(slot));
         assert!(m.material(2).is_none());
+    }
+
+    // --- geometry edits ------------------------------------------------------
+
+    #[test]
+    fn set_geometry_term_replaces_a_surface() {
+        let mut m = Model::parse("t\n1 0 -1 2 -3 imp:n=1\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        m.set_geometry_term(s, 1, "-4").unwrap();
+        assert_eq!(m.cell(1).unwrap().signed_surfaces(), vec![-1, -4, -3]);
+        assert!(m.to_source().contains("1 0 -1 -4 -3 imp:n=1"));
+    }
+
+    #[test]
+    fn set_geometry_term_replaces_a_whole_complement() {
+        let mut m = Model::parse("t\n1 0 -1 #2\n2 0 1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        m.set_geometry_term(s, 1, "#3").unwrap();
+        assert_eq!(m.cell(1).unwrap().cell_refs(), vec![3]);
+        assert!(m.to_source().contains("1 0 -1 #3"));
+    }
+
+    #[test]
+    fn set_geometry_term_rejects_out_of_range_position() {
+        let mut m = Model::parse(SRC);
+        let s = slot_of_cell(&m, 1);
+        assert_eq!(
+            m.set_geometry_term(s, 99, "5"),
+            Err(super::EditError::NoSuchField)
+        );
+    }
+
+    #[test]
+    fn set_geometry_term_wrong_kind_is_rejected() {
+        let mut m = Model::parse(SRC);
+        let surf = m.surface(1).unwrap().slot();
+        assert_eq!(
+            m.set_geometry_term(surf, 0, "1"),
+            Err(super::EditError::WrongKind)
+        );
+    }
+
+    #[test]
+    fn insert_geometry_term_wraps_and_hashes_a_cell() {
+        let mut m = Model::parse(
+            "t\n1 0 1 2 3 imp:n=1\n2 0 -1 imp:n=1\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n",
+        );
+        let s = slot_of_cell(&m, 1);
+        let n = m.cell(1).unwrap().geometry().len();
+        m.insert_geometry_term(s, 0, "(").unwrap();
+        m.insert_geometry_term(s, n + 1, ")").unwrap();
+        m.insert_geometry_term(s, n + 2, "#2").unwrap();
+        let out = m.to_source();
+        assert!(out.contains("1 0 ( 1 2 3 ) #2 imp:n=1"), "{out}");
+        assert_eq!(m.cell(1).unwrap().cell_refs(), vec![2]);
+    }
+
+    #[test]
+    fn insert_geometry_term_appends_a_union_when_position_equals_len() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n2 SO 6\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        let n = m.cell(1).unwrap().geometry().len();
+        m.insert_geometry_term(s, n, ": 2").unwrap();
+        assert_eq!(m.cell(1).unwrap().signed_surfaces(), vec![-1, 2]);
+        assert!(m.to_source().contains("1 0 -1 : 2 imp:n=1"));
+    }
+
+    #[test]
+    fn insert_geometry_term_into_an_empty_geometry() {
+        let mut m = Model::parse("t\n2 0 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 2);
+        assert_eq!(m.cell(2).unwrap().geometry().len(), 0);
+        m.insert_geometry_term(s, 0, "-1").unwrap();
+        assert_eq!(m.cell(2).unwrap().signed_surfaces(), vec![-1]);
+        assert!(m.to_source().contains("2 0 -1 imp:n=1"));
+    }
+
+    #[test]
+    fn insert_geometry_term_rejects_position_past_the_end() {
+        let mut m = Model::parse(SRC);
+        let s = slot_of_cell(&m, 1);
+        let n = m.cell(1).unwrap().geometry().len();
+        assert_eq!(
+            m.insert_geometry_term(s, n + 1, "2"),
+            Err(super::EditError::NoSuchField)
+        );
+    }
+
+    #[test]
+    fn insert_geometry_term_wrong_kind_is_rejected() {
+        let mut m = Model::parse(SRC);
+        let surf = m.surface(1).unwrap().slot();
+        assert_eq!(
+            m.insert_geometry_term(surf, 0, "("),
+            Err(super::EditError::WrongKind)
+        );
     }
 
     #[test]

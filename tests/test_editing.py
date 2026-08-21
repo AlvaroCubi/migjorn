@@ -111,6 +111,68 @@ def test_cell_param_edit_preserves_rest_of_card() -> None:
     assert "$ keep" in out
 
 
+def test_geometry_reads_terms_in_file_order() -> None:
+    m = migjorn.parse("t\n1 0 -1 2 #3\n2 0 1 imp:n=1\n3 0 1 imp:n=1\n\n1 SO 5\n2 SO 6\n\nm1 1001 1\n")
+    cell = m.cell(1)
+    assert cell is not None
+    terms = cell.geometry
+    assert [t.kind for t in terms] == ["surface", "surface", "complement"]
+    assert [t.text for t in terms] == ["-1", "2", "#3"]
+
+
+def test_set_geometry_term_substitutes_a_surface_across_cells() -> None:
+    m = migjorn.parse(
+        "t\n1 0 -1 2\n2 0 -2 3\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n"
+    )
+    # a generic "find surface 2, replace with 4" pass over every cell — the
+    # kind of ad-hoc analysis the geometry API is meant to make possible
+    # without a dedicated method for every case.
+    for cell in m.cells():
+        for position, term in enumerate(cell.geometry):
+            if term.kind == "surface" and term.text == "2":
+                cell.set_geometry_term(position, "4")
+    assert m.cell(1).surface_ids == [1, 4]
+    assert m.cell(2).surface_ids == [2, 3]  # -2 keeps its sense, untouched
+
+
+def test_set_geometry_term_out_of_range_raises_value_error() -> None:
+    m = migjorn.parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
+    cell = m.cell(1)
+    assert cell is not None
+    with pytest.raises(ValueError):
+        cell.set_geometry_term(99, "5")
+
+
+def test_insert_geometry_term_hashes_a_cell_with_another() -> None:
+    m = migjorn.parse(
+        "t\n1 0 1 2 3 imp:n=1\n2 0 -1 imp:n=1\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n"
+    )
+    cell = m.cell(1)
+    assert cell is not None
+    n = len(cell.geometry)  # read once, before any insert
+    cell.insert_geometry_term(0, "(")
+    cell.insert_geometry_term(n + 1, ")")
+    cell.insert_geometry_term(n + 2, "#2")
+    assert "1 0 ( 1 2 3 ) #2 imp:n=1" in m.to_source()
+    assert cell.cell_refs == [2]
+
+
+def test_insert_geometry_term_appends_when_position_equals_length() -> None:
+    m = migjorn.parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n2 SO 6\n\nm1 1001 1\n")
+    cell = m.cell(1)
+    assert cell is not None
+    cell.insert_geometry_term(len(cell.geometry), ": 2")
+    assert cell.signed_surfaces == [-1, 2]
+
+
+def test_insert_geometry_term_past_the_end_raises_value_error() -> None:
+    m = migjorn.parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
+    cell = m.cell(1)
+    assert cell is not None
+    with pytest.raises(ValueError):
+        cell.insert_geometry_term(len(cell.geometry) + 1, "2")
+
+
 # --- renumbering ------------------------------------------------------------
 
 

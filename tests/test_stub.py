@@ -26,6 +26,7 @@ CLASSES = [
     "DataCard",
     "Fill",
     "CellParam",
+    "GeometryTerm",
     "Diagnostic",
 ]
 

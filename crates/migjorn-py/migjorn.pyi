@@ -252,6 +252,13 @@ class Cell:
         """All trailing keyword parameters (``imp:n=1``, ``vol=3``, ``u=5`` ...)."""
 
     @property
+    def geometry(self) -> list[GeometryTerm]:
+        """The geometry expression as a flat list of terms, in file order:
+        signed surfaces, ``#n``/``#(...)`` complements, ``(``, ``)``, ``:``
+        (union). Addressed for editing by position in this list — see
+        :meth:`set_geometry_term` / :meth:`insert_geometry_term`."""
+
+    @property
     def well_formed(self) -> bool:
         """Whether the card parsed as a structurally complete cell."""
 
@@ -279,6 +286,31 @@ class Cell:
     def append_comment(self, text: str) -> None:
         """Append an inline ``$`` comment before the line terminator. A ``$`` is
         prepended if ``text`` does not already start with one."""
+
+    def set_geometry_term(self, position: int, text: str) -> None:
+        """Replace the geometry term at ``position`` (0-based, into the list
+        :attr:`geometry` returns) with new literal text — ``"124"`` for a
+        surface, ``"#457"`` for a whole complement. The replacement can be a
+        different length, but the term count is unchanged; use
+        :meth:`insert_geometry_term` to grow the expression. Raises
+        ``ValueError`` if ``position`` is out of range."""
+
+    def insert_geometry_term(self, position: int, text: str) -> None:
+        """Insert a new term into the geometry expression at ``position`` — the
+        same list :attr:`geometry` returns, so ``position == len(cell.geometry)``
+        appends after the last term, matching ``list.insert``. This is the one
+        structural geometry primitive; everything else (wrapping in
+        parentheses, adding a union or a cell complement) composes from
+        repeated calls. Hashing a cell's geometry with cell 123:
+
+        .. code-block:: python
+
+            n = len(cell.geometry)          # read once, before any insert
+            cell.insert_geometry_term(0, "(")
+            cell.insert_geometry_term(n + 1, ")")
+            cell.insert_geometry_term(n + 2, "#123")
+
+        Raises ``ValueError`` if ``position`` is past the end of the list."""
 
 class Surface:
     """A live handle onto a surface card."""
@@ -439,6 +471,20 @@ class CellParam:
     @property
     def value(self) -> str:
         """The parameter's value text, exactly as written."""
+
+class GeometryTerm:
+    """One term of a cell's geometry expression, in file order."""
+
+    @property
+    def kind(self) -> str:
+        """One of ``"surface"``, ``"complement"``, ``"lparen"``, ``"rparen"``,
+        ``"union"``."""
+
+    @property
+    def text(self) -> str:
+        """The term's exact text: a signed surface number (``"-1"``), a whole
+        complement (``"#123"``), or the operator itself (``"("``, ``")"``,
+        ``":"``)."""
 
 class Diagnostic:
     """A problem recorded while parsing; the bytes are still preserved."""

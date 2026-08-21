@@ -74,6 +74,25 @@ fn last_significant_end(card: &migjorn_syntax::Card) -> Option<usize> {
         .map(|i| card.tokens()[i].end() as usize)
 }
 
+/// Where to land an edit when a cell's geometry has no terms to anchor on
+/// (it's empty): before whatever follows immediately — typically a keyword
+/// parameter — with a trailing separator, or, if nothing follows at all,
+/// after the last significant token with a leading one, like
+/// `add_cell_param`. Shared by `insert_geometry_term` and `set_cell_geometry`.
+fn empty_geometry_anchor(
+    card: &migjorn_syntax::Card,
+    l: &cell::CellLayout,
+    text: &str,
+) -> (usize, String) {
+    match card.tokens().get(l.geometry.start) {
+        Some(t) => (t.start as usize, format!("{text} ")),
+        None => {
+            let at = last_significant_end(card).unwrap_or_else(|| content_end(card.text()));
+            (at, format!(" {text}"))
+        }
+    }
+}
+
 fn join_nums(values: &[f64]) -> String {
     let mut out = String::new();
     for (i, v) in values.iter().enumerate() {
@@ -245,20 +264,38 @@ impl Model {
             let end = toks[last_span.end - 1].end() as usize;
             (end, format!(" {text}"))
         } else {
-            // No existing term to anchor on (the geometry is empty). If a
-            // keyword parameter follows immediately, land right before it with
-            // a trailing separator, same as the "insert before" case above;
-            // otherwise there is nothing after the geometry at all, and this
-            // is really an append, like `add_cell_param`.
-            match toks.get(l.geometry.start) {
-                Some(t) => (t.start as usize, format!("{text} ")),
-                None => {
-                    let at = last_significant_end(card).unwrap_or_else(|| content_end(card.text()));
-                    (at, format!(" {text}"))
-                }
-            }
+            empty_geometry_anchor(card, &l, text)
         };
         self.cst.card_mut(slot).unwrap().splice(at..at, &insert);
+        Ok(())
+    }
+
+    /// Replace a cell's entire geometry expression with new literal text — the
+    /// bulk counterpart to `set_geometry_term`/`insert_geometry_term`, for
+    /// rebuilding a geometry from scratch rather than editing term by term
+    /// (e.g. uniting several cells' geometries into one). Material, density
+    /// and trailing keyword parameters are untouched.
+    pub fn set_cell_geometry(&mut self, slot: u32, text: &str) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Cell {
+            return Err(EditError::WrongKind);
+        }
+        let l = cell::layout(card);
+        let spans = cell::walk_geometry_spans(card, &l.geometry);
+        let toks = card.tokens();
+        let text = text.trim();
+        let (from, to, insert) = match (spans.first(), spans.last()) {
+            (Some((_, first)), Some((_, last))) => {
+                let from = toks[first.start].start as usize;
+                let to = toks[last.end - 1].end() as usize;
+                (from, to, text.to_owned())
+            }
+            _ => {
+                let (at, insert) = empty_geometry_anchor(card, &l, text);
+                (at, at, insert)
+            }
+        };
+        self.cst.card_mut(slot).unwrap().splice(from..to, &insert);
         Ok(())
     }
 
@@ -1268,6 +1305,62 @@ mod tests {
         let surf = m.surface(1).unwrap().slot();
         assert_eq!(
             m.insert_geometry_term(surf, 0, "("),
+            Err(super::EditError::WrongKind)
+        );
+    }
+
+    #[test]
+    fn geometry_text_reads_the_exact_source() {
+        let m = Model::parse("t\n1 0 -1  2   #3\n2 0 1 imp:n=1\n\n1 SO 5\n2 SO 6\n\nm1 1001 1\n");
+        assert_eq!(m.cell(1).unwrap().geometry_text(), "-1  2   #3");
+    }
+
+    #[test]
+    fn geometry_text_is_empty_for_an_empty_geometry() {
+        let m = Model::parse("t\n2 0 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        assert_eq!(m.cell(2).unwrap().geometry_text(), "");
+    }
+
+    #[test]
+    fn set_cell_geometry_replaces_the_whole_expression() {
+        let mut m =
+            Model::parse("t\n1 0 -1 imp:n=1 vol=3\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        m.set_cell_geometry(s, "(1 2) : 3").unwrap();
+        assert_eq!(m.cell(1).unwrap().geometry_text(), "(1 2) : 3");
+        assert_eq!(m.cell(1).unwrap().signed_surfaces(), vec![1, 2, 3]);
+        let out = m.to_source();
+        assert!(out.contains("1 0 (1 2) : 3 imp:n=1 vol=3"), "{out}");
+    }
+
+    #[test]
+    fn set_cell_geometry_unites_two_cells() {
+        let mut m = Model::parse(
+            "t\n1 0 -1 -2 imp:n=1\n2 0 -3 imp:n=1\n3 0 1 imp:n=1\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n",
+        );
+        let a = m.cell(1).unwrap().geometry_text();
+        let b = m.cell(2).unwrap().geometry_text();
+        let s = slot_of_cell(&m, 3);
+        m.set_cell_geometry(s, &format!("({a}) : ({b})")).unwrap();
+        assert_eq!(m.cell(3).unwrap().geometry_text(), "(-1 -2) : (-3)");
+        assert_eq!(m.cell(3).unwrap().signed_surfaces(), vec![-1, -2, -3]);
+    }
+
+    #[test]
+    fn set_cell_geometry_fills_in_an_empty_geometry() {
+        let mut m = Model::parse("t\n2 0 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 2);
+        m.set_cell_geometry(s, "-1").unwrap();
+        assert_eq!(m.cell(2).unwrap().signed_surfaces(), vec![-1]);
+        assert!(m.to_source().contains("2 0 -1 imp:n=1"));
+    }
+
+    #[test]
+    fn set_cell_geometry_wrong_kind_is_rejected() {
+        let mut m = Model::parse(SRC);
+        let surf = m.surface(1).unwrap().slot();
+        assert_eq!(
+            m.set_cell_geometry(surf, "-1"),
             Err(super::EditError::WrongKind)
         );
     }

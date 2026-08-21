@@ -572,6 +572,22 @@ impl Cell {
         let v = m.cell_at(self.slot).ok_or_else(removed)?;
         Ok(v.geometry().into_iter().map(geometry_term).collect())
     }
+    #[getter]
+    fn geometry_text(&self) -> PyResult<String> {
+        Ok(self
+            .inner
+            .borrow()
+            .cell_at(self.slot)
+            .ok_or_else(removed)?
+            .geometry_text())
+    }
+    #[setter]
+    fn set_geometry_text(&self, value: &str) -> PyResult<()> {
+        self.inner
+            .borrow_mut()
+            .set_cell_geometry(self.slot, value)
+            .map_err(edit_err)
+    }
     /// `position` accepts a negative index the way `list[-1]` does — resolved
     /// against the current term count before the edit. `insert_geometry_term`
     /// deliberately does not: "insert before" vs. "insert after" the resolved

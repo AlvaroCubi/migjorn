@@ -134,6 +134,41 @@ def test_geometry_term_repr_and_str() -> None:
     assert " ".join(str(t) for t in cell.geometry) == "-1 #2"
 
 
+def test_geometry_text_reads_the_exact_source() -> None:
+    m = migjorn.parse(
+        "t\n1 0 -1  2   #3\n2 0 1 imp:n=1\n\n1 SO 5\n2 SO 6\n\nm1 1001 1\n"
+    )
+    cell = m.cell(1)
+    assert cell is not None
+    assert cell.geometry_text == "-1  2   #3"
+
+
+def test_geometry_text_setter_replaces_the_whole_expression() -> None:
+    m = migjorn.parse(
+        "t\n1 0 -1 imp:n=1 vol=3\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n"
+    )
+    cell = m.cell(1)
+    assert cell is not None
+    cell.geometry_text = "(1 2) : 3"
+    assert cell.geometry_text == "(1 2) : 3"
+    assert cell.signed_surfaces == [1, 2, 3]
+    out = m.to_source()
+    assert "1 0 (1 2) : 3 imp:n=1 vol=3" in out
+
+
+def test_geometry_text_unites_several_cells() -> None:
+    m = migjorn.parse(
+        "t\n1 0 -1 -2 imp:n=1\n2 0 -3 imp:n=1\n3 0 -4 imp:n=1\n"
+        "4 0 1 imp:n=1\n\n1 SO 5\n2 SO 6\n3 SO 7\n4 SO 8\n\nm1 1001 1\n"
+    )
+    to_unite = [m.cell(1), m.cell(2), m.cell(3)]
+    target = m.cell(4)
+    assert target is not None
+    target.geometry_text = " : ".join(f"({c.geometry_text})" for c in to_unite)
+    assert target.geometry_text == "(-1 -2) : (-3) : (-4)"
+    assert target.signed_surfaces == [-1, -2, -3, -4]
+
+
 def test_set_geometry_term_substitutes_a_surface_across_cells() -> None:
     m = migjorn.parse("t\n1 0 -1 2\n2 0 -2 3\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n")
     # a generic "find surface 2, replace with 4" pass over every cell — the

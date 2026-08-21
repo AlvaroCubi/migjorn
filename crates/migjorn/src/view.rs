@@ -85,6 +85,12 @@ impl<'a> CellView<'a> {
         cell::walk_geometry(card, &cell::layout(card).geometry)
     }
 
+    /// The geometry expression's exact source text, trimmed.
+    pub fn geometry_text(&self) -> String {
+        let card = self.require();
+        cell::geometry_text(card, &cell::layout(card).geometry)
+    }
+
     /// Signed surfaces in file order: `-1` keeps its sense, `+5` its prefix.
     pub fn signed_surfaces(&self) -> Vec<i64> {
         self.geometry()

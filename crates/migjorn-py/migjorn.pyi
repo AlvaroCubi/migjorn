@@ -259,6 +259,16 @@ class Cell:
         :meth:`set_geometry_term` / :meth:`insert_geometry_term`."""
 
     @property
+    def geometry_text(self) -> str:
+        """The geometry expression's exact source text, trimmed (e.g.
+        ``"-1 2 #3"``). Assigning replaces the whole expression in one go —
+        the bulk counterpart to :meth:`set_geometry_term` /
+        :meth:`insert_geometry_term`, for rebuilding a geometry from scratch
+        rather than editing term by term."""
+
+    @geometry_text.setter
+    def geometry_text(self, value: str) -> None: ...
+    @property
     def well_formed(self) -> bool:
         """Whether the card parsed as a structurally complete cell."""
 

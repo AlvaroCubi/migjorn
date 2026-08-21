@@ -197,6 +197,15 @@ pub(crate) fn walk_geometry_spans(
     out
 }
 
+/// A cell's geometry expression exactly as written, trimmed. The read
+/// counterpart to `Model::set_cell_geometry` — reading this from one or more
+/// cells, combining the text, and writing it back to another is how a caller
+/// rebuilds a geometry expression wholesale (e.g. uniting several cells' into
+/// one), rather than composing many single-term edits.
+pub(crate) fn geometry_text(card: &Card, range: &Range<usize>) -> String {
+    slice_tokens(card, range.clone())
+}
+
 /// One `keyword[:particle][=]value` entry on a cell card.
 #[derive(Debug, Clone)]
 pub struct CellParam {

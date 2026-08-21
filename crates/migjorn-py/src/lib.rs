@@ -1043,6 +1043,19 @@ struct GeometryTerm {
     text: String,
 }
 
+#[pymethods]
+impl GeometryTerm {
+    fn __repr__(&self) -> String {
+        format!("GeometryTerm(kind={:?}, text={:?})", self.kind, self.text)
+    }
+    /// A term's natural string form is exactly the fragment it is in the
+    /// source, so `" ".join(str(t) for t in cell.geometry)` reconstructs a
+    /// readable geometry expression.
+    fn __str__(&self) -> String {
+        self.text.clone()
+    }
+}
+
 /// A problem recorded while parsing; the offending bytes are still preserved.
 #[pyclass(unsendable)]
 struct Diagnostic {

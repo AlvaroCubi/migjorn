@@ -120,6 +120,18 @@ def test_geometry_reads_terms_in_file_order() -> None:
     assert [t.text for t in terms] == ["-1", "2", "#3"]
 
 
+def test_geometry_term_repr_and_str() -> None:
+    m = migjorn.parse("t\n1 0 -1 #2\n2 0 1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
+    cell = m.cell(1)
+    assert cell is not None
+    surface, complement = cell.geometry
+    assert str(surface) == "-1"
+    assert repr(surface) == 'GeometryTerm(kind="surface", text="-1")'
+    assert str(complement) == "#2"
+    # round-tripping through str() reconstructs a readable expression
+    assert " ".join(str(t) for t in cell.geometry) == "-1 #2"
+
+
 def test_set_geometry_term_substitutes_a_surface_across_cells() -> None:
     m = migjorn.parse(
         "t\n1 0 -1 2\n2 0 -2 3\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n"

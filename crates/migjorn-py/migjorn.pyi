@@ -473,7 +473,8 @@ class CellParam:
         """The parameter's value text, exactly as written."""
 
 class GeometryTerm:
-    """One term of a cell's geometry expression, in file order."""
+    """One term of a cell's geometry expression, in file order. ``str(term)``
+    is its exact text; ``repr(term)`` shows ``kind`` and ``text`` together."""
 
     @property
     def kind(self) -> str:

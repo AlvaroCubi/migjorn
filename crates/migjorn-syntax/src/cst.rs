@@ -397,7 +397,9 @@ mod tests {
             ]
         );
         let cell = cst.at(1).unwrap();
-        assert!(cell.text().starts_with("c cell 1 is the fuel\nC it matters\n1 "));
+        assert!(cell
+            .text()
+            .starts_with("c cell 1 is the fuel\nC it matters\n1 "));
         assert!(cell.text().ends_with("$ fuel sphere\n"));
     }
 

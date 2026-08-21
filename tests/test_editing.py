@@ -147,6 +147,22 @@ def test_set_geometry_term_substitutes_a_surface_across_cells() -> None:
     assert m.cell(2).surface_ids == [2, 3]  # -2 keeps its sense, untouched
 
 
+def test_set_geometry_term_accepts_a_negative_index() -> None:
+    m = migjorn.parse("t\n1 0 -1 2 -3\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n")
+    cell = m.cell(1)
+    assert cell is not None
+    cell.set_geometry_term(-2, "123")
+    assert cell.signed_surfaces == [-1, 123, -3]
+
+
+def test_set_geometry_term_negative_index_past_the_start_raises_value_error() -> None:
+    m = migjorn.parse("t\n1 0 -1 2\n\n1 SO 5\n2 SO 6\n\nm1 1001 1\n")
+    cell = m.cell(1)
+    assert cell is not None
+    with pytest.raises(ValueError):
+        cell.set_geometry_term(-3, "5")
+
+
 def test_set_geometry_term_out_of_range_raises_value_error() -> None:
     m = migjorn.parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
     cell = m.cell(1)

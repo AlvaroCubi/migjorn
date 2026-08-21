@@ -572,7 +572,17 @@ impl Cell {
         let v = m.cell_at(self.slot).ok_or_else(removed)?;
         Ok(v.geometry().into_iter().map(geometry_term).collect())
     }
-    fn set_geometry_term(&self, position: usize, text: &str) -> PyResult<()> {
+    /// `position` accepts a negative index the way `list[-1]` does — resolved
+    /// against the current term count before the edit. `insert_geometry_term`
+    /// deliberately does not: "insert before" vs. "insert after" the resolved
+    /// term is ambiguous for a negative index in a way replacement is not.
+    fn set_geometry_term(&self, position: isize, text: &str) -> PyResult<()> {
+        let len = {
+            let m = self.inner.borrow();
+            let v = m.cell_at(self.slot).ok_or_else(removed)?;
+            v.geometry().len()
+        };
+        let position = resolve_index(position, len)?;
         self.inner
             .borrow_mut()
             .set_geometry_term(self.slot, position, text)
@@ -609,6 +619,18 @@ fn cell_param(p: migjorn_core::CellParam) -> CellParam {
         starred: p.starred,
         value: p.value.clone(),
     }
+}
+
+/// Resolve a Python-style index (negative counts from the end, `list[-1]`
+/// fashion) against a length, raising the same error `set_geometry_term`
+/// itself would for a position past the end.
+fn resolve_index(position: isize, len: usize) -> PyResult<usize> {
+    let resolved = if position < 0 {
+        position + len as isize
+    } else {
+        position
+    };
+    usize::try_from(resolved).map_err(|_| edit_err(EditError::NoSuchField))
 }
 
 fn geometry_term(t: migjorn_core::GeometryTerm) -> GeometryTerm {

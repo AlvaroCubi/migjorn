@@ -289,9 +289,10 @@ class Cell:
 
     def set_geometry_term(self, position: int, text: str) -> None:
         """Replace the geometry term at ``position`` (0-based, into the list
-        :attr:`geometry` returns) with new literal text — ``"124"`` for a
-        surface, ``"#457"`` for a whole complement. The replacement can be a
-        different length, but the term count is unchanged; use
+        :attr:`geometry` returns; negative counts from the end, like
+        ``list[-1]``) with new literal text — ``"124"`` for a surface,
+        ``"#457"`` for a whole complement. The replacement can be a different
+        length, but the term count is unchanged; use
         :meth:`insert_geometry_term` to grow the expression. Raises
         ``ValueError`` if ``position`` is out of range."""
 
@@ -310,7 +311,10 @@ class Cell:
             cell.insert_geometry_term(n + 1, ")")
             cell.insert_geometry_term(n + 2, "#123")
 
-        Raises ``ValueError`` if ``position`` is past the end of the list."""
+        Raises ``ValueError`` if ``position`` is past the end of the list.
+        Unlike :meth:`set_geometry_term`, ``position`` does not accept a
+        negative index here — "before" vs. "after" the resolved term is
+        ambiguous for an insert in a way it is not for a replacement."""
 
 class Surface:
     """A live handle onto a surface card."""

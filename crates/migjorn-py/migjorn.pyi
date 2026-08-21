@@ -97,10 +97,19 @@ class Model:
         """All data cards, in file order — a superset of :meth:`materials` and
         :meth:`transforms` (``Mn``/``TRn`` are ``Data`` cards too), generically."""
 
-    def add_cell(self, text: str) -> Cell:
-        """Append a cell card (given as one line of MCNP, no terminator needed) at
-        the end of the cell block and return a live handle to it. Local: no
-        reparse. Raises ``ValueError`` if there is no cell block to add to."""
+    def add_cell(self, text: str, after: int | None = None) -> Cell:
+        """Add a cell card (given as one line of MCNP, no terminator needed)
+        and return a live handle to it. Local: no reparse. By default it's
+        appended at the end of the cell block; pass ``after`` (an existing
+        cell's id) to insert it immediately after that cell instead — e.g. so
+        a clone lands next to the cell it came from rather than wherever the
+        block currently ends::
+
+            clone = model.add_cell(source.text, after=source.id)
+            clone.id = new_id
+
+        Raises ``ValueError`` if there is no cell block to add to, or if
+        ``after`` is given but is not a currently-defined cell id."""
 
     def add_surface(self, text: str) -> Surface:
         """Append a surface card at the end of the surface block; returns a handle."""

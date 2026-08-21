@@ -36,6 +36,35 @@ def test_add_cell_appends_and_is_visible(model: migjorn.Model) -> None:
     assert "3 1 -1.0 -1 imp:n=1" in model.to_source()
 
 
+def test_add_cell_after_lands_next_to_the_anchor_not_at_the_end() -> None:
+    m = migjorn.parse(
+        "t\n1 1 -1.0 -1 imp:n=1\n2 0 1 imp:n=0\n3 0 1 imp:n=0\n\n1 SO 5\n\nm1 1001 1\n"
+    )
+    new_cell = m.add_cell("4 0 1 imp:n=0", after=1)
+    assert new_cell.id == 4
+    assert m.num_cells == 4
+    out = m.to_source()
+    assert "1 1 -1.0 -1 imp:n=1\n4 0 1 imp:n=0\n2 0 1 imp:n=0" in out
+
+
+def test_add_cell_after_missing_anchor_raises_value_error() -> None:
+    m = migjorn.parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
+    with pytest.raises(ValueError):
+        m.add_cell("2 0 1 imp:n=1", after=999)
+
+
+def test_add_cell_after_places_a_clone_next_to_its_source() -> None:
+    m = migjorn.parse(
+        "t\n123 1 -1.0 -1 imp:n=1\n2 0 1 imp:n=0\n3 0 1 imp:n=0\n\n1 SO 5\n\nm1 1001 1\n"
+    )
+    source = m.cell(123)
+    assert source is not None
+    clone = m.add_cell(source.text, after=source.id)
+    clone.id = 1231
+    out = m.to_source()
+    assert "123 1 -1.0 -1 imp:n=1\n1231 1 -1.0 -1 imp:n=1\n2 0 1 imp:n=0" in out
+
+
 def test_remove_cell(model: migjorn.Model) -> None:
     assert model.remove_cell(2) is True
     assert model.cell(2) is None

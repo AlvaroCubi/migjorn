@@ -208,8 +208,14 @@ impl Model {
     }
 
     // --- structural edits ---------------------------------------------------
-    fn add_cell(&self, text: &str) -> PyResult<Cell> {
-        let slot = self.inner.borrow_mut().add_cell(text).map_err(edit_err)?;
+    #[pyo3(signature = (text, after=None))]
+    fn add_cell(&self, text: &str, after: Option<i64>) -> PyResult<Cell> {
+        let mut m = self.inner.borrow_mut();
+        let slot = match after {
+            Some(id) => m.add_cell_after(id, text),
+            None => m.add_cell(text),
+        }
+        .map_err(edit_err)?;
         Ok(Cell {
             inner: self.inner.clone(),
             slot,

@@ -723,16 +723,43 @@ impl Model {
 
     /// Lex `text` as one card of `kind` and insert it at the end of that block.
     /// Pure `Vec<u32>` insert — no other card is touched and nothing is re-lexed.
+    /// Lex `text` as one card of `kind` and insert it at raw file position `at`.
+    fn insert_card(&mut self, kind: CardKind, at: usize, text: &str) -> u32 {
+        let card = Cst::new_card(kind, self.terminate(text));
+        self.cst.insert_at(at, card)
+    }
+
     fn add_card(&mut self, kind: CardKind, text: &str) -> Result<u32, EditError> {
         let at = self.cst.end_of_block(kind).ok_or(EditError::NoBlock)?;
-        let card = Cst::new_card(kind, self.terminate(text));
-        Ok(self.cst.insert_at(at, card))
+        Ok(self.insert_card(kind, at, text))
     }
 
     /// Add a cell at the end of the cell block. Its id is indexed immediately, so
     /// the very next `cell(id)` finds it without any flush step.
     pub fn add_cell(&mut self, text: &str) -> Result<u32, EditError> {
         let slot = self.add_card(CardKind::Cell, text)?;
+        if let Some(id) = self.cst.card(slot).map(cell::layout).and_then(|l| l.id) {
+            self.cell_index.entry(id).or_insert(slot);
+        }
+        Ok(slot)
+    }
+
+    /// Add a cell immediately after an existing one (by id), instead of at the
+    /// end of the cell block — e.g. so a clone lands next to the cell it came
+    /// from rather than wherever the block currently ends. Its id is indexed
+    /// immediately, same as `add_cell`. `EditError::NoSuchField` if `after` is
+    /// not a currently-defined cell id.
+    pub fn add_cell_after(&mut self, after: i64, text: &str) -> Result<u32, EditError> {
+        let anchor_slot = self
+            .cell_index
+            .get(&after)
+            .copied()
+            .ok_or(EditError::NoSuchField)?;
+        let at = self
+            .cst
+            .position_of(anchor_slot)
+            .ok_or(EditError::NoSuchField)?;
+        let slot = self.insert_card(CardKind::Cell, at + 1, text);
         if let Some(id) = self.cst.card(slot).map(cell::layout).and_then(|l| l.id) {
             self.cell_index.entry(id).or_insert(slot);
         }
@@ -1182,6 +1209,53 @@ mod tests {
         assert!(m
             .to_source()
             .contains("2 0 1 imp:n=0\n3 1 -1.0 -1 imp:n=1\n\n1 SO 5"));
+    }
+
+    #[test]
+    fn add_cell_after_lands_right_after_the_anchor() {
+        let mut m = Model::parse(SRC);
+        m.add_cell_after(1, "3 0 -2 imp:n=1").unwrap();
+        // between cell 1 and cell 2 in source order, not at the block's end
+        assert!(
+            m.to_source()
+                .contains("1 1 -1.0 -1 imp:n=1\n3 0 -2 imp:n=1\n2 0 1 imp:n=0"),
+            "{}",
+            m.to_source()
+        );
+    }
+
+    #[test]
+    fn add_cell_after_is_indexed_immediately() {
+        let mut m = Model::parse(SRC);
+        m.add_cell_after(1, "3 0 -2 imp:n=1").unwrap();
+        assert_eq!(m.cell(3).unwrap().id(), Some(3));
+        assert_eq!(m.num_cells(), 3);
+    }
+
+    #[test]
+    fn add_cell_after_missing_anchor_is_rejected() {
+        let mut m = Model::parse(SRC);
+        assert_eq!(
+            m.add_cell_after(999, "3 0 -2 imp:n=1"),
+            Err(super::EditError::NoSuchField)
+        );
+    }
+
+    #[test]
+    fn add_cell_after_supports_placing_a_clone_next_to_its_source() {
+        let mut m = Model::parse(
+            "t\n1 1 -1.0 -1 imp:n=1\n2 0 1 imp:n=0\n3 0 1 imp:n=0\n\n1 SO 5\n\nm1 1001 1\n",
+        );
+        let source_text = m.cell(1).unwrap().text().to_owned();
+        let clone_slot = m.add_cell_after(1, &source_text).unwrap();
+        m.set_cell_id(clone_slot, 501).unwrap();
+        // the clone sits between cell 1 and cell 2, not after cell 3
+        assert!(
+            m.to_source()
+                .contains("1 1 -1.0 -1 imp:n=1\n501 1 -1.0 -1 imp:n=1\n2 0 1 imp:n=0"),
+            "{}",
+            m.to_source()
+        );
     }
 
     #[test]

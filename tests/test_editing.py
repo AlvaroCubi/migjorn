@@ -112,7 +112,9 @@ def test_cell_param_edit_preserves_rest_of_card() -> None:
 
 
 def test_geometry_reads_terms_in_file_order() -> None:
-    m = migjorn.parse("t\n1 0 -1 2 #3\n2 0 1 imp:n=1\n3 0 1 imp:n=1\n\n1 SO 5\n2 SO 6\n\nm1 1001 1\n")
+    m = migjorn.parse(
+        "t\n1 0 -1 2 #3\n2 0 1 imp:n=1\n3 0 1 imp:n=1\n\n1 SO 5\n2 SO 6\n\nm1 1001 1\n"
+    )
     cell = m.cell(1)
     assert cell is not None
     terms = cell.geometry
@@ -133,9 +135,7 @@ def test_geometry_term_repr_and_str() -> None:
 
 
 def test_set_geometry_term_substitutes_a_surface_across_cells() -> None:
-    m = migjorn.parse(
-        "t\n1 0 -1 2\n2 0 -2 3\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n"
-    )
+    m = migjorn.parse("t\n1 0 -1 2\n2 0 -2 3\n\n1 SO 5\n2 SO 6\n3 SO 7\n\nm1 1001 1\n")
     # a generic "find surface 2, replace with 4" pass over every cell — the
     # kind of ad-hoc analysis the geometry API is meant to make possible
     # without a dedicated method for every case.

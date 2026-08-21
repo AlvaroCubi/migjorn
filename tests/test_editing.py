@@ -86,6 +86,72 @@ def test_title_setter_creates_when_absent() -> None:
     assert m.title == "Fresh"
 
 
+# --- id setters ---------------------------------------------------------
+
+
+def test_cell_clone_workflow_via_add_cell_and_id_setter() -> None:
+    m = migjorn.parse("t\n1 1 -1.0 -1 imp:n=1 vol=3\n\n1 SO 5\n2 SO 6\n\nm1 1001 1\n")
+    source = m.cell(1)
+    assert source is not None
+    clone = m.add_cell(source.text)
+    clone.id = 501
+    assert clone.id == 501
+    assert clone.material == 1
+    assert clone.density == -1.0
+    # the original is untouched, and both cards are present
+    assert m.cell(1) is not None
+    out = m.to_source()
+    assert "1 1 -1.0 -1 imp:n=1 vol=3" in out
+    assert "501 1 -1.0 -1 imp:n=1 vol=3" in out
+    # the clone diverges independently from here
+    clone.geometry_text = "-2"
+    assert clone.geometry_text == "-2"
+    assert source.geometry_text == "-1"
+
+
+def test_cell_id_setter_leaves_existing_references_dangling() -> None:
+    m = migjorn.parse("t\n1 0 -1 imp:n=1\n2 0 1 #1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
+    cell = m.cell(1)
+    assert cell is not None
+    cell.id = 501
+    assert m.cell(1) is None
+    assert m.cell(501) is not None
+    other = m.cell(2)
+    assert other is not None
+    assert other.cell_refs == [1]  # not moved — this is not a rename
+    assert m.validate() != []
+
+
+def test_surface_id_setter() -> None:
+    m = migjorn.parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
+    surface = m.surface(1)
+    assert surface is not None
+    surface.id = 501
+    assert surface.id == 501
+    assert m.surface(1) is None
+    assert m.surface(501) is not None
+
+
+def test_material_id_setter() -> None:
+    m = migjorn.parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n")
+    material = m.material(1)
+    assert material is not None
+    material.id = 501
+    assert material.id == 501
+    assert m.material(1) is None
+    assert m.material(501) is not None
+
+
+def test_transform_id_setter() -> None:
+    m = migjorn.parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\ntr1 0 0 5\n")
+    transform = m.transform(1)
+    assert transform is not None
+    transform.id = 501
+    assert transform.id == 501
+    assert m.transform(1) is None
+    assert m.transform(501) is not None
+
+
 # --- in-card value edits ----------------------------------------------------
 
 

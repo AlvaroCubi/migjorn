@@ -29,7 +29,7 @@ use crate::surface;
 /// Returns a `CompactString` rather than `String`: a signed `i64` is at most 20
 /// bytes, comfortably within the inline capacity, so formatting one of the
 /// millions of ids a whole-model renumber can touch never allocates.
-fn remap_token<F: Fn(i64) -> i64>(text: &str, map: &F) -> Option<CompactString> {
+pub(crate) fn remap_token<F: Fn(i64) -> i64>(text: &str, map: &F) -> Option<CompactString> {
     let (sign, digits) = if let Some(rest) = text.strip_prefix('-') {
         ("-", rest)
     } else if let Some(rest) = text.strip_prefix('+') {
@@ -43,7 +43,7 @@ fn remap_token<F: Fn(i64) -> i64>(text: &str, map: &F) -> Option<CompactString> 
 
 /// Remap the id baked into a data-card name token (`m1` -> `m501`, `TR3` -> `TR9`,
 /// `f4` -> `f14`), keeping the alphabetic part exactly as written.
-fn remap_name<F: Fn(i64) -> i64>(name: &str, map: &F) -> Option<CompactString> {
+pub(crate) fn remap_name<F: Fn(i64) -> i64>(name: &str, map: &F) -> Option<CompactString> {
     let (alpha, number) = split_name(name);
     let n = number?;
     Some(format_compact!("{alpha}{}", map(n)))

@@ -2,9 +2,12 @@
 //!
 //! Every method here mutates exactly one card by splicing its own `text` and
 //! fixing that card's token spans — never re-lexing or re-parsing the file, and
-//! never touching a second card. A value edit does not change any defined id, so
-//! the model's id indices stay valid without maintenance; that is what makes
-//! these edits O(card length) and index-free.
+//! never touching a second card. Most of these edits do not change any defined
+//! id, so the model's id indices stay valid without maintenance; the
+//! `set_*_id` methods are the exception — they do change a defined id, so they
+//! additionally patch that one index entry, still without touching any other
+//! card (in particular, they do not move references the way `renumber_*`
+//! does — see each method's doc comment).
 //!
 //! Writes are addressed by stable `slot` (the anchor a live view resolves
 //! through), so a view can hand its `slot` to the model and the edit lands on the
@@ -14,6 +17,8 @@ use migjorn_syntax::{CardKind, Cst};
 
 use crate::data;
 use crate::model::Model;
+use crate::renumber::{remap_name, remap_token};
+use crate::scan::sig;
 use crate::{cell, surface};
 
 /// Why an edit could not be applied. Reads never fail (they project a best-effort
@@ -106,6 +111,36 @@ fn join_nums(values: &[f64]) -> String {
 
 impl Model {
     // --- cells --------------------------------------------------------------
+
+    /// Rewrite this cell's own id. Local to this card only — unlike
+    /// [`Model::renumber_cells`], it does **not** move any `#<id>`/
+    /// `LIKE <id> BUT` reference elsewhere in the file. Safe to use on a cell
+    /// nothing references yet — e.g. right after `add_cell(source.text)`, to
+    /// clone a cell under a new id; used on an already-referenced cell, those
+    /// references go dangling — [`Model::validate`] will report them. Use
+    /// `renumber_cells` instead when references should move with the
+    /// definition.
+    pub fn set_cell_id(&mut self, slot: u32, new_id: i64) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Cell {
+            return Err(EditError::WrongKind);
+        }
+        let id_tok = sig(card, 0).ok_or(EditError::NoSuchField)?;
+        let old_id = cell::layout(card).id;
+        let new_text =
+            remap_token(card.token_text(id_tok), &|_| new_id).ok_or(EditError::NoSuchField)?;
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .set_token_text(id_tok, &new_text);
+        if let Some(old) = old_id {
+            if self.cell_index.get(&old) == Some(&slot) {
+                self.cell_index.remove(&old);
+            }
+        }
+        self.cell_index.entry(new_id).or_insert(slot);
+        Ok(())
+    }
 
     /// Set a cell's material number, crossing the void boundary as needed.
     ///
@@ -301,6 +336,34 @@ impl Model {
 
     // --- surfaces -----------------------------------------------------------
 
+    /// Rewrite this surface's own id (a leading `+` white-boundary marker, if
+    /// present, survives — it lives inside the id token itself). Local to this
+    /// card only — unlike [`Model::renumber_surfaces`], it does **not** move
+    /// any geometry reference to this surface elsewhere in the file. Safe on
+    /// a surface nothing references yet; used on an already-referenced one,
+    /// those references go dangling — [`Model::validate`] will report them.
+    pub fn set_surface_id(&mut self, slot: u32, new_id: i64) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Surface {
+            return Err(EditError::WrongKind);
+        }
+        let l = surface::layout(card);
+        let id_tok = l.id_tok.ok_or(EditError::NoSuchField)?;
+        let new_text =
+            remap_token(card.token_text(id_tok), &|_| new_id).ok_or(EditError::NoSuchField)?;
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .set_token_text(id_tok, &new_text);
+        if let Some(old) = l.id {
+            if self.surface_index.get(&old) == Some(&slot) {
+                self.surface_index.remove(&old);
+            }
+        }
+        self.surface_index.entry(new_id).or_insert(slot);
+        Ok(())
+    }
+
     /// Replace one coefficient of a surface, addressed by position.
     pub fn set_surface_coeff(
         &mut self,
@@ -394,6 +457,29 @@ impl Model {
 
     // --- materials ----------------------------------------------------------
 
+    /// Rewrite this material's own id (`m1` -> `m501`; the alphabetic
+    /// mnemonic's case is kept exactly as written). Local to this card only —
+    /// unlike [`Model::renumber_materials`], it does **not** move any cell
+    /// `material=` field or `MTn`/`MXn` card that references it. Safe on a
+    /// material nothing references yet; used on an already-referenced one,
+    /// those references go dangling — [`Model::validate`] will report them.
+    pub fn set_material_id(&mut self, slot: u32, new_id: i64) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        let head = data::head(card).ok_or(EditError::WrongKind)?;
+        let old_id = data::material_id(&head).ok_or(EditError::WrongKind)?;
+        let new_text = remap_name(card.token_text(head.name_tok), &|_| new_id)
+            .ok_or(EditError::NoSuchField)?;
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .set_token_text(head.name_tok, &new_text);
+        if self.material_index.get(&old_id) == Some(&slot) {
+            self.material_index.remove(&old_id);
+        }
+        self.material_index.entry(new_id).or_insert(slot);
+        Ok(())
+    }
+
     /// Set the fraction of one material entry, addressed by position. A negative
     /// fraction is by weight; the sign is written exactly as given.
     pub fn set_material_fraction(
@@ -441,6 +527,29 @@ impl Model {
     }
 
     // --- transforms ---------------------------------------------------------
+
+    /// Rewrite this transform's own id (`tr1` -> `tr501`; a leading `*` and
+    /// the mnemonic's case are kept exactly as written). Local to this card
+    /// only — unlike [`Model::renumber_transforms`], it does **not** move any
+    /// surface `transform=` field that references it. Safe on a transform
+    /// nothing references yet; used on an already-referenced one, those
+    /// references go dangling — [`Model::validate`] will report them.
+    pub fn set_transform_id(&mut self, slot: u32, new_id: i64) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        let head = data::head(card).ok_or(EditError::WrongKind)?;
+        let old_id = data::transform_id(&head).ok_or(EditError::WrongKind)?;
+        let new_text = remap_name(card.token_text(head.name_tok), &|_| new_id)
+            .ok_or(EditError::NoSuchField)?;
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .set_token_text(head.name_tok, &new_text);
+        if self.transform_index.get(&old_id) == Some(&slot) {
+            self.transform_index.remove(&old_id);
+        }
+        self.transform_index.entry(new_id).or_insert(slot);
+        Ok(())
+    }
 
     /// Replace a transform's entire coefficient list. Same in-place vs. resplice
     /// strategy as [`Model::set_surface_coeffs`].
@@ -893,6 +1002,168 @@ mod tests {
             m.set_cell_material(surf, 2),
             Err(super::EditError::WrongKind)
         );
+    }
+
+    // --- id setters ----------------------------------------------------------
+
+    #[test]
+    fn set_cell_id_rewrites_the_token_and_the_index() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        m.set_cell_id(s, 501).unwrap();
+        assert!(m.cell(1).is_none());
+        assert_eq!(m.cell(501).unwrap().slot(), s);
+        assert!(m.to_source().contains("501 1 -1.0 -1 imp:n=1"));
+    }
+
+    #[test]
+    fn set_cell_id_does_not_clobber_a_first_wins_duplicate() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let original = slot_of_cell(&m, 1);
+        let dup = m.add_cell("1 0 -1 imp:n=1").unwrap();
+        assert_eq!(m.cell(1).unwrap().slot(), original); // first wins
+        m.set_cell_id(dup, 501).unwrap();
+        // the original's index entry for id 1 must be untouched
+        assert_eq!(m.cell(1).unwrap().slot(), original);
+        assert_eq!(m.cell(501).unwrap().slot(), dup);
+    }
+
+    #[test]
+    fn set_cell_id_wrong_kind_is_rejected() {
+        let mut m = Model::parse(SRC);
+        let surf = m.surface(1).unwrap().slot();
+        assert_eq!(m.set_cell_id(surf, 501), Err(super::EditError::WrongKind));
+    }
+
+    #[test]
+    fn set_cell_id_supports_the_clone_workflow() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1 vol=3\n\n1 SO 5\n\nm1 1001 1\n");
+        let source_text = m.cell(1).unwrap().text().to_owned();
+        let clone_slot = m.add_cell(&source_text).unwrap();
+        m.set_cell_id(clone_slot, 501).unwrap();
+
+        // the original is untouched
+        assert!(m.cell(1).is_some());
+        assert!(m.to_source().contains("1 1 -1.0 -1 imp:n=1 vol=3"));
+        // the clone is independently addressable and editable
+        assert_eq!(m.cell(501).unwrap().material(), Some(1));
+        assert_eq!(m.cell(501).unwrap().density(), Some(-1.0));
+        m.set_cell_geometry(clone_slot, "-2").unwrap();
+        assert_eq!(m.cell(501).unwrap().signed_surfaces(), vec![-2]);
+        assert_eq!(m.cell(1).unwrap().signed_surfaces(), vec![-1]); // original unaffected
+    }
+
+    #[test]
+    fn set_cell_id_leaves_existing_references_dangling() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n2 0 1 #1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        m.set_cell_id(s, 501).unwrap();
+        // the complement still reads the old id — this is not a rename
+        assert_eq!(m.cell(2).unwrap().cell_refs(), vec![1]);
+        assert!(m.cell(1).is_none());
+        assert!(!m.validate().is_empty());
+    }
+
+    #[test]
+    fn set_surface_id_rewrites_the_token_and_the_index() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = m.surface(1).unwrap().slot();
+        m.set_surface_id(s, 501).unwrap();
+        assert!(m.surface(1).is_none());
+        assert_eq!(m.surface(501).unwrap().slot(), s);
+        assert!(m.to_source().contains("501 SO 5"));
+    }
+
+    #[test]
+    fn set_surface_id_preserves_a_leading_white_prefix() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n+1 SO 5\n\nm1 1001 1\n");
+        let s = m.surface(1).unwrap().slot();
+        m.set_surface_id(s, 501).unwrap();
+        assert!(m.surface(501).unwrap().white());
+        assert!(m.to_source().contains("+501 SO 5"));
+    }
+
+    #[test]
+    fn set_surface_id_does_not_clobber_a_first_wins_duplicate() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let original = m.surface(1).unwrap().slot();
+        let dup = m.add_surface("1 PX 3").unwrap();
+        m.set_surface_id(dup, 501).unwrap();
+        assert_eq!(m.surface(1).unwrap().slot(), original);
+        assert_eq!(m.surface(501).unwrap().slot(), dup);
+    }
+
+    #[test]
+    fn set_surface_id_wrong_kind_is_rejected() {
+        let mut m = Model::parse(SRC);
+        let s = slot_of_cell(&m, 1);
+        assert_eq!(m.set_surface_id(s, 501), Err(super::EditError::WrongKind));
+    }
+
+    #[test]
+    fn set_material_id_rewrites_the_name_token_and_the_index() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nM1 1001 1\n");
+        let s = m.material(1).unwrap().slot();
+        m.set_material_id(s, 501).unwrap();
+        assert!(m.material(1).is_none());
+        assert_eq!(m.material(501).unwrap().slot(), s);
+        // the mnemonic's original case is preserved
+        assert!(m.to_source().contains("M501 1001 1"));
+    }
+
+    #[test]
+    fn set_material_id_does_not_clobber_a_first_wins_duplicate() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let original = m.material(1).unwrap().slot();
+        let dup = m.add_material("m1 8016 1").unwrap();
+        m.set_material_id(dup, 501).unwrap();
+        assert_eq!(m.material(1).unwrap().slot(), original);
+        assert_eq!(m.material(501).unwrap().slot(), dup);
+    }
+
+    #[test]
+    fn set_material_id_leaves_a_referencing_cell_dangling() {
+        let mut m = Model::parse("t\n1 1 -1.0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = m.material(1).unwrap().slot();
+        m.set_material_id(s, 501).unwrap();
+        // cell 1's material= field still reads the old id — this is not a rename
+        assert_eq!(m.cell(1).unwrap().material(), Some(1));
+        assert!(!m.validate().is_empty());
+    }
+
+    #[test]
+    fn set_material_id_wrong_kind_is_rejected() {
+        let mut m = Model::parse(SRC);
+        let s = slot_of_cell(&m, 1);
+        assert_eq!(m.set_material_id(s, 501), Err(super::EditError::WrongKind));
+    }
+
+    #[test]
+    fn set_transform_id_rewrites_the_name_token_and_the_index() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n*tr1 0 0 5\n");
+        let s = m.transform(1).unwrap().slot();
+        m.set_transform_id(s, 501).unwrap();
+        assert!(m.transform(1).is_none());
+        assert_eq!(m.transform(501).unwrap().slot(), s);
+        // the leading `*` and the mnemonic's case are preserved
+        assert!(m.to_source().contains("*tr501 0 0 5"));
+    }
+
+    #[test]
+    fn set_transform_id_does_not_clobber_a_first_wins_duplicate() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\ntr1 0 0 5\n");
+        let original = m.transform(1).unwrap().slot();
+        let dup = m.add_transform("tr1 0 0 9").unwrap();
+        m.set_transform_id(dup, 501).unwrap();
+        assert_eq!(m.transform(1).unwrap().slot(), original);
+        assert_eq!(m.transform(501).unwrap().slot(), dup);
+    }
+
+    #[test]
+    fn set_transform_id_wrong_kind_is_rejected() {
+        let mut m = Model::parse(SRC);
+        let s = slot_of_cell(&m, 1);
+        assert_eq!(m.set_transform_id(s, 501), Err(super::EditError::WrongKind));
     }
 
     // --- M3: structural edits ----------------------------------------------

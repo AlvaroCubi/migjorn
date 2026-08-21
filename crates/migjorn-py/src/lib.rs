@@ -415,6 +415,13 @@ impl Cell {
             .ok_or_else(removed)?
             .id())
     }
+    #[setter]
+    fn set_id(&self, value: i64) -> PyResult<()> {
+        self.inner
+            .borrow_mut()
+            .set_cell_id(self.slot, value)
+            .map_err(edit_err)
+    }
     #[getter]
     fn material(&self) -> PyResult<Option<i64>> {
         Ok(self
@@ -685,6 +692,13 @@ impl Surface {
             .ok_or_else(removed)?
             .id())
     }
+    #[setter]
+    fn set_id(&self, value: i64) -> PyResult<()> {
+        self.inner
+            .borrow_mut()
+            .set_surface_id(self.slot, value)
+            .map_err(edit_err)
+    }
     #[getter]
     fn kind(&self) -> PyResult<Option<String>> {
         Ok(self
@@ -811,6 +825,13 @@ impl Material {
             .ok_or_else(removed)?
             .id())
     }
+    #[setter]
+    fn set_id(&self, value: i64) -> PyResult<()> {
+        self.inner
+            .borrow_mut()
+            .set_material_id(self.slot, value)
+            .map_err(edit_err)
+    }
     #[getter]
     fn entries(&self) -> PyResult<Vec<(String, f64)>> {
         Ok(self
@@ -891,6 +912,13 @@ impl Transform {
             .transform_at(self.slot)
             .ok_or_else(removed)?
             .id())
+    }
+    #[setter]
+    fn set_id(&self, value: i64) -> PyResult<()> {
+        self.inner
+            .borrow_mut()
+            .set_transform_id(self.slot, value)
+            .map_err(edit_err)
     }
     #[getter]
     fn degrees(&self) -> PyResult<bool> {

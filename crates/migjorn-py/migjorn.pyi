@@ -199,8 +199,21 @@ class Cell:
 
     @property
     def id(self) -> int | None:
-        """The cell id, or ``None`` if it cannot be read."""
+        """The cell id, or ``None`` if it cannot be read. Assigning rewrites
+        *only this card's* id — unlike :meth:`Model.renumber_cells`, it does
+        not move any ``#<id>``/``LIKE <id> BUT`` reference elsewhere in the
+        file. Safe on a cell nothing references yet, e.g. right after cloning
+        one::
 
+            clone = model.add_cell(source.text)
+            clone.id = new_id
+
+        Used on an already-referenced cell, those references go dangling —
+        :meth:`Model.validate` will report them. Use ``renumber_cells``
+        instead when references should move with the definition."""
+
+    @id.setter
+    def id(self, value: int) -> None: ...
     @property
     def material(self) -> int | None:
         """The material number; ``0`` means void (no density). Setting it crosses
@@ -331,8 +344,15 @@ class Surface:
 
     @property
     def id(self) -> int | None:
-        """The surface id, or ``None``."""
+        """The surface id, or ``None``. Assigning rewrites *only this card's*
+        id (a leading ``+`` white-boundary marker, if present, is kept) —
+        unlike :meth:`Model.renumber_surfaces`, it does not move any geometry
+        reference to this surface elsewhere in the file. Safe on a surface
+        nothing references yet; used on an already-referenced one, those
+        references go dangling — :meth:`Model.validate` will report them."""
 
+    @id.setter
+    def id(self, value: int) -> None: ...
     @property
     def kind(self) -> str | None:
         """The surface mnemonic as written (``SO``, ``PX``, ``RPP`` ...)."""
@@ -374,8 +394,16 @@ class Material:
 
     @property
     def id(self) -> int | None:
-        """The material number ``n`` of the ``Mn`` card, or ``None``."""
+        """The material number ``n`` of the ``Mn`` card, or ``None``.
+        Assigning rewrites *only this card's* id (``m1`` -> ``m501``; the
+        mnemonic's case is kept) — unlike :meth:`Model.renumber_materials`,
+        it does not move any cell ``material=`` field or ``MTn``/``MXn`` card
+        that references it. Safe on a material nothing references yet; used
+        on an already-referenced one, those references go dangling —
+        :meth:`Model.validate` will report them."""
 
+    @id.setter
+    def id(self, value: int) -> None: ...
     @property
     def entries(self) -> list[tuple[str, float]]:
         """``(zaid, fraction)`` pairs. The ZAID keeps its library suffix; a
@@ -400,8 +428,16 @@ class Transform:
 
     @property
     def id(self) -> int | None:
-        """The transform number ``n``, or ``None``."""
+        """The transform number ``n``, or ``None``. Assigning rewrites *only
+        this card's* id (``tr1`` -> ``tr501``; a leading ``*`` and the
+        mnemonic's case are kept) — unlike :meth:`Model.renumber_transforms`,
+        it does not move any surface ``transform=`` field that references it.
+        Safe on a transform nothing references yet; used on an
+        already-referenced one, those references go dangling —
+        :meth:`Model.validate` will report them."""
 
+    @id.setter
+    def id(self, value: int) -> None: ...
     @property
     def degrees(self) -> bool:
         """``True`` for a ``*TRn`` card (rotation entries are angles in degrees)."""

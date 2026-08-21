@@ -133,8 +133,9 @@ fn plan(src: &str) -> Vec<Segment> {
 /// Segment one blank-line-free block, in parallel when it is large enough.
 ///
 /// Chunk boundaries are snapped forward to a position where the sequential
-/// segmenter would also have started a card, and never into the middle of a
-/// comment run — so each chunk's absorb-or-flush decision is self-contained and
+/// segmenter would also have started a card (including any header comment run
+/// that card absorbs), and never into the middle of a comment run — so each
+/// chunk's absorb-backward/absorb-forward/flush decision is self-contained and
 /// the concatenated result is identical to a single-threaded pass.
 fn segment_block(src: &str, range: Range<usize>, kind: CardKind) -> Vec<Card> {
     let bytes = src.as_bytes();
@@ -177,8 +178,10 @@ fn segment_block(src: &str, range: Range<usize>, kind: CardKind) -> Vec<Card> {
 fn segment_run(src: &str, range: Range<usize>, kind: CardKind, out: &mut Vec<Card>) {
     let bytes = src.as_bytes();
     // Start of a run of comment lines whose fate is not yet decided: they are
-    // absorbed into the open card if a continuation follows, and become
-    // standalone Comment cards otherwise.
+    // absorbed into the open card if a continuation follows, absorbed as the
+    // header of the next card if a fresh (non-continuation) card line follows,
+    // and become standalone Comment cards only when neither follows (a blank
+    // line or the end of the range).
     let mut pending_comments: Option<usize> = None;
     // The card currently being extended by continuation lines.
     let mut open: Option<Range<usize>> = None;
@@ -217,8 +220,10 @@ fn segment_run(src: &str, range: Range<usize>, kind: CardKind, out: &mut Vec<Car
             }
             _ => {
                 close(src, &mut open, kind, out);
-                flush_comments(src, &mut pending_comments, pos, out);
-                open = Some(pos..end);
+                // Any pending comment lines are this card's header: fold them
+                // into its range instead of flushing them as standalone cards.
+                let start = pending_comments.take().unwrap_or(pos);
+                open = Some(start..end);
             }
         }
 

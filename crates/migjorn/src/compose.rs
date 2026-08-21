@@ -561,6 +561,23 @@ mod tests {
     }
 
     #[test]
+    fn extract_cells_keeps_the_cell_s_header_comment() {
+        let m = Model::parse(
+            "t\n\
+             c fuel cell, see design note 7\n\
+             1 1 -1.0 -1 imp:n=1\n\
+             2 0 1 imp:n=0\n\
+             \n\
+             1 SO 5\n\
+             \n\
+             m1 1001 1\n",
+        );
+        assert!(m.cell(1).unwrap().text().contains("design note 7"));
+        let extracted = m.extract_cells(&[1]);
+        assert!(extracted.to_source().contains("design note 7"));
+    }
+
+    #[test]
     fn extract_cells_ignores_unknown_ids() {
         let m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
         let extracted = m.extract_cells(&[1, 999]);

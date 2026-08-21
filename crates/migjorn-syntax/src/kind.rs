@@ -25,7 +25,8 @@ pub enum SyntaxKind {
     LParen,
     RParen,
     /// A `$ ...` inline comment, or a whole `c ...` comment line absorbed into a
-    /// multi-line card. Excludes the line terminator.
+    /// card — either sandwiched before a continuation or heading the card as a
+    /// leading comment run. Excludes the line terminator.
     Comment,
     /// A `&` continuation marker.
     Ampersand,
@@ -58,8 +59,11 @@ pub enum CardKind {
     Cell,
     Surface,
     Data,
-    /// A standalone full-line comment. (A comment line sandwiched between a card
-    /// line and its continuation is *absorbed* into that card instead.)
+    /// A standalone full-line comment: one that is not attached to any card,
+    /// i.e. immediately followed by a blank line or the end of a block. (A
+    /// comment line sandwiched between a card line and its continuation, or
+    /// heading a card with no blank line in between, is *absorbed* into that
+    /// card instead.)
     Comment,
     /// A blank line. Load-bearing: blank lines delimit the three blocks.
     Blank,

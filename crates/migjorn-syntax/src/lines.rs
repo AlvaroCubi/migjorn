@@ -166,11 +166,14 @@ fn prev_content_line(src: &[u8], region_start: usize, at: usize) -> Option<&[u8]
     None
 }
 
-/// Snap `from` forward to the next position that genuinely starts a new card.
+/// Snap `from` forward to the next position that genuinely starts a new card,
+/// including any header comment run that will be absorbed into it.
 ///
 /// Used to make parallel chunk boundaries safe: a chunk may only begin where the
-/// sequential segmenter would also have begun a card, and never in the middle of
-/// a comment run (so the run's absorb-or-flush decision stays inside one chunk).
+/// sequential segmenter would also have begun a card. A comment run is never
+/// split from the card it belongs to, so a boundary lands at the start of a
+/// comment run precisely when that run is *not* absorbed backward (into a
+/// continuation) — in which case it will be absorbed forward instead.
 pub(crate) fn find_card_start(
     src: &[u8],
     region_start: usize,
@@ -183,17 +186,32 @@ pub(crate) fn find_card_start(
     } else {
         line_end(src, from).min(region_end)
     };
+    // Start of a not-yet-resolved comment run: a candidate boundary, unless the
+    // next non-comment line turns out to continue whatever precedes it, in
+    // which case the run is absorbed backward instead and is not a boundary.
+    let mut comment_run_start: Option<usize> = None;
     while pos < region_end {
         let end = line_end(src, pos).min(region_end);
         let line = &src[pos..end];
-        let skip = is_blank(line)
-            || is_comment_line(line)
-            || is_blank_col_continuation(line)
-            || prev_content_line(src, region_start, pos).is_some_and(ends_with_ampersand);
-        if !skip {
-            return pos;
+
+        if is_blank(line) {
+            comment_run_start = None;
+            pos = end;
+            continue;
         }
-        pos = end;
+        if is_comment_line(line) {
+            comment_run_start.get_or_insert(pos);
+            pos = end;
+            continue;
+        }
+        let continues = is_blank_col_continuation(line)
+            || prev_content_line(src, region_start, pos).is_some_and(ends_with_ampersand);
+        if continues {
+            comment_run_start = None;
+            pos = end;
+            continue;
+        }
+        return comment_run_start.unwrap_or(pos);
     }
     region_end
 }

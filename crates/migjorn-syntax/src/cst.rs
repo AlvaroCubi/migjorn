@@ -371,6 +371,63 @@ mod tests {
     }
 
     #[test]
+    fn leading_comment_is_absorbed_into_the_next_card_as_a_header() {
+        let src = "t\n\
+                   c cell 1 is the fuel\n\
+                   C it matters\n\
+                   1 1 -1.0 -1 imp:n=1 $ fuel sphere\n\
+                   \n\
+                   1 SO 5\n\
+                   \n\
+                   m1 1001.31c 1\n";
+        let cst = Cst::parse(src);
+        assert_eq!(cst.to_source(), src);
+        let kinds: Vec<CardKind> = cst.cards().map(Card::kind).collect();
+        // No standalone Comment card: the two header lines and the trailing
+        // `$` note both live inside the one Cell card's text.
+        assert_eq!(
+            kinds,
+            vec![
+                CardKind::Title,
+                CardKind::Cell,
+                CardKind::Blank,
+                CardKind::Surface,
+                CardKind::Blank,
+                CardKind::Data,
+            ]
+        );
+        let cell = cst.at(1).unwrap();
+        assert!(cell.text().starts_with("c cell 1 is the fuel\nC it matters\n1 "));
+        assert!(cell.text().ends_with("$ fuel sphere\n"));
+    }
+
+    #[test]
+    fn comment_before_a_blank_line_stays_standalone() {
+        let src = "t\n\
+                   1 1 -1.0 -1 imp:n=1\n\
+                   c trailing note, nothing follows it in this block\n\
+                   \n\
+                   1 SO 5\n\
+                   \n\
+                   m1 1001.31c 1\n";
+        let cst = Cst::parse(src);
+        assert_eq!(cst.to_source(), src);
+        let kinds: Vec<CardKind> = cst.cards().map(Card::kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                CardKind::Title,
+                CardKind::Cell,
+                CardKind::Comment,
+                CardKind::Blank,
+                CardKind::Surface,
+                CardKind::Blank,
+                CardKind::Data,
+            ]
+        );
+    }
+
+    #[test]
     fn slots_survive_edits_to_other_cards() {
         let mut cst = Cst::parse(SRC);
         let second_cell = cst.at(2).unwrap().slot();

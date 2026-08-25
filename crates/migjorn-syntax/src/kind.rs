@@ -20,7 +20,6 @@ pub enum SyntaxKind {
     Colon,
     Eq,
     Star,
-    Plus,
     Hash,
     LParen,
     RParen,

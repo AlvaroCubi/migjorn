@@ -34,7 +34,7 @@ all in interactive time.
    gotchas.
 4. [`04-performance-budget.md`](04-performance-budget.md) — the targets, how to
    measure, the measured real-model results, and the one known limitation
-   (renumber on continuation-heavy models).
+   (parse running 5-8% over budget on high-core-count machines).
 5. [`05-parallelism-overhead.md`](05-parallelism-overhead.md) — why more
    threads can make a multi-model workload slower (kernel time, not compute),
    root-caused via profiling `gitronics`, and the required fixes.
@@ -73,9 +73,9 @@ auto-held to the losslessness invariant with no extra code.
 The whole edit/emit/lookup surface meets its budget on the real 377 MB model with
 wide margin (see [`04-performance-budget.md`](04-performance-budget.md)). Bench it
 with `cargo run --release -p migjorn --example bench -- <input.mcnp>`
-(`benches/gen_input.py` produces a reproducible large stand-in). The only rows
-over budget are `renumber_cells`/`renumber_surfaces` on continuation-heavy
-models; the cause and the deferred fix are documented in `04`.
+(`benches/gen_input.py` produces a reproducible large stand-in). The only row
+over budget is raw `parse`, by 5-8% on high-core-count machines; the details
+are in `04`.
 
 ## Status
 

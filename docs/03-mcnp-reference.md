@@ -116,8 +116,14 @@ factor       := '#' '(' union ')'                       # complement of a region
   `trcl=`, and single-number `fill= u (n)` groups.
 - **`Fn` tallies** and companions (`FCn FMn FSn En Tn Cn SDn DEn DFn …`): the
   trailing digits are the tally number; the last digit gives the type
-  (`1,2`→surface bins; `4,6,7,8`→cell bins; `5`→point detector). Renumber
-  tallies rewrites the ids; renumber cells/surfaces rewrites the **bins**.
+  (`1,2`→surface bins; `4,6,7,8`→cell bins; `5`→point detector).
+  `Model::renumber_tallies` rewrites the tally cards' own ids. It does
+  **not** currently rewrite the cell/surface numbers used as tally *bins*
+  (e.g. the `1 2 3` in `f4:n 1 2 3`) — `renumber_cells`/`renumber_surfaces`
+  only touch cell and surface cards, not `Data` cards. A cell/surface
+  renumber on a model with tallies can leave a bin pointing at a
+  since-renumbered id; `validate()` does not check for this either. Fixing
+  this is tracked as future work, not a current guarantee.
 
 Everything else (`sdef`, `mode`, `nps`, `kcode`, `si/sp/sb`, `print`, `rand`,
 `fmesh`, …) is lexed and round-tripped generically and scanned generically by

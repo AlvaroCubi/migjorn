@@ -197,6 +197,11 @@ class Model:
         universe's own cells), a ``LIKE n BUT`` base, or a ``#n`` complement.
         Ids that don't name an existing cell are silently ignored."""
 
+    def clear_data_cards(self) -> Model:
+        """A copy of this model with its title, cells and surfaces kept and its
+        data block dropped — e.g. before folding in a component's own
+        materials/transforms that should not leak into a merge."""
+
     def merge(self, others: list[Model]) -> None:
         """Fold the cells, surfaces and data cards of ``others`` into this model.
         Raises :class:`MergeError` (without changing anything) if any cell /

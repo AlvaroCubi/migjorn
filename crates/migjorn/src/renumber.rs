@@ -282,10 +282,15 @@ impl Model {
     }
 
     /// Renumber tallies: the trailing id of every tally-family card (`Fn`, `FCn`,
-    /// `FMn`, `En`, `Tn`, `Cn`, `SDn`, ...). Cell/surface *bins* inside those
-    /// cards move with [`Model::renumber_cells`] / [`Model::renumber_surfaces`],
-    /// not here. Only cards whose number is actually remapped are touched, so the
-    /// generous mnemonic set cannot disturb an unrelated card.
+    /// `FMn`, `En`, `Tn`, `Cn`, `SDn`, ...). Only cards whose number is actually
+    /// remapped are touched, so the generous mnemonic set cannot disturb an
+    /// unrelated card.
+    ///
+    /// This does **not** touch the cell/surface *bins* inside those cards (e.g.
+    /// the `1 2 3` in `f4:n 1 2 3`) — [`Model::renumber_cells`] /
+    /// [`Model::renumber_surfaces`] only scan `Cell`/`Surface` cards, not
+    /// `Data` cards, so a bin referencing a renumbered cell or surface is left
+    /// dangling. See `docs/03-mcnp-reference.md`.
     pub fn renumber_tallies<F: Fn(i64) -> i64 + Sync>(&mut self, map: F) {
         const TALLY: &[&str] = &[
             "f", "fc", "fm", "fs", "fq", "fu", "ft", "fic", "fip", "fir", "e", "t", "c", "sd",

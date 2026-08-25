@@ -56,9 +56,14 @@ the new design makes it structural — the card list *is* the state.)
 Renumbering is a whole-model operation: renumbering surfaces rewrites every
 surface card's id **and** every signed surface in cell geometry (sense and
 `+`/white prefixes preserved); renumbering cells rewrites ids **and** every `#n`
-complement, `LIKE n` base, and cell-tally bin. The same holds for materials,
-transforms, universes, and tallies. A renumber that updates definitions but
-misses a reference is a correctness bug, not a cosmetic one.
+complement and `LIKE n` base. The same holds for materials, transforms and
+universes. A renumber that updates definitions but misses a reference is a
+correctness bug, not a cosmetic one.
+
+Tallies are the one family where this does not (yet) extend to references:
+`renumber_tallies` moves each tally card's own id, but a cell/surface number
+used as a tally *bin* (`f4:n 1 2 3`) is not currently rewritten by
+`renumber_cells`/`renumber_surfaces`. See `03-mcnp-reference.md`.
 
 ## Non-goals
 
@@ -79,5 +84,6 @@ misses a reference is a correctness bug, not a cosmetic one.
 - Every editing-semantics test passes (`test_editing.py`).
 - The performance budget in `04-performance-budget.md` is met on a large input
   (`benches/`).
-- The Python API matches `api/migjorn.pyi` and the worked session in
-  `api/session_example.py` runs in interactive time.
+- The Python API matches `crates/migjorn-py/migjorn.pyi` and the worked
+  session in `crates/migjorn-py/examples/showcase.py` runs in interactive
+  time.

@@ -74,7 +74,9 @@ consumer (`gitronics`), not an edge case.
 
 ## Required improvements
 
-Ranked by expected impact on the profiled workload:
+Ranked by expected impact on the profiled workload. **Status: 1-5 have since
+shipped**, except the "better" half of (1) (a bounded/caller-supplied pool);
+see the note after each item.
 
 1. **Stop sizing internal parallelism off raw `num_cpus`.** `build_indices`'
    chunk count (`current_num_threads() * 4`) assumes it owns the whole pool;
@@ -87,6 +89,11 @@ Ranked by expected impact on the profiled workload:
    internal parallel steps against a bounded/caller-supplied pool instead of
    always reaching for the global one, so a multi-model caller doesn't have
    to reason about this at all.
+
+   **Documented** (see `crates/migjorn/src/lib.rs`'s crate-level doc comment,
+   which tells a file-level-parallel caller to cap the global pool). The
+   "better" bounded/caller-supplied-pool API is still not built — the
+   documented workaround is the only fix so far.
 2. **Threshold-gate `build_indices`' inner parallelism.** Below some card
    count (needs a measurement to pick, but the 172 fillers here — a few
    hundred to tens of thousands of cards each — all fall on the wrong side of
@@ -95,6 +102,10 @@ Ranked by expected impact on the profiled workload:
    already-parallel outer loop. Keep the parallel path for the one case it
    clearly wins: a single very large file with no outer parallelism
    competing for the pool (the `bench.rs` scenario in `04`).
+
+   **Implemented**: `Model::build_indices` (`model.rs`) gates its
+   `par_chunks` fan-out behind `PARALLEL_INDEX_THRESHOLD` (100,000 cards),
+   scanning sequentially below it.
 3. **Parallelize `validate()`.** It's the single largest stage in this
    workload (3.68 s, ~34% of wall time) and is plain sequential over
    `self.cells()` / `self.surfaces()` today, despite being read-only and
@@ -104,10 +115,16 @@ Ranked by expected impact on the profiled workload:
    and (2), this runs once, after all the small nested dispatches are done,
    on the one genuinely large object (the fully-composed model) — a case
    where full-width parallelism is actually the right call.
+
+   **Implemented**: `compose.rs`'s `validate_chunked` does exactly this
+   chunk/flatten shape, gated by `PARALLEL_VALIDATE_THRESHOLD`.
 4. **`merge()`'s `by_kind` collection is sequential** card-by-card
    `.to_owned()` cloning across every incoming model (1.86 s here, second
    largest stage). Worth parallelizing the per-model text collection given
    it's the same order of magnitude as `validate()` in this workload.
+
+   **Implemented**: `Model::merge` (`compose.rs`) collects each incoming
+   model's cards via `into_par_iter` above `PARALLEL_MERGE_THRESHOLD`.
 5. **`clear_data_cards()` forces a full source-text round trip and
    re-parse** (re-lex + a fresh `build_indices`) to drop one block from an
    already-parsed model. `compose.rs` justifies going through `parse` for
@@ -119,6 +136,10 @@ Ranked by expected impact on the profiled workload:
    `CardKind` block); doing it via the existing `Cst` removal primitives
    (the same kind used by `remove_cell_param`) instead of text + reparse
    would skip both the re-lex and the redundant index rebuild.
+
+   **Implemented**: `Model::clear_data_cards` now clones the kept `Card`s
+   directly and builds the result via `Cst::from_cards`, paying only an
+   index scan — no text round-trip, no re-lex.
 
 ## How to verify a fix
 

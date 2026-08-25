@@ -1692,7 +1692,9 @@ mod tests {
         assert!(m.remove_surface(1));
         let slot = m.add_surface("2 PX 3").unwrap();
         assert!(m.surface_at(slot).is_some());
-        assert!(m.to_source().contains("2 0 1 imp:n=0\n\n2 PX 3\n\nm1 1001 1"));
+        assert!(m
+            .to_source()
+            .contains("2 0 1 imp:n=0\n\n2 PX 3\n\nm1 1001 1"));
     }
 
     #[test]

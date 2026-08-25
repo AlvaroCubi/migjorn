@@ -397,7 +397,6 @@ class Surface:
 
     @white.setter
     def white(self, value: bool) -> None: ...
-
     @property
     def well_formed(self) -> bool:
         """Whether the card parsed as a structurally complete surface."""

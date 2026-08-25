@@ -795,8 +795,52 @@ impl Model {
     }
 
     fn add_card(&mut self, kind: CardKind, text: &str) -> Result<u32, EditError> {
-        let at = self.cst.end_of_block(kind).ok_or(EditError::NoBlock)?;
+        let at = self
+            .cst
+            .end_of_block(kind)
+            .or_else(|| self.empty_block_insert_pos(kind))
+            .ok_or(EditError::NoBlock)?;
         Ok(self.insert_card(kind, at, text))
+    }
+
+    /// Position right after the title (and any leading `MESSAGE:` block) —
+    /// where the cell block begins, empty or not.
+    fn content_start_pos(&self) -> usize {
+        let mut i = self.title_insert_pos();
+        if self.cst.at(i).map(|c| c.kind()) == Some(CardKind::Title) {
+            i += 1;
+        }
+        i
+    }
+
+    /// Where a new card of `kind` belongs when its block is currently empty —
+    /// `end_of_block` can't find this, since it locates a block by its last
+    /// existing card and an empty block has none.
+    ///
+    /// `remove_data_card`/`remove_cell`/`remove_surface` (like every removal
+    /// in this module) only ever delete the one card asked for — they never
+    /// touch the `Blank` cards that delimit the cell/surface/data blocks, so
+    /// those delimiters are still there even once a block's last card is
+    /// gone. This walks past exactly the number of delimiters that precede
+    /// `kind` (cell has none before it, surface has one — cell|surface — data
+    /// has two — cell|surface and surface|data), landing right in the gap
+    /// where that now-empty block's content used to live.
+    fn empty_block_insert_pos(&self, kind: CardKind) -> Option<usize> {
+        let blanks_before = match kind {
+            CardKind::Cell => 0,
+            CardKind::Surface => 1,
+            CardKind::Data => 2,
+            _ => return None,
+        };
+        let mut pos = self.content_start_pos();
+        let mut seen = 0;
+        while seen < blanks_before {
+            if self.cst.at(pos)?.kind() == CardKind::Blank {
+                seen += 1;
+            }
+            pos += 1;
+        }
+        Some(pos)
     }
 
     /// Add a cell at the end of the cell block. Its id is indexed immediately, so
@@ -1618,6 +1662,37 @@ mod tests {
         let slot = m.add_data_card("sdef pos=0 0 0").unwrap();
         assert_eq!(m.data_card_at(slot).unwrap().name(), Some("sdef"));
         assert!(m.to_source().contains("sdef pos=0 0 0"));
+    }
+
+    #[test]
+    fn add_data_card_after_removing_every_data_card() {
+        let mut m = Model::parse(SRC);
+        let slots: Vec<u32> = m.data_cards().map(|c| c.slot()).collect();
+        for slot in slots {
+            assert!(m.remove_data_card(slot));
+        }
+        let slot = m.add_data_card("sdef pos=0 0 0").unwrap();
+        assert_eq!(m.data_card_at(slot).unwrap().name(), Some("sdef"));
+        assert!(m.to_source().ends_with("1 SO 5\n\nsdef pos=0 0 0\n"));
+    }
+
+    #[test]
+    fn add_cell_after_removing_every_cell() {
+        let mut m = Model::parse(SRC);
+        assert!(m.remove_cell(1));
+        assert!(m.remove_cell(2));
+        let slot = m.add_cell("3 0 -1 imp:n=1").unwrap();
+        assert!(m.cell_at(slot).is_some());
+        assert!(m.to_source().starts_with("t\n3 0 -1 imp:n=1\n\n1 SO 5"));
+    }
+
+    #[test]
+    fn add_surface_after_removing_every_surface() {
+        let mut m = Model::parse(SRC);
+        assert!(m.remove_surface(1));
+        let slot = m.add_surface("2 PX 3").unwrap();
+        assert!(m.surface_at(slot).is_some());
+        assert!(m.to_source().contains("2 0 1 imp:n=0\n\n2 PX 3\n\nm1 1001 1"));
     }
 
     #[test]

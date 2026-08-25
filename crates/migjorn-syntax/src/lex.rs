@@ -57,6 +57,10 @@ pub fn lex(text: &str, kind: CardKind) -> Vec<Token> {
     let src = text.as_bytes();
     let mut tokens = Vec::new();
     let mut line_start = 0;
+    // Whether we've reached the card's own first line yet: a leading `c ...`
+    // line may be absorbed ahead of it, so that first line isn't always at
+    // offset 0.
+    let mut seen_content_line = false;
 
     while line_start < src.len() {
         let end = line_end(src, line_start);
@@ -72,11 +76,58 @@ pub fn lex(text: &str, kind: CardKind) -> Vec<Token> {
             continue;
         }
 
+        // `FCn` / `SCn` (tally comment / source comment) cards are one line:
+        // the mnemonic, then a free-text label for the rest of the line. MCNP
+        // places no syntax on that label, so — like a `c ...` line — it gets
+        // one opaque token instead of being run through the word lexer, which
+        // would otherwise flag ordinary punctuation (`[#/cm^2/s]`) as unrecognized.
+        if !seen_content_line && kind == CardKind::Data {
+            if let Some(mnemonic_len) = free_text_mnemonic_len(line) {
+                tokens.push(Token::new(SyntaxKind::Ident, line_start, mnemonic_len));
+                let mut i = line_start + mnemonic_len;
+                while i < end && matches!(src[i], b' ' | b'\t') {
+                    i += 1;
+                }
+                let body_len = strip_eol(&src[i..end]).len();
+                if body_len > 0 {
+                    tokens.push(Token::new(SyntaxKind::Comment, i, body_len));
+                }
+                line_start = end;
+                seen_content_line = true;
+                continue;
+            }
+        }
+
         lex_line(src, line_start, end, &mut tokens);
         line_start = end;
+        seen_content_line = true;
     }
 
     tokens
+}
+
+/// Length of a leading `FCn` / `SCn` mnemonic word at the start of `line`, if
+/// the line begins with one; see [`is_free_text_mnemonic`].
+fn free_text_mnemonic_len(line: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i < line.len() && !is_delimiter(line[i]) {
+        i += 1;
+    }
+    is_free_text_mnemonic(&line[..i]).then_some(i)
+}
+
+/// Whether `word` is an `FCn` / `SCn` tally/source comment mnemonic: `FC` or
+/// `SC` (any case) followed by one or more digits.
+fn is_free_text_mnemonic(word: &[u8]) -> bool {
+    match word.get(0..2) {
+        Some(prefix)
+            if prefix.eq_ignore_ascii_case(b"fc") || prefix.eq_ignore_ascii_case(b"sc") =>
+        {
+            let rest = &word[2..];
+            !rest.is_empty() && rest.iter().all(u8::is_ascii_digit)
+        }
+        _ => false,
+    }
 }
 
 fn lex_line(src: &[u8], from: usize, to: usize, tokens: &mut Vec<Token>) {
@@ -129,7 +180,11 @@ mod tests {
     use super::*;
 
     fn kinds(text: &str) -> Vec<(SyntaxKind, &str)> {
-        lex(text, CardKind::Cell)
+        kinds_of(text, CardKind::Cell)
+    }
+
+    fn kinds_of(text: &str, kind: CardKind) -> Vec<(SyntaxKind, &str)> {
+        lex(text, kind)
             .into_iter()
             .map(|t| (t.kind, &text[t.range()]))
             .collect()
@@ -221,6 +276,69 @@ mod tests {
         use SyntaxKind::*;
         assert_eq!(kinds("2 0 1 -\n").last(), Some(&(Unknown, "-")));
         assert!(kinds("m1 1001 zzz\n").contains(&(Ident, "zzz")));
+    }
+
+    #[test]
+    fn fc_and_sc_cards_treat_the_label_as_free_text() {
+        use SyntaxKind::*;
+        assert_eq!(
+            kinds_of(
+                "FC202 Neutron flux per energy bin [#/cm^2/s]\n",
+                CardKind::Data
+            ),
+            vec![
+                (Ident, "FC202"),
+                (Comment, "Neutron flux per energy bin [#/cm^2/s]"),
+            ]
+        );
+        assert_eq!(
+            kinds_of("sc1 a source comment: 50% [x]\n", CardKind::Data),
+            vec![(Ident, "sc1"), (Comment, "a source comment: 50% [x]")]
+        );
+        // A bare mnemonic with no label still lexes cleanly.
+        assert_eq!(kinds_of("FC14\n", CardKind::Data), vec![(Ident, "FC14")]);
+        // `FCL` isn't `FC` + digits, so it lexes normally.
+        assert_eq!(
+            kinds_of("FCL124 0 0 0 1\n", CardKind::Data),
+            vec![
+                (Ident, "FCL124"),
+                (Number, "0"),
+                (Number, "0"),
+                (Number, "0"),
+                (Number, "1"),
+            ]
+        );
+        // Only applies to Data cards — a coincidental match elsewhere lexes normally.
+        assert_eq!(
+            kinds_of(
+                "FC202 Neutron flux per energy bin [#/cm^2/s]\n",
+                CardKind::Cell
+            ),
+            vec![
+                (Ident, "FC202"),
+                (Ident, "Neutron"),
+                (Ident, "flux"),
+                (Ident, "per"),
+                (Ident, "energy"),
+                (Ident, "bin"),
+                (Unknown, "["),
+                (Hash, "#"),
+                (Unknown, "/cm^2/s]"),
+            ]
+        );
+        // A `c ...` line absorbed ahead of the card pushes the mnemonic past
+        // offset 0; the free-text treatment still has to apply to it.
+        assert_eq!(
+            kinds_of(
+                "c planes identify front, end\nFC202 flux [#/cm^2/s]\n",
+                CardKind::Data
+            ),
+            vec![
+                (Comment, "c planes identify front, end"),
+                (Ident, "FC202"),
+                (Comment, "flux [#/cm^2/s]"),
+            ]
+        );
     }
 
     #[test]

@@ -364,6 +364,71 @@ impl Model {
         Ok(())
     }
 
+    /// Set (or clear) a surface's leading `*` reflective-boundary marker.
+    /// Setting `true` also clears any `+` white-boundary marker on the id —
+    /// the two are mutually exclusive in MCNP; setting `false` only removes
+    /// the `*` and leaves the id (and any white marker) untouched.
+    pub fn set_surface_reflective(&mut self, slot: u32, value: bool) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Surface {
+            return Err(EditError::WrongKind);
+        }
+        let l = surface::layout(card);
+        let id_tok = l.id_tok.ok_or(EditError::NoSuchField)?;
+        let toks = card.tokens();
+        let id_end = toks[id_tok].end() as usize;
+        let id_text = card.token_text(id_tok).to_owned();
+        let from = l
+            .star_tok
+            .map(|t| toks[t].start as usize)
+            .unwrap_or(toks[id_tok].start as usize);
+
+        let replacement = if value {
+            let digits = id_text.strip_prefix('+').unwrap_or(&id_text);
+            format!("*{digits}")
+        } else {
+            id_text
+        };
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .splice(from..id_end, &replacement);
+        Ok(())
+    }
+
+    /// Set (or clear) a surface's leading `+` white-boundary marker (it lives
+    /// inside the id token itself). Setting `true` also clears any `*`
+    /// reflective marker — the two are mutually exclusive in MCNP; setting
+    /// `false` only removes the `+` and leaves any `*` marker untouched.
+    pub fn set_surface_white(&mut self, slot: u32, value: bool) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Surface {
+            return Err(EditError::WrongKind);
+        }
+        let l = surface::layout(card);
+        let id_tok = l.id_tok.ok_or(EditError::NoSuchField)?;
+        let toks = card.tokens();
+        let id_start = toks[id_tok].start as usize;
+        let id_end = toks[id_tok].end() as usize;
+        let id_text = card.token_text(id_tok).to_owned();
+        let digits = id_text.strip_prefix('+').unwrap_or(&id_text).to_owned();
+
+        let (from, replacement) = if value {
+            let from = l
+                .star_tok
+                .map(|t| toks[t].start as usize)
+                .unwrap_or(id_start);
+            (from, format!("+{digits}"))
+        } else {
+            (id_start, digits)
+        };
+        self.cst
+            .card_mut(slot)
+            .unwrap()
+            .splice(from..id_end, &replacement);
+        Ok(())
+    }
+
     /// Replace one coefficient of a surface, addressed by position.
     pub fn set_surface_coeff(
         &mut self,
@@ -998,6 +1063,50 @@ mod tests {
         m.set_surface_transform(s, None).unwrap();
         assert_eq!(m.surface(1).unwrap().transform(), None);
         assert!(m.to_source().contains("1 SO 5"));
+    }
+
+    #[test]
+    fn set_surface_reflective_inserts_and_removes_the_star() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = m.surface(1).unwrap().slot();
+        m.set_surface_reflective(s, true).unwrap();
+        assert!(m.surface(1).unwrap().reflective());
+        assert!(m.to_source().contains("*1 SO 5"));
+        m.set_surface_reflective(s, false).unwrap();
+        assert!(!m.surface(1).unwrap().reflective());
+        assert!(m.to_source().contains("\n1 SO 5"));
+    }
+
+    #[test]
+    fn set_surface_reflective_clears_a_white_marker() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n+1 SO 5\n\nm1 1001 1\n");
+        let s = m.surface(1).unwrap().slot();
+        m.set_surface_reflective(s, true).unwrap();
+        assert!(m.surface(1).unwrap().reflective());
+        assert!(!m.surface(1).unwrap().white());
+        assert!(m.to_source().contains("*1 SO 5"));
+    }
+
+    #[test]
+    fn set_surface_white_inserts_and_removes_the_prefix() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let s = m.surface(1).unwrap().slot();
+        m.set_surface_white(s, true).unwrap();
+        assert!(m.surface(1).unwrap().white());
+        assert!(m.to_source().contains("+1 SO 5"));
+        m.set_surface_white(s, false).unwrap();
+        assert!(!m.surface(1).unwrap().white());
+        assert!(m.to_source().contains("\n1 SO 5"));
+    }
+
+    #[test]
+    fn set_surface_white_clears_a_reflective_marker() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n*1 SO 5\n\nm1 1001 1\n");
+        let s = m.surface(1).unwrap().slot();
+        m.set_surface_white(s, true).unwrap();
+        assert!(m.surface(1).unwrap().white());
+        assert!(!m.surface(1).unwrap().reflective());
+        assert!(m.to_source().contains("+1 SO 5"));
     }
 
     #[test]

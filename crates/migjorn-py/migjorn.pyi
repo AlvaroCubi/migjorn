@@ -381,11 +381,22 @@ class Surface:
     def transform(self, value: int | None) -> None: ...
     @property
     def reflective(self) -> bool:
-        """Whether the surface has a leading ``*`` (reflective boundary)."""
+        """Whether the surface has a leading ``*`` (reflective boundary).
+        Assigning ``True`` also clears a ``+`` white marker, if present — the
+        two are mutually exclusive in MCNP; assigning ``False`` only removes
+        the ``*``."""
 
+    @reflective.setter
+    def reflective(self, value: bool) -> None: ...
     @property
     def white(self) -> bool:
-        """Whether the surface has a leading ``+`` (white boundary)."""
+        """Whether the surface has a leading ``+`` (white boundary).
+        Assigning ``True`` also clears a ``*`` reflective marker, if present —
+        the two are mutually exclusive in MCNP; assigning ``False`` only
+        removes the ``+``."""
+
+    @white.setter
+    def white(self, value: bool) -> None: ...
 
     @property
     def well_formed(self) -> bool:

@@ -10,6 +10,8 @@ pub(crate) struct SurfaceLayout {
     pub id_tok: Option<usize>,
     /// Leading `*`: a reflective boundary.
     pub reflective: bool,
+    /// Token index of the leading `*`, when present.
+    pub star_tok: Option<usize>,
     /// Leading `+`: a white boundary. The `+` lives inside the id token, so
     /// renumbering must rewrite the token including its prefix.
     pub white: bool,
@@ -29,6 +31,7 @@ pub(crate) fn layout(card: &Card) -> SurfaceLayout {
         id: None,
         id_tok: None,
         reflective: false,
+        star_tok: None,
         white: false,
         transform: None,
         transform_tok: None,
@@ -42,6 +45,7 @@ pub(crate) fn layout(card: &Card) -> SurfaceLayout {
     };
     if kind_at(card, i) == Some(SyntaxKind::Star) {
         out.reflective = true;
+        out.star_tok = Some(i);
         match next(card, i) {
             Some(j) => i = j,
             None => return out,

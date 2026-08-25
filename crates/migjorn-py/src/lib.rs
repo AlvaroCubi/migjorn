@@ -756,6 +756,13 @@ impl Surface {
             .ok_or_else(removed)?
             .reflective())
     }
+    #[setter]
+    fn set_reflective(&self, value: bool) -> PyResult<()> {
+        self.inner
+            .borrow_mut()
+            .set_surface_reflective(self.slot, value)
+            .map_err(edit_err)
+    }
     #[getter]
     fn white(&self) -> PyResult<bool> {
         Ok(self
@@ -764,6 +771,13 @@ impl Surface {
             .surface_at(self.slot)
             .ok_or_else(removed)?
             .white())
+    }
+    #[setter]
+    fn set_white(&self, value: bool) -> PyResult<()> {
+        self.inner
+            .borrow_mut()
+            .set_surface_white(self.slot, value)
+            .map_err(edit_err)
     }
     #[getter]
     fn well_formed(&self) -> PyResult<bool> {

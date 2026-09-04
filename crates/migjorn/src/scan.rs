@@ -25,6 +25,19 @@ pub(crate) fn next(card: &Card, i: usize) -> Option<usize> {
     sig(card, i + 1)
 }
 
+/// Index of the previous non-trivia token strictly before `i`.
+pub(crate) fn prev(card: &Card, i: usize) -> Option<usize> {
+    let tokens = card.tokens();
+    let mut j = i;
+    while j > 0 {
+        j -= 1;
+        if !tokens[j].is_trivia() {
+            return Some(j);
+        }
+    }
+    None
+}
+
 #[inline]
 pub(crate) fn kind_at(card: &Card, i: usize) -> Option<SyntaxKind> {
     card.tokens().get(i).map(|t| t.kind)

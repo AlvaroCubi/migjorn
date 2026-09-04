@@ -162,7 +162,10 @@ impl Model {
 
     /// A copy of this model with its title, cells and surfaces kept and its data
     /// block dropped — e.g. before folding in a component's own materials/
-    /// transforms that should not leak into a merge.
+    /// transforms that should not leak into a merge. A standalone `Comment`
+    /// card sitting in the cell or surface block (e.g. component provenance
+    /// notes) is kept too, in place; only comments that fall in the dropped
+    /// data block are lost.
     ///
     /// Built by cloning the kept `Card`s directly, not by re-emitting to text
     /// and reparsing: a clone reuses each card's tokens as-is, so this pays no
@@ -172,28 +175,48 @@ impl Model {
     /// card's text a second time; see `docs/05-parallelism-overhead.md`.
     pub fn clear_data_cards(&self) -> Model {
         let eol = self.cst.eol();
+        let all: Vec<&Card> = self.cst.cards().collect();
 
         let mut cards: Vec<Card> = Vec::new();
-        match self.cst.cards().find(|c| c.kind() == CardKind::Title) {
-            Some(title) => cards.push(title.clone()),
+        match all.iter().find(|c| c.kind() == CardKind::Title) {
+            Some(title) => cards.push((*title).clone()),
             None => cards.push(Cst::new_card(
                 CardKind::Title,
                 format!("cleared{}", eol.as_str()),
             )),
         }
+
+        // The cell and surface blocks are each a blank-line-free run bounded
+        // by a Blank card, so everything up to the first Blank is the cell
+        // block and everything between the first and second Blank is the
+        // surface block — a standalone Comment card included, wherever it
+        // falls in that run.
+        let mut blanks = all
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.kind() == CardKind::Blank)
+            .map(|(i, _)| i);
+        let first_blank = blanks.next();
+        let second_blank = blanks.next();
+
+        let cell_end = first_blank.unwrap_or(all.len());
         cards.extend(
-            self.cst
-                .cards()
-                .filter(|c| c.kind() == CardKind::Cell)
-                .cloned(),
+            all[..cell_end]
+                .iter()
+                .filter(|c| matches!(c.kind(), CardKind::Cell | CardKind::Comment))
+                .map(|c| (*c).clone()),
         );
         cards.push(Cst::new_card(CardKind::Blank, eol.as_str().to_owned())); // delimiter: cells | surfaces
-        cards.extend(
-            self.cst
-                .cards()
-                .filter(|c| c.kind() == CardKind::Surface)
-                .cloned(),
-        );
+
+        if let Some(fb) = first_blank {
+            let surf_end = second_blank.unwrap_or(all.len());
+            cards.extend(
+                all[fb + 1..surf_end]
+                    .iter()
+                    .filter(|c| matches!(c.kind(), CardKind::Surface | CardKind::Comment))
+                    .map(|c| (*c).clone()),
+            );
+        }
         cards.push(Cst::new_card(CardKind::Blank, eol.as_str().to_owned())); // delimiter: surfaces | (empty) data
 
         Model::from_cst(Cst::from_cards(cards, eol))
@@ -265,7 +288,8 @@ impl Model {
 
     // --- merge --------------------------------------------------------------
 
-    /// Fold other models' cells, surfaces and data cards into this one.
+    /// Fold other models' cells, surfaces and data cards into this one. A
+    /// standalone `Comment` card trailing one of those blocks travels with it.
     ///
     /// Fails (mutating nothing) if any cell / surface / material / transform id is
     /// shared across the models being combined — renumber the colliding family
@@ -301,12 +325,24 @@ impl Model {
         let mut by_kind: FxHashMap<CardKind, Vec<Card>> = FxHashMap::default();
         let collect_one = |other: Model| -> FxHashMap<CardKind, Vec<Card>> {
             let mut local: FxHashMap<CardKind, Vec<Card>> = FxHashMap::default();
+            // A standalone Comment card only ever trails the block it sits in
+            // (segmentation absorbs any other comment into a card's header or
+            // body), so it travels with whichever content kind was last seen —
+            // landing in the same bucket, right after that block's cards, and
+            // absorbed at the same position.
+            let mut current_block: Option<CardKind> = None;
             for card in other.cst.into_cards() {
-                if matches!(
-                    card.kind(),
-                    CardKind::Cell | CardKind::Surface | CardKind::Data
-                ) {
-                    local.entry(card.kind()).or_default().push(card);
+                match card.kind() {
+                    CardKind::Cell | CardKind::Surface | CardKind::Data => {
+                        current_block = Some(card.kind());
+                        local.entry(card.kind()).or_default().push(card);
+                    }
+                    CardKind::Comment => {
+                        if let Some(kind) = current_block {
+                            local.entry(kind).or_default().push(card);
+                        }
+                    }
+                    _ => {}
                 }
             }
             local
@@ -344,7 +380,7 @@ impl Model {
         let slots = self.cst.insert_many_at(at, cards);
         for slot in slots {
             let card = self.cst.card(slot).unwrap();
-            match kind {
+            match card.kind() {
                 CardKind::Cell => {
                     if let Some(id) = cell::layout(card).id {
                         self.cell_index.entry(id).or_insert(slot);
@@ -484,6 +520,28 @@ mod tests {
         cleared.merge(vec![data_only]).unwrap();
         assert!(cleared.material(1).is_some());
         assert!(cleared.to_source().contains("2 SO 6\n\nm1 1001 1\n"));
+    }
+
+    #[test]
+    fn clear_data_cards_keeps_trailing_block_comments() {
+        let src = "t\n1 0 -1 imp:n=1\nc TRAILING CELL NOTE\n\n\
+                   1 SO 10\nc TRAILING SURFACE NOTE\n\nM1 1001 1\n";
+        let m = Model::parse(src);
+        assert_eq!(m.to_source(), src);
+
+        let cleared = m.clear_data_cards();
+        assert!(cleared.to_source().contains("TRAILING CELL NOTE"));
+        assert!(cleared.to_source().contains("TRAILING SURFACE NOTE"));
+    }
+
+    #[test]
+    fn merged_component_comments_survive() {
+        let filler =
+            Model::parse("f\n100 0 -100 imp:n=1 u=1\nc FILLER NOTE\n\n100 SO 3\n\nM2 1001 1\n");
+        let mut host =
+            Model::parse("h\n1 0 -1 imp:n=1\n\n1 SO 10\n\nM1 1001 1\n").clear_data_cards();
+        host.merge(vec![filler.clear_data_cards()]).unwrap();
+        assert!(host.to_source().contains("FILLER NOTE"));
     }
 
     #[test]

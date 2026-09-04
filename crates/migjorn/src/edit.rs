@@ -18,7 +18,7 @@ use migjorn_syntax::{CardKind, Cst};
 use crate::data;
 use crate::model::Model;
 use crate::renumber::{remap_name, remap_token};
-use crate::scan::sig;
+use crate::scan::{prev, sig};
 use crate::{cell, surface};
 
 /// Why an edit could not be applied. Reads never fail (they project a best-effort
@@ -712,8 +712,9 @@ impl Model {
     }
 
     /// Remove a cell's keyword parameter by qualified key. Returns `false` if the
-    /// cell has no such parameter. Drops the keyword, its value, and one leading
-    /// separator space.
+    /// cell has no such parameter. Drops the keyword, its value, one leading
+    /// separator space, and — for a starred parameter (`*fill=`, `*trcl=`) — the
+    /// leading `*` too.
     pub fn remove_cell_param(&mut self, slot: u32, key: &str) -> Result<bool, EditError> {
         let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
         if card.kind() != CardKind::Cell {
@@ -728,7 +729,12 @@ impl Model {
             return Ok(false);
         };
         let toks = card.tokens();
-        let mut start = toks[p.key_token].start as usize;
+        let mut start = if p.starred {
+            prev(card, p.key_token)
+                .map_or(toks[p.key_token].start as usize, |i| toks[i].start as usize)
+        } else {
+            toks[p.key_token].start as usize
+        };
         let end = if p.value_tokens.end > p.value_tokens.start {
             toks[p.value_tokens.end - 1].end() as usize
         } else {
@@ -1507,6 +1513,20 @@ mod tests {
         assert!(out.contains("1 0 -1 imp:n=1 $ keep"), "{out}");
         assert!(!out.contains("vol=3"), "{out}");
         assert_eq!(m.remove_cell_param(s, "nope"), Ok(false));
+    }
+
+    #[test]
+    fn remove_starred_param_drops_the_star_too() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1 *fill=1 (0 0 5)\n\n1 SO 10\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        assert_eq!(m.remove_cell_param(s, "fill"), Ok(true));
+        assert_eq!(m.cell_at(s).unwrap().text().trim_end(), "1 0 -1 imp:n=1");
+
+        let mut m =
+            Model::parse("t\n1 0 -1 imp:n=1 *trcl=(0 0 5 90 0 90)\n\n1 SO 10\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        assert_eq!(m.remove_cell_param(s, "trcl"), Ok(true));
+        assert_eq!(m.cell_at(s).unwrap().text().trim_end(), "1 0 -1 imp:n=1");
     }
 
     #[test]

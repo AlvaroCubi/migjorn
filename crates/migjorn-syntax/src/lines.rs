@@ -186,6 +186,22 @@ pub(crate) fn find_card_start(
     } else {
         line_end(src, from).min(region_end)
     };
+    // `pos` may land inside a comment run, or on the card line right after
+    // one — both split the run from the card it belongs to, because the
+    // forward scan below only ever sees lines at or after `pos`. Back up
+    // over any contiguous comment lines immediately preceding `pos` first,
+    // so the forward scan starts from the run's true beginning and can
+    // correctly decide whether it is absorbed backward or forward.
+    while pos > region_start {
+        let prev_start = match memchr::memrchr(b'\n', &src[region_start..pos - 1]) {
+            Some(i) => region_start + i + 1,
+            None => region_start,
+        };
+        if !is_comment_line(&src[prev_start..pos]) {
+            break;
+        }
+        pos = prev_start;
+    }
     // Start of a not-yet-resolved comment run: a candidate boundary, unless the
     // next non-comment line turns out to continue whatever precedes it, in
     // which case the run is absorbed backward instead and is not a boundary.

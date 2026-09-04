@@ -128,3 +128,59 @@ fn parallel_and_sequential_segmentation_agree() {
         }
     }
 }
+
+/// Segmentation must not depend on how many threads rayon's pool happens to
+/// have: a comment run near a `PARALLEL_THRESHOLD`-sized block must be
+/// classified the same way (absorbed into the surrounding card, not orphaned
+/// as a standalone `Comment` card) regardless of chunk count.
+///
+/// Each candidate is parsed inside its own scoped `rayon::ThreadPool`, so the
+/// thread count is pinned in-process rather than relying on the
+/// `RAYON_NUM_THREADS` environment variable (which only takes effect for the
+/// process-global pool built on first use).
+#[test]
+fn segmentation_is_thread_count_independent() {
+    let mut cells = String::new();
+    for i in 1..=20_000usize {
+        if i % 10 == 0 {
+            cells.push_str("c ---------------------------------------------------------------\n");
+            cells.push_str(&format!("c  block header for cell {i}\n"));
+            cells.push_str("c ---------------------------------------------------------------\n");
+        }
+        cells.push_str(&format!(
+            "{i} 0 -1 imp:n=1 $ padding padding padding padding padding padding padding\n"
+        ));
+    }
+    let src = format!("synthetic model\n{cells}\n1 SO 10\n\nM1 1001 1\n");
+    assert!(
+        src.len() > (1 << 20),
+        "input must exceed the parallel threshold"
+    );
+
+    let baseline: Vec<(migjorn_syntax::CardKind, String)> = {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            Cst::parse(&src)
+                .cards()
+                .map(|c| (c.kind(), c.text().to_owned()))
+                .collect()
+        })
+    };
+
+    for n in [2, 4, 16, 64] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap();
+        let cards: Vec<(migjorn_syntax::CardKind, String)> = pool.install(|| {
+            Cst::parse(&src)
+                .cards()
+                .map(|c| (c.kind(), c.text().to_owned()))
+                .collect()
+        });
+        assert_eq!(cards, baseline, "segmentation differed at {n} threads");
+    }
+}

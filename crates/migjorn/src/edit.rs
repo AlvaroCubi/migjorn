@@ -13,8 +13,10 @@
 //! through), so a view can hand its `slot` to the model and the edit lands on the
 //! right card even after inserts/removes elsewhere.
 
-use migjorn_syntax::{CardKind, Cst};
+use migjorn_syntax::{Card, CardKind, Cst};
+use std::ops::Range;
 
+use crate::cell::Fill;
 use crate::data;
 use crate::model::Model;
 use crate::renumber::{remap_name, remap_token};
@@ -77,6 +79,26 @@ fn last_significant_end(card: &migjorn_syntax::Card) -> Option<usize> {
         .iter()
         .rposition(|t| !t.is_trivia())
         .map(|i| card.tokens()[i].end() as usize)
+}
+
+/// Byte range spanning a parameter exactly as written — `[*]key[:particle][=]value`
+/// — the leading `*` included for a starred parameter, since that is part of
+/// the key, not the value `set_cell_param` touches. Shared by
+/// `remove_cell_param` (which deletes it) and `set_fill` (which overwrites it
+/// wholesale, since changing `starred` moves the key, not just the value).
+fn param_span(card: &Card, p: &cell::CellParam) -> Range<usize> {
+    let toks = card.tokens();
+    let start = if p.starred {
+        prev(card, p.key_token).map_or(toks[p.key_token].start as usize, |i| toks[i].start as usize)
+    } else {
+        toks[p.key_token].start as usize
+    };
+    let end = if p.value_tokens.end > p.value_tokens.start {
+        toks[p.value_tokens.end - 1].end() as usize
+    } else {
+        toks[p.key_token].end() as usize
+    };
+    start..end
 }
 
 /// Where to land an edit when a cell's geometry has no terms to anchor on
@@ -728,23 +750,49 @@ impl Model {
         else {
             return Ok(false);
         };
-        let toks = card.tokens();
-        let mut start = if p.starred {
-            prev(card, p.key_token)
-                .map_or(toks[p.key_token].start as usize, |i| toks[i].start as usize)
-        } else {
-            toks[p.key_token].start as usize
-        };
-        let end = if p.value_tokens.end > p.value_tokens.start {
-            toks[p.value_tokens.end - 1].end() as usize
-        } else {
-            toks[p.key_token].end() as usize
-        };
-        if start > 0 && card.text().as_bytes()[start - 1] == b' ' {
-            start -= 1;
+        let mut range = param_span(card, p);
+        if range.start > 0 && card.text().as_bytes()[range.start - 1] == b' ' {
+            range.start -= 1;
         }
-        self.cst.card_mut(slot).unwrap().splice(start..end, "");
+        self.cst.card_mut(slot).unwrap().splice(range, "");
         Ok(true)
+    }
+
+    /// Set a cell's `fill`/`*fill` parameter, adding it if absent. Writes
+    /// `fill`, its value and (unlike `set_cell_param`) its leading `*` in one
+    /// splice, since a fill's `starred` is part of the keyword, not the value —
+    /// the asymmetry that made `Fill` readable but not writable, and made it
+    /// easy for a caller to hand-format the text and double-wrap the
+    /// transform's parentheses instead.
+    pub fn set_fill(&mut self, slot: u32, fill: &Fill) -> Result<(), EditError> {
+        let card = self.cst.card(slot).ok_or(EditError::WrongKind)?;
+        if card.kind() != CardKind::Cell {
+            return Err(EditError::WrongKind);
+        }
+        let l = cell::layout(card);
+        let params = cell::params(card, &l.params);
+        let text = fill.to_string();
+        match params.iter().find(|p| p.key.eq_ignore_ascii_case("fill")) {
+            Some(p) => {
+                let range = param_span(card, p);
+                self.cst.card_mut(slot).unwrap().splice(range, &text);
+            }
+            None => {
+                let pos = last_significant_end(card).unwrap_or_else(|| content_end(card.text()));
+                self.cst
+                    .card_mut(slot)
+                    .unwrap()
+                    .splice(pos..pos, &format!(" {text}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a cell's `fill`/`*fill` parameter. Returns `false` if it has
+    /// none. A purpose-built counterpart to `remove_cell_param(slot, "fill")`
+    /// — the same call, named for the common case.
+    pub fn remove_fill(&mut self, slot: u32) -> Result<bool, EditError> {
+        self.remove_cell_param(slot, "fill")
     }
 
     /// Append an inline `$` comment to any card, before its line terminator. A
@@ -849,13 +897,39 @@ impl Model {
         Some(pos)
     }
 
+    /// Index a freshly inserted card of `kind` — the same bookkeeping
+    /// `add_cell`/`add_surface`/`add_material`/`add_transform` each do for
+    /// their own kind, shared here so any way of adding a card (including the
+    /// generic [`Model::insert_card_after`]) indexes it the same way.
+    fn index_new_card(&mut self, kind: CardKind, slot: u32) {
+        match kind {
+            CardKind::Cell => {
+                if let Some(id) = self.cst.card(slot).map(cell::layout).and_then(|l| l.id) {
+                    self.cell_index.entry(id).or_insert(slot);
+                }
+            }
+            CardKind::Surface => {
+                if let Some(id) = self.cst.card(slot).map(surface::layout).and_then(|l| l.id) {
+                    self.surface_index.entry(id).or_insert(slot);
+                }
+            }
+            CardKind::Data => {
+                let head = self.cst.card(slot).and_then(data::head);
+                if let Some(id) = head.as_ref().and_then(data::material_id) {
+                    self.material_index.entry(id).or_insert(slot);
+                } else if let Some(id) = head.as_ref().and_then(data::transform_id) {
+                    self.transform_index.entry(id).or_insert(slot);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Add a cell at the end of the cell block. Its id is indexed immediately, so
     /// the very next `cell(id)` finds it without any flush step.
     pub fn add_cell(&mut self, text: &str) -> Result<u32, EditError> {
         let slot = self.add_card(CardKind::Cell, text)?;
-        if let Some(id) = self.cst.card(slot).map(cell::layout).and_then(|l| l.id) {
-            self.cell_index.entry(id).or_insert(slot);
-        }
+        self.index_new_card(CardKind::Cell, slot);
         Ok(slot)
     }
 
@@ -875,46 +949,28 @@ impl Model {
             .position_of(anchor_slot)
             .ok_or(EditError::NoSuchField)?;
         let slot = self.insert_card(CardKind::Cell, at + 1, text);
-        if let Some(id) = self.cst.card(slot).map(cell::layout).and_then(|l| l.id) {
-            self.cell_index.entry(id).or_insert(slot);
-        }
+        self.index_new_card(CardKind::Cell, slot);
         Ok(slot)
     }
 
     /// Add a surface at the end of the surface block.
     pub fn add_surface(&mut self, text: &str) -> Result<u32, EditError> {
         let slot = self.add_card(CardKind::Surface, text)?;
-        if let Some(id) = self.cst.card(slot).map(surface::layout).and_then(|l| l.id) {
-            self.surface_index.entry(id).or_insert(slot);
-        }
+        self.index_new_card(CardKind::Surface, slot);
         Ok(slot)
     }
 
     /// Add a material (`Mn`) card at the end of the data block.
     pub fn add_material(&mut self, text: &str) -> Result<u32, EditError> {
         let slot = self.add_card(CardKind::Data, text)?;
-        if let Some(id) = self
-            .cst
-            .card(slot)
-            .and_then(data::head)
-            .and_then(|h| data::material_id(&h))
-        {
-            self.material_index.entry(id).or_insert(slot);
-        }
+        self.index_new_card(CardKind::Data, slot);
         Ok(slot)
     }
 
     /// Add a transform (`TRn` / `*TRn`) card at the end of the data block.
     pub fn add_transform(&mut self, text: &str) -> Result<u32, EditError> {
         let slot = self.add_card(CardKind::Data, text)?;
-        if let Some(id) = self
-            .cst
-            .card(slot)
-            .and_then(data::head)
-            .and_then(|h| data::transform_id(&h))
-        {
-            self.transform_index.entry(id).or_insert(slot);
-        }
+        self.index_new_card(CardKind::Data, slot);
         Ok(slot)
     }
 
@@ -927,6 +983,31 @@ impl Model {
     /// `kcode`, `print`, `fmesh`, ...) that has no id to index at all.
     pub fn add_data_card(&mut self, text: &str) -> Result<u32, EditError> {
         self.add_card(CardKind::Data, text)
+    }
+
+    // --- inserting at an arbitrary position -----------------------------------
+
+    /// Insert a new card of `kind` immediately after the card at `slot`,
+    /// wherever in the document that is — not necessarily at the end of
+    /// `kind`'s own block. The general structural-insert primitive that
+    /// `add_cell_after` is one instance of; use this for anything
+    /// `add_cell`/`add_surface`/`add_material`/`add_transform`/`add_data_card`
+    /// don't cover directly, e.g. a provenance comment right after the title,
+    /// or a cell placed next to a specific surface rather than at the end of
+    /// the cell block. Indexed immediately, the same as the typed `add_*`
+    /// methods, if `kind` carries an id this model tracks.
+    ///
+    /// `EditError::WrongKind` if `slot` does not resolve to a live card.
+    pub fn insert_card_after(
+        &mut self,
+        slot: u32,
+        kind: CardKind,
+        text: &str,
+    ) -> Result<u32, EditError> {
+        let at = self.cst.position_of(slot).ok_or(EditError::WrongKind)?;
+        let new_slot = self.insert_card(kind, at + 1, text);
+        self.index_new_card(kind, new_slot);
+        Ok(new_slot)
     }
 
     /// Replace a data card's entire text in place, addressed by slot (a
@@ -1418,6 +1499,50 @@ mod tests {
     }
 
     #[test]
+    fn insert_card_after_lands_right_after_the_anchor_slot() {
+        use migjorn_syntax::CardKind;
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n2 0 1 imp:n=0\n\n1 SO 5\n\nm1 1001 1\n");
+        let title_slot = m.title_slot().unwrap();
+        m.insert_card_after(title_slot, CardKind::Comment, "c provenance banner")
+            .unwrap();
+        assert!(
+            m.to_source()
+                .starts_with("t\nc provenance banner\n1 0 -1 imp:n=1\n"),
+            "{}",
+            m.to_source()
+        );
+    }
+
+    #[test]
+    fn insert_card_after_indexes_a_cell_immediately() {
+        use migjorn_syntax::CardKind;
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n3 0 1 imp:n=0\n\n1 SO 5\n\nm1 1001 1\n");
+        let s1 = slot_of_cell(&m, 1);
+        let new_slot = m
+            .insert_card_after(s1, CardKind::Cell, "2 0 1 imp:n=0")
+            .unwrap();
+        assert_eq!(m.cell(2).unwrap().slot(), new_slot);
+        assert!(
+            m.to_source()
+                .contains("1 0 -1 imp:n=1\n2 0 1 imp:n=0\n3 0 1 imp:n=0"),
+            "{}",
+            m.to_source()
+        );
+    }
+
+    #[test]
+    fn insert_card_after_missing_slot_is_rejected() {
+        use migjorn_syntax::CardKind;
+        let mut m = Model::parse(SRC);
+        let removed_slot = slot_of_cell(&m, 1);
+        assert!(m.remove_cell(1));
+        assert_eq!(
+            m.insert_card_after(removed_slot, CardKind::Comment, "c orphaned"),
+            Err(super::EditError::WrongKind)
+        );
+    }
+
+    #[test]
     fn remove_cell_by_id() {
         let mut m = Model::parse(SRC);
         assert!(m.remove_cell(2));
@@ -1527,6 +1652,46 @@ mod tests {
         let s = slot_of_cell(&m, 1);
         assert_eq!(m.remove_cell_param(s, "trcl"), Ok(true));
         assert_eq!(m.cell_at(s).unwrap().text().trim_end(), "1 0 -1 imp:n=1");
+    }
+
+    #[test]
+    fn set_fill_adds_when_absent() {
+        use crate::cell::Fill;
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 10\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        m.set_fill(s, &Fill::new(2)).unwrap();
+        assert_eq!(m.cell(1).unwrap().fill(), Some(Fill::new(2)));
+        assert!(m.to_source().contains("1 0 -1 imp:n=1 fill=2"));
+    }
+
+    #[test]
+    fn set_fill_replaces_an_existing_one_star_and_all() {
+        use crate::cell::Fill;
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1 fill=1\n\n1 SO 10\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+
+        // switching starred moves the key, not just the value
+        let starred = Fill::new(2).with_transform("(30)").starred(true);
+        m.set_fill(s, &starred).unwrap();
+        assert_eq!(m.cell(1).unwrap().fill(), Some(starred));
+        assert!(m.to_source().contains("1 0 -1 imp:n=1 *fill=2 (30)"));
+
+        // and back to unstarred, replacing the whole thing again
+        let plain = Fill::new(3);
+        m.set_fill(s, &plain).unwrap();
+        assert_eq!(m.cell(1).unwrap().fill(), Some(plain));
+        assert!(m.to_source().contains("1 0 -1 imp:n=1 fill=3"));
+        assert!(!m.to_source().contains('*'));
+    }
+
+    #[test]
+    fn remove_fill_is_remove_cell_param_fill() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1 *fill=2 (30)\n\n1 SO 10\n\nm1 1001 1\n");
+        let s = slot_of_cell(&m, 1);
+        assert_eq!(m.remove_fill(s), Ok(true));
+        assert_eq!(m.cell(1).unwrap().fill(), None);
+        assert!(m.to_source().contains("1 0 -1 imp:n=1\n"));
+        assert_eq!(m.remove_fill(s), Ok(false));
     }
 
     #[test]

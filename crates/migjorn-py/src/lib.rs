@@ -78,12 +78,30 @@ impl Model {
         Ok(Model::new(&text))
     }
 
+    /// A model whose only content cards are data cards — for folding a
+    /// project's own configured data cards (`sdef`, `mode`, materials, ...)
+    /// into a `merge`, without hand-building the positional incantation
+    /// (empty cell block, empty surface block) that makes them land there.
+    #[staticmethod]
+    fn from_data_cards(text: &str) -> Model {
+        Model {
+            inner: Rc::new(RefCell::new(migjorn_core::Model::from_data_cards(text))),
+        }
+    }
+
     fn to_source(&self) -> String {
         self.inner.borrow().to_source()
     }
 
+    /// Write straight to `path`, one card at a time, instead of building the
+    /// whole source as one Python string first the way `to_source()` +
+    /// writing it yourself would.
     fn save(&self, path: &str) -> PyResult<()> {
-        std::fs::write(path, self.inner.borrow().to_source())
+        let file = std::fs::File::create(path).map_err(|e| PyIOError::new_err(e.to_string()))?;
+        let mut w = std::io::BufWriter::new(file);
+        self.inner
+            .borrow()
+            .write_source(&mut w)
             .map_err(|e| PyIOError::new_err(e.to_string()))
     }
 
@@ -305,8 +323,15 @@ impl Model {
     }
 
     // --- analysis / composition ---------------------------------------------
+    /// Rust's `Model::validate` returns a typed `Vec<Problem>`; rendered here
+    /// as its `Display` text, one string per problem, in the same order.
     fn validate(&self) -> Vec<String> {
-        self.inner.borrow().validate()
+        self.inner
+            .borrow()
+            .validate()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
     fn universe_ids(&self) -> Vec<i64> {
         self.inner.borrow().universe_ids()
@@ -331,6 +356,12 @@ impl Model {
             inner: Rc::new(RefCell::new(self.inner.borrow().clear_data_cards())),
         }
     }
+    /// In-place counterpart to `clear_data_cards`: drops the data block by
+    /// draining rather than cloning, so composing many components in one
+    /// process does not pay a full copy of each one's geometry.
+    fn clear_data_cards_in_place(&self) {
+        self.inner.borrow_mut().clear_data_cards_in_place();
+    }
     fn merge(&self, others: Vec<Bound<'_, Model>>) -> PyResult<()> {
         // Deref the `Ref` to the `Model` before cloning, so this is unambiguously
         // `Model::clone` (a bare `.clone()` on a `Ref` reads as `Ref::clone`).
@@ -338,10 +369,14 @@ impl Model {
             .iter()
             .map(|b| (*b.borrow().inner.borrow()).clone())
             .collect();
-        self.inner
-            .borrow_mut()
-            .merge(owned)
-            .map_err(|errs| MergeError::new_err(errs.join("; ")))
+        self.inner.borrow_mut().merge(owned).map_err(|errs| {
+            let msg = errs
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            MergeError::new_err(msg)
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -576,6 +611,26 @@ impl Cell {
         self.inner
             .borrow_mut()
             .remove_cell_param(self.slot, key)
+            .map_err(edit_err)
+    }
+    /// Set (or add) this cell's `fill`/`*fill` parameter. `transform` is the
+    /// parenthesised form (`"(30)"`), matching `Cell.fill.transform` — pass
+    /// it through unchanged rather than re-wrapping it.
+    #[pyo3(signature = (universe, starred=false, transform=None))]
+    fn set_fill(&self, universe: i64, starred: bool, transform: Option<&str>) -> PyResult<()> {
+        let mut fill = migjorn_core::Fill::new(universe).starred(starred);
+        if let Some(t) = transform {
+            fill = fill.with_transform(t);
+        }
+        self.inner
+            .borrow_mut()
+            .set_fill(self.slot, &fill)
+            .map_err(edit_err)
+    }
+    fn remove_fill(&self) -> PyResult<bool> {
+        self.inner
+            .borrow_mut()
+            .remove_fill(self.slot)
             .map_err(edit_err)
     }
     fn append_comment(&self, text: &str) -> PyResult<()> {

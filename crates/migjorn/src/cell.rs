@@ -1,6 +1,7 @@
 //! Typed projection of a cell card.
 
 use migjorn_syntax::{Card, SyntaxKind};
+use std::fmt;
 use std::ops::Range;
 
 use crate::scan::{float_at, int_at, kind_at, next, sig, text_at};
@@ -320,12 +321,54 @@ fn slice_tokens(card: &Card, range: Range<usize>) -> String {
 }
 
 /// A cell's `fill=` entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fill {
     pub universe: i64,
     pub starred: bool,
     /// The parenthesised transform that may follow the universe, verbatim.
     pub transform: Option<String>,
+}
+
+impl Fill {
+    /// A fill of `universe`, not starred, with no transform.
+    pub fn new(universe: i64) -> Fill {
+        Fill {
+            universe,
+            starred: false,
+            transform: None,
+        }
+    }
+
+    /// Attach a transform, given verbatim and parenthesised — `"(30)"` for a
+    /// named transform, `"(0 0 5 90 0 90)"` for an inline one. This is exactly
+    /// the form [`Fill::transform`] returns, so a value read off one cell can
+    /// be passed straight to another's fill with no reformatting; wrapping it
+    /// in parentheses again (`"((30))"`) is the mistake this exists to make
+    /// unnecessary.
+    pub fn with_transform(mut self, parenthesised: impl Into<String>) -> Fill {
+        self.transform = Some(parenthesised.into());
+        self
+    }
+
+    pub fn starred(mut self, yes: bool) -> Fill {
+        self.starred = yes;
+        self
+    }
+}
+
+/// Renders as the parameter text `Model::set_fill` writes onto a cell:
+/// `*fill=2 (30)` or `fill=2`.
+impl fmt::Display for Fill {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.starred {
+            f.write_str("*")?;
+        }
+        write!(f, "fill={}", self.universe)?;
+        if let Some(t) = &self.transform {
+            write!(f, " {t}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Read a `fill` / `*fill` parameter.

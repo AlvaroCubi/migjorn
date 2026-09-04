@@ -2,6 +2,7 @@
 
 use compact_str::CompactString;
 use rayon::prelude::*;
+use std::io;
 
 use crate::card::Card;
 use crate::kind::{CardKind, Eol};
@@ -217,6 +218,21 @@ impl Cst {
         unsafe { String::from_utf8_unchecked(buf) }
     }
 
+    /// Stream the model's source to `w` one card at a time, instead of
+    /// allocating it all as one `String` the way `to_source` does first. A
+    /// caller writing straight to a file (the common case for a model large
+    /// enough to care) pays for one copy of the bytes instead of two.
+    ///
+    /// Deliberately sequential rather than reusing `to_source`'s parallel
+    /// chunking: that path still buffers the whole model before anything is
+    /// written, so it would not save the memory this method exists for.
+    pub fn write_source(&self, w: &mut impl io::Write) -> io::Result<()> {
+        for card in self.cards() {
+            w.write_all(card.text().as_bytes())?;
+        }
+        Ok(())
+    }
+
     // --- structural editing: `order` operations, never a relex ---------------
 
     /// Build a detached card. O(snippet length) — microseconds.
@@ -285,6 +301,30 @@ impl Cst {
         match self.position_of(slot) {
             Some(i) => self.remove_at(i).is_some(),
             None => false,
+        }
+    }
+
+    /// Remove every card for which `keep` returns `false`, in one pass over
+    /// `order` — the bulk counterpart to `remove_at`/`remove_slot`. Each of
+    /// those is one `Vec::remove`, O(n) in the number of cards after it;
+    /// dropping m cards that way is O(n·m) on a large model. This is O(n)
+    /// total, the same cost as one such removal.
+    pub fn retain(&mut self, mut keep: impl FnMut(&Card) -> bool) {
+        let order = std::mem::take(&mut self.order);
+        let kinds = std::mem::take(&mut self.kinds);
+        self.order = Vec::with_capacity(order.len());
+        self.kinds = Vec::with_capacity(kinds.len());
+        for (slot, kind) in order.into_iter().zip(kinds) {
+            let alive = match &self.arena[slot as usize] {
+                Some(card) => keep(card),
+                None => false,
+            };
+            if alive {
+                self.order.push(slot);
+                self.kinds.push(kind);
+            } else {
+                self.arena[slot as usize] = None;
+            }
         }
     }
 
@@ -371,6 +411,14 @@ mod tests {
     }
 
     #[test]
+    fn write_source_matches_to_source() {
+        let cst = Cst::parse(SRC);
+        let mut buf = Vec::new();
+        cst.write_source(&mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), SRC);
+    }
+
+    #[test]
     fn leading_comment_is_absorbed_into_the_next_card_as_a_header() {
         let src = "t\n\
                    c cell 1 is the fuel\n\
@@ -453,6 +501,32 @@ mod tests {
         assert_eq!(cst.to_source(), SRC);
         // the slot is tombstoned, not reused
         assert!(cst.card(slot).is_none());
+    }
+
+    #[test]
+    fn retain_drops_non_matching_cards_and_tombstones_their_slots() {
+        let mut cst = Cst::parse(SRC);
+        let data_slot = cst
+            .cards()
+            .find(|c| c.kind() == CardKind::Data)
+            .unwrap()
+            .slot();
+        cst.retain(|c| c.kind() != CardKind::Data);
+        assert!(cst.card(data_slot).is_none());
+        assert!(cst.cards().all(|c| c.kind() != CardKind::Data));
+        assert_eq!(
+            cst.cards().map(Card::kind).collect::<Vec<_>>(),
+            vec![
+                CardKind::Title,
+                CardKind::Cell,
+                CardKind::Cell,
+                CardKind::Blank,
+                CardKind::Surface,
+                CardKind::Blank,
+            ]
+        );
+        // every other card kept its original slot and reads back unchanged
+        assert!(cst.cards().any(|c| c.text().contains("fuel sphere")));
     }
 
     #[test]

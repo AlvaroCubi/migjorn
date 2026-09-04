@@ -3,6 +3,8 @@
 use migjorn_syntax::{Card, CardKind, Cst, SyntaxKind};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use std::fmt;
+use std::io;
 
 use crate::data::{self, DataHead};
 use crate::diagnostic::{Diagnostic, Pending, Severity};
@@ -24,6 +26,20 @@ pub struct Model {
     pub(crate) surface_index: IdIndex,
     pub(crate) material_index: IdIndex,
     pub(crate) transform_index: IdIndex,
+}
+
+/// A summary, not the whole CST — nobody wants a multi-hundred-MB model dumped
+/// into a panic message or an `assert_eq!` failure. Enough to make
+/// `Result<_, Model>`/`Vec<Model>` usable in a test: `unwrap_err()`,
+/// `assert_eq!`, `#[derive(Debug)]` on a wrapper type.
+impl fmt::Debug for Model {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Model")
+            .field("title", &self.title())
+            .field("cards", &self.cst.len())
+            .field("diagnostics", &self.diagnostics.len())
+            .finish()
+    }
 }
 
 /// Below this many cards, `build_indices` scans sequentially instead of
@@ -58,9 +74,40 @@ impl Model {
         model
     }
 
+    /// A model whose only content cards are data cards — the constructor
+    /// counterpart to [`Model::clear_data_cards`]. Assembling one to `merge`
+    /// in (e.g. a project's own configured data cards, folded in once
+    /// alongside its cell/surface fillers) means placing `text` positionally
+    /// so it lands in the data block: an empty cell block, then an empty
+    /// surface block, then `text`. Getting that placement wrong by even one
+    /// newline used to be a silent miscategorisation a caller had to get
+    /// right by hand — one line short and a `data` card like `M1` becomes a
+    /// `Surface` card instead, which `validate()` does not catch (only
+    /// `diagnostics()` does, as an easy-to-miss "surface card has no readable
+    /// id" error) — so it is built correctly here once instead of at every
+    /// call site.
+    pub fn from_data_cards(text: &str) -> Model {
+        let mut src = String::with_capacity(text.len() + 16);
+        src.push_str("data cards\n\n\n");
+        src.push_str(text);
+        if !src.ends_with('\n') {
+            src.push('\n');
+        }
+        Model::parse(&src)
+    }
+
     /// Re-emit. Byte-identical to the input when unedited.
     pub fn to_source(&self) -> String {
         self.cst.to_source()
+    }
+
+    /// Stream the source to `w` one card at a time, without allocating the
+    /// whole thing as one `String` first the way `to_source` does — worth it
+    /// once a model is large enough that the extra copy matters. Byte-
+    /// identical to `to_source`'s output, since emission is a plain
+    /// concatenation of each card's own bytes either way.
+    pub fn write_source(&self, w: &mut impl io::Write) -> io::Result<()> {
+        self.cst.write_source(w)
     }
 
     pub fn diagnostics(&self) -> &[Diagnostic] {
@@ -85,6 +132,16 @@ impl Model {
             .find(|c| c.kind() == CardKind::Title)?
             .text();
         Some(strip_eol(text))
+    }
+
+    /// The title card's stable slot, if one exists — the usual anchor for
+    /// [`Model::insert_card_after`] (e.g. a provenance banner placed right
+    /// after the title).
+    pub fn title_slot(&self) -> Option<u32> {
+        self.cst
+            .cards()
+            .find(|c| c.kind() == CardKind::Title)
+            .map(|c| c.slot())
     }
 
     pub fn cells(&self) -> impl Iterator<Item = CellView<'_>> + '_ {
@@ -420,5 +477,55 @@ fn scan_card(card: &Card, index: usize, slot: u32, out: &mut Scan) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Model;
+
+    #[test]
+    fn debug_is_a_summary_not_the_whole_cst() {
+        let m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let out = format!("{m:?}");
+        assert!(out.contains("Model"));
+        assert!(out.contains("title"));
+        assert!(!out.contains("1 0 -1 imp:n=1"), "{out}");
+    }
+
+    #[test]
+    fn write_source_matches_to_source() {
+        let src = "t\n1 0 -1 imp:n=1\n2 0 1 imp:n=0\n\n1 SO 5\n\nm1 1001 1\n";
+        let m = Model::parse(src);
+        let mut buf = Vec::new();
+        m.write_source(&mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), m.to_source());
+        assert_eq!(m.to_source(), src);
+    }
+
+    #[test]
+    fn from_data_cards_lands_everything_in_the_data_block() {
+        let m = Model::from_data_cards("sdef pos=0 0 0\nm1 1001 1\n");
+        assert_eq!(m.num_cells(), 0);
+        assert_eq!(m.num_surfaces(), 0);
+        assert!(m.material(1).is_some());
+        assert!(m.data_cards().any(|d| d.text().starts_with("sdef")));
+        assert!(m.validate().is_empty());
+        assert!(m.diagnostics().is_empty(), "{:?}", m.diagnostics());
+    }
+
+    #[test]
+    fn from_data_cards_normalises_a_missing_trailing_newline() {
+        let m = Model::from_data_cards("sdef pos=0 0 0");
+        assert!(m.to_source().ends_with("sdef pos=0 0 0\n"));
+    }
+
+    #[test]
+    fn title_slot_resolves_to_the_title_card() {
+        let m = Model::parse("t\n1 0 -1 imp:n=1\n\n1 SO 5\n\nm1 1001 1\n");
+        let slot = m.title_slot().unwrap();
+        assert_eq!(m.cst().card(slot).unwrap().text(), "t\n");
+
+        assert_eq!(Model::parse("").title_slot(), None);
     }
 }

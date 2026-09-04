@@ -202,6 +202,19 @@ class Model:
         data block dropped — e.g. before folding in a component's own
         materials/transforms that should not leak into a merge."""
 
+    def clear_data_cards_in_place(self) -> None:
+        """In-place counterpart to :meth:`clear_data_cards`: drops the data
+        block by draining rather than cloning, so composing many components in
+        one process does not pay a full copy of each one's geometry."""
+
+    @staticmethod
+    def from_data_cards(text: str) -> Model:
+        """A model whose only content cards are data cards — for folding a
+        project's own configured data cards (``sdef``, ``mode``, materials,
+        ...) into a :meth:`merge`, without hand-building the positional
+        incantation (empty cell block, empty surface block) that makes them
+        land there."""
+
     def merge(self, others: list[Model]) -> None:
         """Fold the cells, surfaces and data cards of ``others`` into this model.
         Raises :class:`MergeError` (without changing anything) if any cell /
@@ -318,6 +331,17 @@ class Cell:
 
     def remove_param(self, key: str) -> bool:
         """Remove the parameter with this qualified key; ``True`` if one was
+        removed."""
+
+    def set_fill(
+        self, universe: int, starred: bool = False, transform: str | None = None
+    ) -> None:
+        """Set (or add) this cell's ``fill``/``*fill`` parameter. ``transform``
+        is the parenthesised form (``"(30)"``), matching :attr:`fill`'s own
+        ``transform`` — pass it through unchanged rather than re-wrapping it."""
+
+    def remove_fill(self) -> bool:
+        """Remove the ``fill``/``*fill`` parameter; ``True`` if one was
         removed."""
 
     def append_comment(self, text: str) -> None:

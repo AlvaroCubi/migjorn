@@ -45,7 +45,7 @@ mod view;
 pub use cell::{CellParam, Fill, GeometryTerm, GeometryTermKind};
 pub use compose::{Collision, IdKind, Problem};
 pub use diagnostic::{Diagnostic, Severity};
-pub use edit::EditError;
+pub use edit::{CellHandle, EditError};
 pub use model::Model;
 pub use view::{CellView, DataCardView, MaterialView, SurfaceView, TransformView};
 

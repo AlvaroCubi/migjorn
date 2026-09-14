@@ -21,6 +21,7 @@ use crate::data;
 use crate::model::Model;
 use crate::renumber::{remap_name, remap_token};
 use crate::scan::{prev, sig};
+use crate::view::CellView;
 use crate::{cell, surface};
 
 /// Why an edit could not be applied. Reads never fail (they project a best-effort
@@ -823,6 +824,41 @@ impl Model {
         self.append_inline_comment(slot, text)
     }
 
+    // --- mutate while iterating ----------------------------------------------
+
+    /// Visit every cell with a live, mutable handle, so a pass that reads a
+    /// cell's current text to decide, then edits it, doesn't need the manual
+    /// two-step [`Model::cells`] can't do on its own: `cells()` borrows `&self`
+    /// for the life of the iterator, so a `&mut self` edit can't happen inside
+    /// the loop. This does the snapshot-then-[`Model::cell_at`] dance a caller
+    /// would otherwise write by hand, once, internally.
+    ///
+    /// The snapshot taken up front stays meaningful for the whole pass because
+    /// slot stability isn't an incidental property of any one edit — it's
+    /// `Cst`'s own arena invariant: slot -> card is O(1) and never invalidated
+    /// except by removing that exact slot (see `migjorn_syntax::cst`). A
+    /// callback is free to edit or remove *other* cells mid-pass through
+    /// [`CellHandle::model_mut`]; a slot removed that way is simply skipped
+    /// when this reaches it, rather than handed to the callback as a dangling
+    /// handle.
+    ///
+    /// Stops and returns the first `Err` the callback produces; cells already
+    /// visited stay edited.
+    pub fn try_for_each_cell_mut<F, E>(&mut self, mut f: F) -> Result<(), E>
+    where
+        F: FnMut(&mut CellHandle) -> Result<(), E>,
+    {
+        let slots: Vec<u32> = self.cells().map(|c| c.slot()).collect();
+        for slot in slots {
+            if self.cell_at(slot).is_none() {
+                continue; // removed by an earlier step of this same pass
+            }
+            let mut handle = CellHandle::new(self, slot);
+            f(&mut handle)?;
+        }
+        Ok(())
+    }
+
     // --- structural edits (add / remove whole cards) ------------------------
 
     /// Give a snippet the file's line terminator, normalising any the caller
@@ -1089,9 +1125,48 @@ fn remove_by_id(cst: &mut Cst, index: &mut crate::model::IdIndex, id: i64) -> bo
     removed
 }
 
+/// A live, mutable handle onto one cell — what [`Model::try_for_each_cell_mut`]
+/// hands its callback. `(&mut Model, slot)`, same as every other slot-addressed
+/// edit in this module — there's nothing buffered here to flush. Rather than
+/// mirror every [`CellView`] read and every cell mutator `Model` has (a
+/// forwarding method to keep in sync each time `Model` grows one), this only
+/// adds the one thing a callback can't get any other way — a read of *this*
+/// slot with no `Option` to unwrap — and otherwise hands back `Model` itself
+/// for the callback to call directly, `slot` in hand.
+pub struct CellHandle<'a> {
+    model: &'a mut Model,
+    slot: u32,
+}
+
+impl<'a> CellHandle<'a> {
+    pub(crate) fn new(model: &'a mut Model, slot: u32) -> Self {
+        Self { model, slot }
+    }
+
+    pub fn slot(&self) -> u32 {
+        self.slot
+    }
+
+    /// This cell's own read view. No `Option` to unwrap, unlike
+    /// [`Model::cell_at`] — the handle only exists for a slot that, at the
+    /// point it's constructed, still resolves to a cell.
+    pub fn view(&self) -> CellView<'_> {
+        CellView::new(self.model, self.slot)
+    }
+
+    /// Escape hatch onto the whole model: every cell mutator (`set_cell_material`,
+    /// `add_cell_param`, `set_fill`, ...), addressed with `self.slot()`, plus
+    /// reads of any other card. Also lets a callback remove cells — its own or
+    /// another's — which is why [`Model::try_for_each_cell_mut`] re-checks each
+    /// slot before visiting it.
+    pub fn model_mut(&mut self) -> &mut Model {
+        self.model
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::Model;
+    use crate::{EditError, Model};
 
     fn slot_of_cell(m: &Model, id: i64) -> u32 {
         m.cell(id).unwrap().slot()
@@ -1724,6 +1799,55 @@ mod tests {
             "{}",
             m.to_source()
         );
+    }
+
+    #[test]
+    fn try_for_each_cell_mut_reads_then_edits_every_cell() {
+        let mut m =
+            Model::parse("t\n1 0 -1 imp:n=1\n2 0 1 imp:n=1\n3 0 -2 imp:n=0\n\n1 SO 5\n\n2 SO 6\n");
+        m.try_for_each_cell_mut(|cell| -> Result<(), EditError> {
+            if cell.view().text().contains("imp:n=1") {
+                let slot = cell.slot();
+                cell.model_mut().add_cell_param(slot, "vol=2")?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(m.to_source().contains("1 0 -1 imp:n=1 vol=2\n"));
+        assert!(m.to_source().contains("2 0 1 imp:n=1 vol=2\n"));
+        assert!(!m.to_source().contains("3 0 -2 imp:n=0 vol=2\n"));
+    }
+
+    #[test]
+    fn try_for_each_cell_mut_stops_at_the_first_error() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n2 0 1 imp:n=1\n\n1 SO 5\n");
+        let mut visited = Vec::new();
+
+        let result = m.try_for_each_cell_mut(|cell| {
+            visited.push(cell.view().id());
+            Err::<(), _>("stop")
+        });
+
+        assert_eq!(result, Err("stop"));
+        assert_eq!(visited, vec![Some(1)]); // never reached cell 2
+    }
+
+    #[test]
+    fn try_for_each_cell_mut_skips_a_cell_removed_by_an_earlier_step() {
+        let mut m = Model::parse("t\n1 0 -1 imp:n=1\n2 0 1 imp:n=1\n\n1 SO 5\n");
+        let mut visited = Vec::new();
+
+        m.try_for_each_cell_mut(|cell| -> Result<(), EditError> {
+            visited.push(cell.view().id());
+            if cell.view().id() == Some(1) {
+                cell.model_mut().remove_cell(2);
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(visited, vec![Some(1)]); // cell 2's slot never handed out
     }
 
     #[test]

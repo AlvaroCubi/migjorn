@@ -23,6 +23,10 @@ pub enum SyntaxKind {
     Hash,
     LParen,
     RParen,
+    /// A `<` bin-flagging selector in tally cards: `c1 c2 < e` restricts the
+    /// preceding cells/surfaces to being scored only for the envelope `e`
+    /// that follows it.
+    Lt,
     /// A `$ ...` inline comment, or a whole `c ...` comment line absorbed into a
     /// card — either sandwiched before a continuation or heading the card as a
     /// leading comment run. Excludes the line terminator.

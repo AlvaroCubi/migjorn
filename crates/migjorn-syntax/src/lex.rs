@@ -14,7 +14,7 @@ use crate::token::Token;
 fn is_delimiter(b: u8) -> bool {
     matches!(
         b,
-        b' ' | b'\t' | b'\r' | b'\n' | b'(' | b')' | b':' | b'=' | b'$' | b'&' | b'#' | b'*'
+        b' ' | b'\t' | b'\r' | b'\n' | b'(' | b')' | b':' | b'=' | b'$' | b'&' | b'#' | b'*' | b'<'
     )
 }
 
@@ -151,13 +151,14 @@ fn lex_line(src: &[u8], from: usize, to: usize, tokens: &mut Vec<Token>) {
                 tokens.push(Token::new(SyntaxKind::Ampersand, i, 1));
                 i += 1;
             }
-            b'(' | b')' | b':' | b'=' | b'*' | b'#' => {
+            b'(' | b')' | b':' | b'=' | b'*' | b'#' | b'<' => {
                 let kind = match b {
                     b'(' => SyntaxKind::LParen,
                     b')' => SyntaxKind::RParen,
                     b':' => SyntaxKind::Colon,
                     b'=' => SyntaxKind::Eq,
                     b'*' => SyntaxKind::Star,
+                    b'<' => SyntaxKind::Lt,
                     _ => SyntaxKind::Hash,
                 };
                 tokens.push(Token::new(kind, i, 1));
@@ -230,6 +231,30 @@ mod tests {
                 (Ident, "n"),
                 (Eq, "="),
                 (Number, "1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn tally_envelope_selector() {
+        use SyntaxKind::*;
+        // `<` restricts the preceding cells to being scored only for the
+        // envelope that follows it (`c1 c2 < e`). It must lex as its own
+        // token, not get swallowed into a neighbouring number word as
+        // `Unknown`.
+        assert_eq!(
+            kinds_of("f4:n (1 2 3<100)\n", CardKind::Data),
+            vec![
+                (Ident, "f4"),
+                (Colon, ":"),
+                (Ident, "n"),
+                (LParen, "("),
+                (Number, "1"),
+                (Number, "2"),
+                (Number, "3"),
+                (Lt, "<"),
+                (Number, "100"),
+                (RParen, ")"),
             ]
         );
     }

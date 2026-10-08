@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "migjorn"
 description = "Fast, lossless MCNP input parser and editor"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = { text = "EUPL-1.2" }
 classifiers = ["Programming Language :: Rust"]
 dynamic = ["version"]
 

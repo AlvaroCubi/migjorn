@@ -6,6 +6,7 @@
 //! always round-trip.
 
 use migjorn_syntax::{Card, SyntaxKind};
+use std::ops::Range;
 
 /// Index of the first non-trivia token at or after `i`.
 pub(crate) fn sig(card: &Card, mut i: usize) -> Option<usize> {
@@ -77,7 +78,13 @@ pub(crate) fn float_at(card: &Card, i: usize) -> Option<f64> {
 /// Parse an MCNP float literal. MCNP accepts a Fortran-ish exponent form that
 /// `f64::from_str` rejects: the `e` may be omitted when a sign follows the
 /// mantissa directly, e.g. `1.0-5` means `1.0e-5` and `6.02+23` means `6.02e23`.
-pub(crate) fn parse_float(text: &str) -> Option<f64> {
+///
+/// ```
+/// assert_eq!(migjorn::parse_float("1.0-5"), Some(1.0e-5));
+/// assert_eq!(migjorn::parse_float("+2.5"), Some(2.5));
+/// assert_eq!(migjorn::parse_float("3R"), None);
+/// ```
+pub fn parse_float(text: &str) -> Option<f64> {
     let text = text.strip_prefix('+').unwrap_or(text);
     if let Ok(v) = text.parse::<f64>() {
         return Some(v);
@@ -98,6 +105,21 @@ pub(crate) fn parse_float(text: &str) -> Option<f64> {
         }
     }
     None
+}
+
+/// Byte range in the card's text covered by the token index range `toks`
+/// (half-open). An empty range maps to the empty span at the start of the
+/// token it would begin at, or to the card's end.
+pub(crate) fn byte_span(card: &Card, toks: Range<usize>) -> Range<usize> {
+    let tokens = card.tokens();
+    let end = toks.end.min(tokens.len());
+    if toks.start >= end {
+        let at = tokens
+            .get(toks.start)
+            .map_or(card.text().len(), |t| t.start as usize);
+        return at..at;
+    }
+    tokens[toks.start].start as usize..tokens[end - 1].end() as usize
 }
 
 /// Split a data-card name into its alphabetic mnemonic and trailing number, e.g.

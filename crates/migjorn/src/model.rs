@@ -5,9 +5,11 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::fmt;
 use std::io;
+use std::ops::Range;
 
 use crate::data::{self, DataHead};
 use crate::diagnostic::{Diagnostic, Pending, Severity};
+use crate::scan::byte_span;
 use crate::view::{CellView, DataCardView, MaterialView, SurfaceView, TransformView};
 use crate::{cell, surface};
 
@@ -348,25 +350,19 @@ impl Model {
                 };
                 // The first definition wins the index; the duplicate is reported.
                 if index.insert(id, slot).is_some() {
-                    duplicates.push((label, id));
+                    duplicates.push((label, id, slot));
                 }
             }
         }
-        for (label, id) in duplicates {
-            self.diagnostics.push(Diagnostic::error(
-                format!("duplicate {label} id {id}"),
-                0..0,
-            ));
+        for (label, id, slot) in duplicates {
+            self.diagnostics
+                .push(Diagnostic::error(format!("duplicate {label} id {id}"), 0..0).on_slot(slot));
         }
 
         for scan in scanned {
             for pending in scan.diagnostics {
                 let base = offsets.as_ref().map_or(0, |o| o[pending.card]);
-                let span = base + pending.local.start..base + pending.local.end;
-                self.diagnostics.push(match pending.severity {
-                    Severity::Error => Diagnostic::error(pending.message, span),
-                    Severity::Warning => Diagnostic::warning(pending.message, span),
-                });
+                self.diagnostics.push(pending.at(base));
             }
         }
     }
@@ -396,87 +392,141 @@ enum Kind {
 
 /// Read one card's defined ids and any problems with it.
 fn scan_card(card: &Card, index: usize, slot: u32, out: &mut Scan) {
+    let defined = inspect(card, |local, severity, message| {
+        out.diagnostics.push(Pending {
+            card: index,
+            slot,
+            local,
+            severity,
+            message,
+        })
+    });
+    if let Some((kind, id)) = defined {
+        out.ids.push((kind, id, slot));
+    }
+}
+
+/// Problems with one card as it reads now, with spans relative to its text.
+/// This is what the parse diagnostics hold for the card, recomputed.
+pub(crate) fn card_diagnostics(card: &Card, slot: u32) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    inspect(card, |local, severity, message| {
+        out.push(
+            Pending {
+                card: 0,
+                slot,
+                local,
+                severity,
+                message,
+            }
+            .at(0),
+        )
+    });
+    out
+}
+
+/// The id a card defines, if any, with every problem found in it reported to
+/// `issue` as `(byte span in the card, severity, message)`.
+fn inspect(
+    card: &Card,
+    mut issue: impl FnMut(Range<usize>, Severity, String),
+) -> Option<(Kind, i64)> {
+    let whole = 0..card.len_bytes();
     // The flag is set at lex time, so the overwhelmingly common case costs one
     // predictable branch rather than a walk over the card's tokens.
     if card.has_unknown() {
         for token in card.tokens() {
             if token.kind == SyntaxKind::Unknown {
-                out.diagnostics.push(Pending {
-                    card: index,
-                    local: token.range(),
-                    severity: Severity::Warning,
-                    message: format!("unrecognized token `{}`", &card.text()[token.range()]),
-                });
+                issue(
+                    token.range(),
+                    Severity::Warning,
+                    format!("unrecognized token `{}`", &card.text()[token.range()]),
+                );
             }
         }
     }
+    let span = |toks: Range<usize>| byte_span(card, toks);
 
     match card.kind() {
         CardKind::Cell => {
             let l = cell::layout(card);
-            match l.id {
-                Some(id) => out.ids.push((Kind::Cell, id, slot)),
-                None => out.diagnostics.push(Pending {
-                    card: index,
-                    local: 0..card.len_bytes(),
-                    severity: Severity::Error,
-                    message: "cell card has no readable id".to_owned(),
-                }),
-            }
+            let name = match l.id {
+                Some(id) => format!("cell {id}"),
+                None => {
+                    issue(
+                        whole.clone(),
+                        Severity::Error,
+                        "cell card has no readable id".to_owned(),
+                    );
+                    "cell".to_owned()
+                }
+            };
             if !l.well_formed {
-                out.diagnostics.push(Pending {
-                    card: index,
-                    local: 0..card.len_bytes(),
-                    severity: Severity::Warning,
-                    message: match l.id {
-                        Some(id) => format!("cell {id} is not well formed"),
-                        None => "cell is not well formed".to_owned(),
-                    },
-                });
+                issue(
+                    whole,
+                    Severity::Warning,
+                    format!("{name} is not well formed"),
+                );
             }
+            for (toks, message) in cell::geometry_problems(card, &l.geometry)
+                .into_iter()
+                .chain(cell::param_problems(card, &l.params))
+            {
+                issue(span(toks), Severity::Warning, format!("{name}: {message}"));
+            }
+            l.id.map(|id| (Kind::Cell, id))
         }
         CardKind::Surface => {
             let l = surface::layout(card);
-            match l.id {
-                Some(id) => out.ids.push((Kind::Surface, id, slot)),
-                None => out.diagnostics.push(Pending {
-                    card: index,
-                    local: 0..card.len_bytes(),
-                    severity: Severity::Error,
-                    message: "surface card has no readable id".to_owned(),
-                }),
-            }
+            let name = match l.id {
+                Some(id) => format!("surface {id}"),
+                None => {
+                    issue(
+                        whole.clone(),
+                        Severity::Error,
+                        "surface card has no readable id".to_owned(),
+                    );
+                    "surface".to_owned()
+                }
+            };
             if !l.well_formed {
-                out.diagnostics.push(Pending {
-                    card: index,
-                    local: 0..card.len_bytes(),
-                    severity: Severity::Warning,
-                    message: match l.id {
-                        Some(id) => format!("surface {id} is not well formed"),
-                        None => "surface is not well formed".to_owned(),
-                    },
-                });
+                issue(
+                    whole,
+                    Severity::Warning,
+                    format!("{name} is not well formed"),
+                );
             }
+            if let Some((toks, message)) = surface::coeff_problem(card, &l) {
+                issue(span(toks), Severity::Warning, format!("{name}: {message}"));
+            }
+            l.id.map(|id| (Kind::Surface, id))
         }
         CardKind::Data => {
-            if let Some(head) = data::head(card) {
-                if let Some(id) = data::material_id(&head) {
-                    out.ids.push((Kind::Material, id, slot));
-                    let (_, ok) = data::material_entries(card, &head);
-                    if !ok {
-                        out.diagnostics.push(Pending {
-                            card: index,
-                            local: 0..card.len_bytes(),
-                            severity: Severity::Warning,
-                            message: format!("material {id} has an unreadable entry"),
-                        });
-                    }
-                } else if let Some(id) = data::transform_id(&head) {
-                    out.ids.push((Kind::Transform, id, slot));
+            let head = data::head(card)?;
+            if let Some(id) = data::material_id(&head) {
+                let (_, ok) = data::material_entries(card, &head);
+                if !ok {
+                    issue(
+                        whole,
+                        Severity::Warning,
+                        format!("material {id} has an unreadable entry"),
+                    );
                 }
+                Some((Kind::Material, id))
+            } else if let Some(id) = data::transform_id(&head) {
+                if let Some((toks, message)) = data::transform_problem(card, &head) {
+                    issue(
+                        span(toks),
+                        Severity::Warning,
+                        format!("transform {id}: {message}"),
+                    );
+                }
+                Some((Kind::Transform, id))
+            } else {
+                None
             }
         }
-        _ => {}
+        _ => None,
     }
 }
 

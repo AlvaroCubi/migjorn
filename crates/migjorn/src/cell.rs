@@ -4,6 +4,7 @@ use migjorn_syntax::{Card, SyntaxKind};
 use std::fmt;
 use std::ops::Range;
 
+use crate::param;
 use crate::scan::{float_at, int_at, kind_at, next, prev, sig, text_at};
 
 /// Where each field of a cell card sits, as token indices.
@@ -125,6 +126,87 @@ pub struct GeometryTerm {
     pub text: String,
     /// Token index of the term's number (or of the operator itself).
     pub token: usize,
+    /// The parsed reference of a `Surface` term. `None` for other kinds, and
+    /// for a surface term that is not a valid reference (which makes the cell
+    /// not well formed).
+    pub surface: Option<SurfaceRef>,
+    /// The cell of a `#n` complement. `None` for other kinds, for the `#` of a
+    /// `#( … )` region, and for a `#` followed by something that is not a cell
+    /// number (which makes the cell not well formed).
+    pub cell: Option<i64>,
+}
+
+/// A signed surface reference in a geometry expression: `-3`, `+5`, `470.2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SurfaceRef {
+    /// The surface number, always positive.
+    pub id: i64,
+    /// The macrobody facet after the `.`: `470.2` -> `Some(2)`.
+    pub facet: Option<u8>,
+    /// Written with a leading `-`: the negative sense.
+    pub negative: bool,
+}
+
+impl SurfaceRef {
+    /// Read one geometry number. `None` unless it is an optional sign, a
+    /// positive integer, and optionally `.` and a single facet digit `1`–`9`.
+    ///
+    /// ```
+    /// use migjorn::SurfaceRef;
+    /// assert_eq!(
+    ///     SurfaceRef::parse("-470.1"),
+    ///     Some(SurfaceRef { id: 470, facet: Some(1), negative: true })
+    /// );
+    /// assert_eq!(SurfaceRef::parse("1e3"), None);
+    /// ```
+    pub fn parse(text: &str) -> Option<SurfaceRef> {
+        let (negative, body) = match text.as_bytes().first()? {
+            b'-' => (true, &text[1..]),
+            b'+' => (false, &text[1..]),
+            _ => (false, text),
+        };
+        let (id, facet) = match body.split_once('.') {
+            Some((id, facet)) => (id, Some(facet)),
+            None => (body, None),
+        };
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let id = id.parse::<i64>().ok().filter(|&id| id > 0)?;
+        let facet = match facet.map(str::as_bytes) {
+            None => None,
+            Some(&[d @ b'1'..=b'9']) => Some(d - b'0'),
+            Some(_) => return None,
+        };
+        Some(SurfaceRef {
+            id,
+            facet,
+            negative,
+        })
+    }
+
+    /// The surface number with its sense: `-470.1` -> `-470`.
+    pub fn signed_id(&self) -> i64 {
+        if self.negative {
+            -self.id
+        } else {
+            self.id
+        }
+    }
+}
+
+/// Writes the reference back as MCNP geometry text: `-470.1`, `5`.
+impl fmt::Display for SurfaceRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.negative {
+            f.write_str("-")?;
+        }
+        write!(f, "{}", self.id)?;
+        if let Some(facet) = self.facet {
+            write!(f, ".{facet}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Walk a cell's geometry expression.
@@ -159,32 +241,43 @@ pub(crate) fn walk_geometry_spans(
             continue;
         }
         let (kind, text, token, span) = match tokens[i].kind {
-            SyntaxKind::Number => (
-                GeometryTermKind::Surface,
-                card.token_text(i).to_owned(),
-                i,
-                i..i + 1,
-            ),
-            SyntaxKind::LParen => (GeometryTermKind::LParen, "(".to_owned(), i, i..i + 1),
-            SyntaxKind::RParen => (GeometryTermKind::RParen, ")".to_owned(), i, i..i + 1),
-            SyntaxKind::Colon => (GeometryTermKind::Union, ":".to_owned(), i, i..i + 1),
+            SyntaxKind::Number => {
+                let text = card.token_text(i);
+                out.push((
+                    GeometryTerm {
+                        kind: GeometryTermKind::Surface,
+                        text: text.to_owned(),
+                        token: i,
+                        surface: SurfaceRef::parse(text),
+                        cell: None,
+                    },
+                    i..i + 1,
+                ));
+                i += 1;
+                continue;
+            }
+            SyntaxKind::LParen => (GeometryTermKind::LParen, "(", i, i..i + 1),
+            SyntaxKind::RParen => (GeometryTermKind::RParen, ")", i, i..i + 1),
+            SyntaxKind::Colon => (GeometryTermKind::Union, ":", i, i..i + 1),
             SyntaxKind::Hash => {
                 // `#n` complements cell n; `#(` complements a region of surfaces.
                 match next(card, i).filter(|&j| kind_at(card, j) == Some(SyntaxKind::Number)) {
                     Some(j) => {
-                        let text = format!("#{}", card.token_text(j));
+                        let number = card.token_text(j);
                         out.push((
                             GeometryTerm {
                                 kind: GeometryTermKind::Complement,
-                                text,
+                                text: format!("#{number}"),
                                 token: j,
+                                surface: None,
+                                cell: complement_cell(number),
                             },
                             i..j + 1,
                         ));
                         i = j + 1;
                         continue;
                     }
-                    None => (GeometryTermKind::Complement, "#".to_owned(), i, i..i + 1),
+                    None => (GeometryTermKind::Complement, "#", i, i..i + 1),
                 }
             }
             _ => {
@@ -192,8 +285,81 @@ pub(crate) fn walk_geometry_spans(
                 continue;
             }
         };
-        out.push((GeometryTerm { kind, text, token }, span));
+        out.push((
+            GeometryTerm {
+                kind,
+                text: text.to_owned(),
+                token,
+                surface: None,
+                cell: None,
+            },
+            span,
+        ));
         i += 1;
+    }
+    out
+}
+
+/// The cell number of a `#n` complement: a positive integer, no sign.
+fn complement_cell(text: &str) -> Option<i64> {
+    (!text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| text.parse::<i64>().ok())
+        .flatten()
+        .filter(|&n| n > 0)
+}
+
+/// Problems with a geometry expression that the layout does not catch: a
+/// token that is not a surface, cell or operator, a number that is not a valid
+/// reference, and unbalanced parentheses. Each is a token range and a message.
+pub(crate) fn geometry_problems(card: &Card, range: &Range<usize>) -> Vec<(Range<usize>, String)> {
+    let mut out = Vec::new();
+    let tokens = card.tokens();
+    let end = range.end.min(tokens.len());
+    let mut depth = 0i32;
+    let mut i = range.start;
+    while i < end {
+        let tok = tokens[i];
+        if tok.is_trivia() {
+            i += 1;
+            continue;
+        }
+        let text = card.token_text(i);
+        match tok.kind {
+            SyntaxKind::Number => {
+                if SurfaceRef::parse(text).is_none() {
+                    out.push((i..i + 1, format!("`{text}` is not a surface reference")));
+                }
+            }
+            SyntaxKind::Hash => {
+                if let Some(j) = next(card, i).filter(|&j| j < end) {
+                    if kind_at(card, j) == Some(SyntaxKind::Number) {
+                        let number = card.token_text(j);
+                        if complement_cell(number).is_none() {
+                            out.push((i..j + 1, format!("`#{number}` is not a cell complement")));
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+            SyntaxKind::LParen => depth += 1,
+            SyntaxKind::RParen => {
+                depth -= 1;
+                if depth < 0 {
+                    out.push((i..i + 1, "unmatched `)` in geometry".to_owned()));
+                    depth = 0;
+                }
+            }
+            SyntaxKind::Colon => {}
+            _ => out.push((i..i + 1, format!("unexpected `{text}` in geometry"))),
+        }
+        i += 1;
+    }
+    if depth > 0 {
+        out.push((
+            range.start..end,
+            format!("{depth} unclosed `(` in geometry"),
+        ));
     }
     out
 }
@@ -230,11 +396,49 @@ impl CellParam {
     }
 }
 
+/// Where one parameter sits, as token indices; the allocation-free form of
+/// [`CellParam`].
+#[derive(Debug, Clone)]
+pub(crate) struct ParamSpan {
+    pub starred: bool,
+    pub key_token: usize,
+    pub particle_token: Option<usize>,
+    pub value_tokens: Range<usize>,
+}
+
+impl ParamSpan {
+    pub fn key<'a>(&self, card: &'a Card) -> &'a str {
+        card.token_text(self.key_token)
+    }
+
+    pub fn particle<'a>(&self, card: &'a Card) -> Option<&'a str> {
+        self.particle_token.map(|i| card.token_text(i))
+    }
+}
+
 /// Parse the trailing keyword parameters of a cell card.
 pub(crate) fn params(card: &Card, range: &Range<usize>) -> Vec<CellParam> {
+    param_spans(card, range)
+        .0
+        .into_iter()
+        .map(|p| CellParam {
+            key: p.key(card).to_owned(),
+            particle: p.particle(card).map(str::to_owned),
+            starred: p.starred,
+            value: slice_tokens(card, p.value_tokens.clone()),
+            key_token: p.key_token,
+            value_tokens: p.value_tokens,
+        })
+        .collect()
+}
+
+/// The parameters of a cell card, and the indices of tokens in the parameter
+/// range that belong to no parameter (a stray number or operator).
+pub(crate) fn param_spans(card: &Card, range: &Range<usize>) -> (Vec<ParamSpan>, Vec<usize>) {
     let tokens = card.tokens();
     let end = range.end.min(tokens.len());
     let mut out = Vec::new();
+    let mut strays = Vec::new();
     let mut cursor = range.start;
 
     while let Some(mut i) = sig(card, cursor) {
@@ -245,23 +449,27 @@ pub(crate) fn params(card: &Card, range: &Range<usize>) -> Vec<CellParam> {
         if starred {
             match next(card, i) {
                 Some(j) if j < end => i = j,
-                _ => break,
+                _ => {
+                    strays.push(i);
+                    break;
+                }
             }
         }
         if kind_at(card, i) != Some(SyntaxKind::Ident) {
             // Not a keyword — malformed. Skip it rather than mis-parsing the rest.
+            strays.push(i);
             cursor = i + 1;
             continue;
         }
         let key_token = i;
-        let key = card.token_text(i).to_owned();
+        let is_fill = card.token_text(i).eq_ignore_ascii_case("fill");
         let mut cur = next(card, i);
 
-        let mut particle = None;
+        let mut particle_token = None;
         if cur.is_some_and(|j| kind_at(card, j) == Some(SyntaxKind::Colon)) {
             let after_colon = next(card, cur.unwrap());
             if after_colon.is_some_and(|j| kind_at(card, j) == Some(SyntaxKind::Ident)) {
-                particle = Some(card.token_text(after_colon.unwrap()).to_owned());
+                particle_token = after_colon;
                 cur = next(card, after_colon.unwrap());
             } else {
                 cur = after_colon;
@@ -291,25 +499,102 @@ pub(crate) fn params(card: &Card, range: &Range<usize>) -> Vec<CellParam> {
                 // lex as identifiers but belong to the `fill` array.
                 Some(SyntaxKind::Ident) if in_fill_array && is_array_shortcut(card, k) => {}
                 Some(SyntaxKind::Ident) | Some(SyntaxKind::Star) if depth <= 0 => break,
-                Some(SyntaxKind::Colon) if key.eq_ignore_ascii_case("fill") => in_fill_array = true,
+                Some(SyntaxKind::Colon) if is_fill => in_fill_array = true,
                 _ => {}
             }
             value_end = k + 1;
             j = k + 1;
         }
 
-        let value = slice_tokens(card, value_start..value_end);
-        out.push(CellParam {
-            key,
-            particle,
+        out.push(ParamSpan {
             starred,
-            value,
             key_token,
+            particle_token,
             value_tokens: value_start..value_end,
         });
         cursor = value_end.max(key_token + 1);
     }
 
+    (out, strays)
+}
+
+/// Problems with a cell's parameters: values `FILL`, `TRCL`, `U`, `MAT`,
+/// `RHO`, `LAT` and `IMP` that cannot be read, one of those given twice, and
+/// tokens that belong to no parameter. Each is a token range and a message.
+pub(crate) fn param_problems<'a>(
+    card: &'a Card,
+    range: &Range<usize>,
+) -> Vec<(Range<usize>, String)> {
+    let (spans, strays) = param_spans(card, range);
+    let mut out: Vec<(Range<usize>, String)> = strays
+        .into_iter()
+        .map(|k| {
+            (
+                k..k + 1,
+                format!("`{}` is not part of any parameter", card.token_text(k)),
+            )
+        })
+        .collect();
+    // (key, particle) pairs already seen, to report a parameter given twice.
+    let mut seen: Vec<(&str, Option<&str>)> = Vec::new();
+    for p in &spans {
+        let key = p.key(card);
+        let v = &p.value_tokens;
+        let is = |name: &str| key.eq_ignore_ascii_case(name);
+        let res = if is("fill") {
+            param::read_fill(card, v).map(drop)
+        } else if is("trcl") {
+            param::read_trcl(card, v).map(drop)
+        } else if is("u") {
+            param::read_int(card, "U", v).map(drop)
+        } else if is("mat") {
+            param::read_material(card, v).map(drop)
+        } else if is("rho") {
+            param::read_float(card, "RHO", v).map(drop)
+        } else if is("lat") {
+            param::read_lattice(card, v).map(drop)
+        } else if is("imp") {
+            param::read_importance(card, v).map(drop)
+        } else {
+            continue;
+        };
+        if let Err(e) = res {
+            out.push((e.tokens, e.message));
+        }
+        let whole = p.key_token..v.end.max(p.key_token + 1);
+        let particle = p.particle(card);
+        if particle.is_none() && is("imp") {
+            out.push((whole, "IMP needs a particle, as in `IMP:N`".to_owned()));
+            continue;
+        }
+        let particles = particle.map(|list| list.split(',').map(str::trim));
+        let mut check = |q: Option<&'a str>| {
+            let same = |&(k, kq): &(&str, Option<&str>)| {
+                k.eq_ignore_ascii_case(key)
+                    && match (kq, q) {
+                        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            };
+            if seen.iter().any(same) {
+                let name = match q {
+                    Some(q) => format!("{key}:{q}"),
+                    None => key.to_owned(),
+                };
+                out.push((
+                    whole.clone(),
+                    format!("{} is given more than once", name.to_ascii_uppercase()),
+                ));
+            } else {
+                seen.push((key, q));
+            }
+        };
+        match particles {
+            Some(list) => list.for_each(|q| check(Some(q))),
+            None => check(None),
+        }
+    }
     out
 }
 

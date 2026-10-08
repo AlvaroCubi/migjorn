@@ -1,6 +1,7 @@
 //! Typed projection of a surface card: `[*|+]id [transform] mnemonic coeffs...`
 
 use migjorn_syntax::{Card, SyntaxKind};
+use std::ops::Range;
 
 use crate::scan::{float_at, int_at, kind_at, next, sig, text_at};
 
@@ -109,6 +110,39 @@ pub(crate) fn coeff_tokens(card: &Card, l: &SurfaceLayout) -> Vec<usize> {
     out
 }
 
+/// The first coefficient that is not a number, as a token range and a message.
+/// Coefficients are read up to it, so anything from it on would be lost; the
+/// surface is not well formed instead. Shortcuts (`2R`, `3J`) are not expanded
+/// and land here too.
+pub(crate) fn coeff_problem(card: &Card, l: &SurfaceLayout) -> Option<(Range<usize>, String)> {
+    let end = card.tokens().len();
+    let mut i = l.coeffs_start;
+    while let Some(k) = sig(card, i) {
+        if k >= end {
+            break;
+        }
+        if float_at(card, k).is_none() {
+            return Some((k..k + 1, non_number_message(card.token_text(k))));
+        }
+        i = k + 1;
+    }
+    None
+}
+
+/// Message for a token that should be a number in a value list.
+pub(crate) fn non_number_message(text: &str) -> String {
+    let shortcut = text
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .to_ascii_lowercase();
+    if !text.is_empty() && matches!(shortcut.as_str(), "r" | "i" | "j" | "m" | "ilog") {
+        format!("shortcut `{text}` is not supported here")
+    } else {
+        format!("`{text}` is not a number")
+    }
+}
+
+/// Coefficients up to the first token that is not a number; see
+/// [`coeff_problem`] for what makes the surface not well formed.
 pub(crate) fn coeffs(card: &Card, l: &SurfaceLayout) -> Vec<f64> {
     let mut out = Vec::new();
     let mut i = l.coeffs_start;

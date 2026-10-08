@@ -2,6 +2,7 @@
 //! pass-through for everything else.
 
 use migjorn_syntax::{Card, SyntaxKind};
+use std::ops::Range;
 
 use crate::scan::{float_at, kind_at, next, sig, split_name, text_at};
 
@@ -149,7 +150,8 @@ pub(crate) fn values_span(card: &Card, from: usize) -> Option<(usize, usize)> {
     Some((first, last))
 }
 
-/// All numeric values of a data card, trivia skipped. Used for transforms.
+/// The numeric values of a data card, trivia skipped, up to the first token
+/// that is not a number (see [`values_problem`]). Used for transforms.
 pub(crate) fn values(card: &Card, from: usize) -> Vec<f64> {
     let mut out = Vec::new();
     let end = card.tokens().len();
@@ -159,10 +161,46 @@ pub(crate) fn values(card: &Card, from: usize) -> Vec<f64> {
         if k >= end {
             break;
         }
-        if let Some(v) = float_at(card, k) {
-            out.push(v);
+        match float_at(card, k) {
+            Some(v) => out.push(v),
+            None => break,
         }
         i = k + 1;
     }
     out
+}
+
+/// The first value of a data card that is not a number, as a token range and
+/// a message. Shortcuts (`2J`, `3R`) are not expanded and land here too.
+pub(crate) fn values_problem(card: &Card, from: usize) -> Option<(Range<usize>, String)> {
+    let end = card.tokens().len();
+    let mut i = from;
+    while let Some(k) = sig(card, i) {
+        if k >= end {
+            break;
+        }
+        if float_at(card, k).is_none() {
+            return Some((
+                k..k + 1,
+                crate::surface::non_number_message(card.token_text(k)),
+            ));
+        }
+        i = k + 1;
+    }
+    None
+}
+
+/// Why a `TRn` card's values cannot be read: a value that is not a number, or
+/// a count MCNP does not accept.
+pub(crate) fn transform_problem(card: &Card, head: &DataHead) -> Option<(Range<usize>, String)> {
+    if let Some(p) = values_problem(card, head.values_start) {
+        return Some(p);
+    }
+    let n = values(card, head.values_start).len();
+    (!crate::param::inline_length_ok(n)).then(|| {
+        (
+            head.name_tok..card.tokens().len(),
+            crate::param::inline_length_message(n),
+        )
+    })
 }

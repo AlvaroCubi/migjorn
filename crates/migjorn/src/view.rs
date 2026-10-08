@@ -10,9 +10,11 @@
 
 use migjorn_syntax::Card;
 
-use crate::cell::{self, CellParam, Fill, GeometryTerm, GeometryTermKind};
+use crate::cell::{self, CellParam, Fill, GeometryTerm, ParamSpan, SurfaceRef};
 use crate::data::{self, DataHead};
+use crate::diagnostic::Diagnostic;
 use crate::model::Model;
+use crate::param::{self, FillSpec, TransformSpec};
 use crate::surface;
 
 macro_rules! view {
@@ -46,6 +48,15 @@ macro_rules! view {
             /// This card's exact current text.
             pub fn text(&self) -> &'a str {
                 self.require().text()
+            }
+
+            /// Every problem with this card as it reads now: what
+            /// `Model::diagnostics` reported for it at parse, recomputed so it
+            /// follows edits. Spans are relative to [`Self::text`], and `slot`
+            /// is this card's. Duplicate ids are a model-wide check and only
+            /// appear in `Model::diagnostics`.
+            pub fn diagnostics(&self) -> Vec<Diagnostic> {
+                crate::model::card_diagnostics(self.require(), self.slot)
             }
         }
     };
@@ -91,12 +102,19 @@ impl<'a> CellView<'a> {
         cell::geometry_text(card, &cell::layout(card).geometry)
     }
 
-    /// Signed surfaces in file order: `-1` keeps its sense, `+5` its prefix.
+    /// Surface references in file order, facets included: `-470.1` is
+    /// `SurfaceRef { id: 470, facet: Some(1), negative: true }`. A number that
+    /// is not a valid reference is left out (and the cell is not well formed).
+    pub fn surface_refs(&self) -> Vec<SurfaceRef> {
+        self.geometry().iter().filter_map(|t| t.surface).collect()
+    }
+
+    /// Signed surfaces in file order: `-1` keeps its sense, and a facet
+    /// reference counts as its macrobody (`-470.1` -> `-470`).
     pub fn signed_surfaces(&self) -> Vec<i64> {
-        self.geometry()
+        self.surface_refs()
             .iter()
-            .filter(|t| t.kind == GeometryTermKind::Surface)
-            .filter_map(|t| crate::scan::parse_int(&t.text))
+            .map(SurfaceRef::signed_id)
             .collect()
     }
 
@@ -105,7 +123,7 @@ impl<'a> CellView<'a> {
     /// Numbers inside `#( ... )` count here — that form complements a *region*
     /// of surfaces. A bare `#n` does not; see [`CellView::cell_refs`].
     pub fn surface_ids(&self) -> Vec<i64> {
-        self.signed_surfaces().into_iter().map(i64::abs).collect()
+        self.surface_refs().iter().map(|r| r.id).collect()
     }
 
     /// Cells referenced by a `#n` complement, plus a `LIKE n` base.
@@ -114,8 +132,7 @@ impl<'a> CellView<'a> {
         let l = cell::layout(card);
         let mut out: Vec<i64> = cell::walk_geometry(card, &l.geometry)
             .iter()
-            .filter(|t| t.kind == GeometryTermKind::Complement)
-            .filter_map(|t| crate::scan::parse_int(t.text.trim_start_matches('#')))
+            .filter_map(|t| t.cell)
             .collect();
         if let Some(base) = l.like {
             out.push(base);
@@ -135,11 +152,70 @@ impl<'a> CellView<'a> {
             .find(|p| p.qualified_key().eq_ignore_ascii_case(key))
     }
 
-    pub fn universe(&self) -> Option<i64> {
-        self.param("u")
-            .and_then(|p| crate::scan::parse_int(p.value.trim()))
+    /// The first parameter named `key` (any particle, starred or not).
+    fn param_span(&self, key: &str) -> Option<ParamSpan> {
+        let card = self.require();
+        cell::param_spans(card, &cell::layout(card).params)
+            .0
+            .into_iter()
+            .find(|p| p.key(card).eq_ignore_ascii_case(key))
     }
 
+    /// Read the first `key` parameter with `read`. `None` when the parameter
+    /// is absent or its value cannot be read; the latter also makes
+    /// [`CellView::well_formed`] false.
+    fn scalar<T>(
+        &self,
+        key: &str,
+        read: impl FnOnce(&Card, &std::ops::Range<usize>) -> Result<T, param::ValueError>,
+    ) -> Option<T> {
+        let p = self.param_span(key)?;
+        read(self.require(), &p.value_tokens).ok()
+    }
+
+    /// `U=`. `None` when absent or unreadable (see [`CellView::well_formed`]).
+    pub fn universe(&self) -> Option<i64> {
+        self.scalar("u", |c, v| param::read_int(c, "U", v))
+    }
+
+    /// `MAT=`, the material a `LIKE n BUT` cell switches to (`0` is void).
+    /// `None` when absent or unreadable (see [`CellView::well_formed`]).
+    pub fn material_override(&self) -> Option<i64> {
+        self.scalar("mat", param::read_material)
+    }
+
+    /// `RHO=`, the density a `LIKE n BUT` cell switches to, sign as written.
+    /// `None` when absent or unreadable (see [`CellView::well_formed`]).
+    pub fn density_override(&self) -> Option<f64> {
+        self.scalar("rho", |c, v| param::read_float(c, "RHO", v))
+    }
+
+    /// `LAT=`: `1` (hexahedral) or `2` (hexagonal prism). `None` when absent,
+    /// or when the value is anything else (see [`CellView::well_formed`]).
+    pub fn lattice(&self) -> Option<u8> {
+        self.scalar("lat", param::read_lattice)
+    }
+
+    /// The importance of `particle` (`"n"`, `"p"`, case ignored), from the
+    /// first `IMP:` parameter whose particle list names it: `IMP:N=1`,
+    /// `IMP:N,P=0`. `None` when no `IMP` names it or its value is unreadable
+    /// (see [`CellView::well_formed`]).
+    pub fn importance(&self, particle: &str) -> Option<f64> {
+        let card = self.require();
+        let p = cell::param_spans(card, &cell::layout(card).params)
+            .0
+            .into_iter()
+            .find(|p| {
+                p.key(card).eq_ignore_ascii_case("imp")
+                    && p.particle(card)
+                        .is_some_and(|list| param::names_particle(list, particle))
+            })?;
+        param::read_importance(card, &p.value_tokens).ok()
+    }
+
+    /// The single-universe `fill=`, kept in its text form for editing (see
+    /// `Model::set_fill`). `None` for the lattice-array form; read that, and
+    /// every fill as typed values, with [`CellView::fill_spec`].
     pub fn fill(&self) -> Option<Fill> {
         let card = self.require();
         let p = self
@@ -149,8 +225,45 @@ impl<'a> CellView<'a> {
         cell::fill(card, &p)
     }
 
+    /// The `FILL` / `*FILL` value as typed values, single or lattice array.
+    /// The `bool` is the star: angles in degrees for every inline transform.
+    ///
+    /// `None` when the cell has no fill. `Err` names what could not be read:
+    /// an array whose entry count does not match its index ranges, an empty
+    /// range, a shortcut other than `nR`, a malformed transform group.
+    pub fn fill_spec(&self) -> Option<Result<(FillSpec, bool), String>> {
+        let p = self.param_span("fill")?;
+        Some(
+            param::read_fill(self.require(), &p.value_tokens)
+                .map(|f| (f, p.starred))
+                .map_err(|e| e.message),
+        )
+    }
+
+    /// The `TRCL` / `*TRCL` value. The `bool` is the star: rotation entries
+    /// in degrees. A group of one value is a `TRn` number, with or without
+    /// parentheses.
+    ///
+    /// `None` when the cell has no `TRCL`; `Err` names what could not be read.
+    pub fn trcl(&self) -> Option<Result<(TransformSpec, bool), String>> {
+        let p = self.param_span("trcl")?;
+        Some(
+            param::read_trcl(self.require(), &p.value_tokens)
+                .map(|t| (t, p.starred))
+                .map_err(|e| e.message),
+        )
+    }
+
+    /// Whether the card reads in full: its layout (id, material, density,
+    /// geometry), every geometry reference, and the values of `FILL`, `TRCL`,
+    /// `U`, `MAT`, `RHO`, `LAT` and `IMP`. When `false`,
+    /// [`Self::diagnostics`] says why.
     pub fn well_formed(&self) -> bool {
-        cell::layout(self.require()).well_formed
+        let card = self.require();
+        let l = cell::layout(card);
+        l.well_formed
+            && cell::geometry_problems(card, &l.geometry).is_empty()
+            && cell::param_problems(card, &l.params).is_empty()
     }
 }
 
@@ -165,6 +278,9 @@ impl<'a> SurfaceView<'a> {
         surface::mnemonic(card, &surface::layout(card))
     }
 
+    /// The coefficients, up to the first token that is not a number. Such a
+    /// token (a shortcut like `2R` included) makes the surface not well
+    /// formed, so check [`SurfaceView::well_formed`] before trusting the list.
     pub fn coeffs(&self) -> Vec<f64> {
         let card = self.require();
         surface::coeffs(card, &surface::layout(card))
@@ -185,8 +301,12 @@ impl<'a> SurfaceView<'a> {
         surface::layout(self.require()).white
     }
 
+    /// Whether the card reads in full: id, mnemonic, at least one
+    /// coefficient, and every coefficient a number.
     pub fn well_formed(&self) -> bool {
-        surface::layout(self.require()).well_formed
+        let card = self.require();
+        let l = surface::layout(card);
+        l.well_formed && surface::coeff_problem(card, &l).is_none()
     }
 }
 
@@ -226,8 +346,17 @@ impl<'a> TransformView<'a> {
         self.head().starred
     }
 
+    /// The values, up to the first token that is not a number. Such a token
+    /// (a shortcut like `2J` included) makes the transform not well formed,
+    /// so check [`TransformView::well_formed`] before trusting the list.
     pub fn coeffs(&self) -> Vec<f64> {
         data::values(self.require(), self.head().values_start)
+    }
+
+    /// Whether every value is a number and there are 3, 6, 8, 9, 12 or 13 of
+    /// them.
+    pub fn well_formed(&self) -> bool {
+        data::transform_problem(self.require(), &self.head()).is_none()
     }
 
     /// The first three coefficients — the origin displacement.

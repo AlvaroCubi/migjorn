@@ -37,16 +37,19 @@ mod data;
 mod diagnostic;
 mod edit;
 mod model;
+mod param;
 mod renumber;
 mod scan;
 mod surface;
 mod view;
 
-pub use cell::{CellParam, Fill, GeometryTerm, GeometryTermKind};
+pub use cell::{CellParam, Fill, GeometryTerm, GeometryTermKind, SurfaceRef};
 pub use compose::{Collision, IdKind, Problem};
 pub use diagnostic::{Diagnostic, Severity};
 pub use edit::{CellHandle, EditError};
 pub use model::Model;
+pub use param::{FillEntry, FillSpec, TransformSpec};
+pub use scan::parse_float;
 pub use view::{CellView, DataCardView, MaterialView, SurfaceView, TransformView};
 
 pub use migjorn_syntax::{Card, CardKind, Cst, Eol, SyntaxKind, Token};

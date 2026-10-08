@@ -142,6 +142,36 @@ For **losslessness** we preserve these tokens verbatim — we do **not** expand
 them in the source. Typed readers that need expanded values (rare) expand a copy
 on demand; the stored card keeps the shorthand.
 
+What the typed readers do with them today:
+- **Lattice fill arrays** (`CellView::fill_spec`) expand `nR` (and a bare `R`),
+  repeating the previous entry with its `(…)` transform. `nJ`, `nI`, `nM` and
+  `nILOG` are an `Err`: which of them MCNP accepts in a fill array, and what
+  they mean there, is not confirmed.
+- **`TRn` cards and surface coefficients** expand nothing. A shortcut, or any
+  other token that is not a number, makes the card not well formed with a
+  diagnostic; `coeffs()` stops before it so no later value shifts into an
+  earlier slot.
+
+## Typed cell parameter values
+
+`CellView` reads these parameters as typed values; a value present but
+unreadable makes `well_formed()` false and records a diagnostic naming the
+cell (`CellView::diagnostics()` recomputes them for one card):
+
+| Parameter | Getter | Accepted |
+|---|---|---|
+| `FILL` / `*FILL` | `fill_spec()` | `u`, `u (n)`, `u (dx dy dz …)`, or `i1:i2 j1:j2 k1:k2` ranges then one entry per element |
+| `TRCL` / `*TRCL` | `trcl()` | `n`, `(n)`, `(dx dy dz …)` |
+| `U` | `universe()` | one integer, sign kept |
+| `MAT` / `RHO` | `material_override()` / `density_override()` | integer ≥ 0 / one float |
+| `LAT` | `lattice()` | `1` or `2` |
+| `IMP:p[,q…]` | `importance(p)` | one float ≥ 0; the first `IMP` naming `p` |
+
+An inline transform holds 3, 6, 8, 9, 12 or 13 values (displacement, then a
+rotation given in full, as two vectors, as one vector and a component, or as
+one vector, then `M`); `TRn` cards are held to the same counts. Any of these
+parameters given twice (the same particle counts for `IMP`) is also reported.
+
 ## Numbers and whitespace
 
 - Integers and floats in the usual forms, including `1e-3`, `1.5E+2`, leading
@@ -153,8 +183,9 @@ on demand; the stored card keeps the shorthand.
 ## Recoverability expectations
 
 Given malformed input the parser must, without panicking:
-- unbalanced parens, dangling operators → geometry marked not-well-formed, bytes
-  preserved, diagnostic recorded;
+- unbalanced parens, dangling operators, a geometry number that is not a
+  surface reference (`-1.0`, `1e3`; facets `470.1`–`470.9` are fine) →
+  geometry marked not-well-formed, bytes preserved, diagnostic recorded;
 - non-numeric where a number is expected → that field not-well-formed, bytes
   preserved;
 - too few/many surface coefficients → surface not-well-formed;

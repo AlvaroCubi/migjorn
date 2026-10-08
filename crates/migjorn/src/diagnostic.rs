@@ -18,7 +18,14 @@ pub struct Diagnostic {
     pub message: String,
     /// Byte range in the source **as parsed**. Edits do not move these; they
     /// describe the last parse.
+    ///
+    /// Diagnostics read off a single card (`CellView::diagnostics`, ...) are
+    /// the exception: their span is relative to that card's own current text.
     pub span: Range<usize>,
+    /// The card the diagnostic is about, as a stable slot (resolve it with
+    /// `Model::cell_at`, `Model::surface_at`, ...). `None` only for problems
+    /// that belong to no single card.
+    pub slot: Option<u32>,
 }
 
 impl Diagnostic {
@@ -27,6 +34,7 @@ impl Diagnostic {
             severity: Severity::Error,
             message,
             span,
+            slot: None,
         }
     }
 
@@ -35,7 +43,13 @@ impl Diagnostic {
             severity: Severity::Warning,
             message,
             span,
+            slot: None,
         }
+    }
+
+    pub(crate) fn on_slot(mut self, slot: u32) -> Diagnostic {
+        self.slot = Some(slot);
+        self
     }
 
     /// The 1-based line number containing `span.start`, counted in `source` —
@@ -56,9 +70,22 @@ impl Diagnostic {
 /// A diagnostic recorded against a card, before card offsets are known.
 pub(crate) struct Pending {
     pub card: usize,
+    pub slot: u32,
     pub local: Range<usize>,
     pub severity: Severity,
     pub message: String,
+}
+
+impl Pending {
+    /// As a `Diagnostic` whose span starts at byte `base` of the source.
+    pub(crate) fn at(self, base: usize) -> Diagnostic {
+        let span = base + self.local.start..base + self.local.end;
+        match self.severity {
+            Severity::Error => Diagnostic::error(self.message, span),
+            Severity::Warning => Diagnostic::warning(self.message, span),
+        }
+        .on_slot(self.slot)
+    }
 }
 
 #[cfg(test)]

@@ -191,16 +191,39 @@ pub(crate) fn values_problem(card: &Card, from: usize) -> Option<(Range<usize>, 
 }
 
 /// Why a `TRn` card's values cannot be read: a value that is not a number, or
-/// a count MCNP does not accept.
+/// a count MCNP does not accept. Trailing `nJ` jumps are fine: MCNP reads them
+/// as values left off, which is what [`values`] returns.
 pub(crate) fn transform_problem(card: &Card, head: &DataHead) -> Option<(Range<usize>, String)> {
-    if let Some(p) = values_problem(card, head.values_start) {
-        return Some(p);
+    if let Some((toks, message)) = values_problem(card, head.values_start) {
+        if !only_jumps_from(card, toks.start) {
+            return Some((toks, message));
+        }
     }
     let n = values(card, head.values_start).len();
-    (!crate::param::inline_length_ok(n)).then(|| {
+    (!crate::param::transform_length_ok(n, false)).then(|| {
         (
             head.name_tok..card.tokens().len(),
-            crate::param::inline_length_message(n),
+            crate::param::transform_length_message(n),
         )
     })
+}
+
+/// Whether every value from token `from` on is a jump: `J` or `nJ`.
+fn only_jumps_from(card: &Card, from: usize) -> bool {
+    let end = card.tokens().len();
+    let mut i = from;
+    while let Some(k) = sig(card, i) {
+        if k >= end {
+            break;
+        }
+        let t = card.token_text(k);
+        let Some(count) = t.strip_suffix(['j', 'J']) else {
+            return false;
+        };
+        if !count.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        i = k + 1;
+    }
+    true
 }

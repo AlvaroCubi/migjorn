@@ -89,7 +89,7 @@ fn trcl_forms_from_the_reference_model() {
         "1 0 -1 trcl=111 imp:n=1\n\
          2 0 -1 trcl=(284.0 1 0) imp:n=1\n\
          3 0 -1 *trcl=(314.0 0 0  30 60 90  120 30 90  90 90 0) imp:n=1\n\
-         4 0 -1 trcl=(1 2) imp:n=1",
+         4 0 -1 trcl=(1 2 3 4) imp:n=1",
     );
     let trcl = |id| m.cell(id).unwrap().trcl().unwrap();
     assert_eq!(trcl(1).unwrap(), (TransformSpec::Number(111), false));
@@ -106,23 +106,44 @@ fn trcl_forms_from_the_reference_model() {
 }
 
 #[test]
-fn transform_cards_with_shortcuts_are_not_well_formed() {
+fn transform_cards_read_like_mcnp() {
+    // Each case was run through MCNP 6.2 on a surface transform.
     let m = model(
         "1 0 -1 imp:n=1",
         "1 SO 5",
-        "tr1 0 0 0 1 0 0 2J 0 0 1\ntr2 0 0 0\n*tr3 1 2 3 30 60 90 120 30 90 90 90 0",
+        "tr1 0 0 0 1 0 0 2J 0 0 1\n\
+         tr2 0 0 0\n\
+         *tr3 1 2 3 30 60 90 120 30 90 90 90 0\n\
+         *tr4 -2117.17887\n\
+         tr5 5 0 0 1 0 0 0 1\n\
+         tr6 5 0 0 9J\n\
+         tr7 5 0 0 1 0 0 0 1 0 3J\n\
+         tr8",
     );
     let tr1 = m.transform(1).unwrap();
+    // a jump inside the values is fatal in MCNP
     assert!(!tr1.well_formed());
     // nothing after the shortcut is shifted into an earlier slot
     assert_eq!(tr1.coeffs(), vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
     assert!(tr1.diagnostics()[0].message.contains("`2J`"));
-    assert!(m.transform(2).unwrap().well_formed());
-    assert!(m.transform(3).unwrap().well_formed());
     assert!(m
         .diagnostics()
         .iter()
         .any(|d| d.message.contains("transform 1")));
+    assert!(m.transform(2).unwrap().well_formed());
+    assert!(m.transform(3).unwrap().well_formed());
+    // one value: the rest of the displacement defaults to 0
+    assert!(m.transform(4).unwrap().well_formed());
+    // 8 values: "surface transformation 5 is incorrectly defined"
+    assert!(!m.transform(5).unwrap().well_formed());
+    // trailing jumps are values left off
+    let tr6 = m.transform(6).unwrap();
+    assert!(tr6.well_formed());
+    assert_eq!(tr6.coeffs(), vec![5.0, 0.0, 0.0]);
+    assert!(m.transform(7).unwrap().well_formed());
+    assert_eq!(m.transform(7).unwrap().coeffs().len(), 9);
+    // no values: the identity
+    assert!(m.transform(8).unwrap().well_formed());
 }
 
 #[test]
@@ -216,6 +237,10 @@ fn scalar_parameters() {
     assert_eq!(c3.importance("n"), Some(0.5));
     assert_eq!(c3.importance("p"), Some(0.5));
     assert_eq!(c3.lattice(), Some(2));
+    assert_eq!(
+        cells("1 0 -1 lat=0 imp:n=1").cell(1).unwrap().lattice(),
+        Some(0)
+    );
     assert_eq!(m.cell(1).unwrap().material_override(), None);
 
     let c4 = m.cell(4).unwrap();
@@ -230,14 +255,18 @@ fn scalar_parameters() {
 }
 
 #[test]
-fn a_parameter_given_twice_is_reported() {
+fn an_importance_given_twice_is_reported() {
+    // MCNP stops on a repeated IMP particle, but silently uses the first of
+    // two `U`s, and the getters do the same.
     let m = cells("1 0 -1 imp:n=1 imp:n,p=0\n2 0 -1 u=1 U=2 imp:n=1");
     let c1 = m.cell(1).unwrap();
     assert!(!c1.well_formed());
     assert!(c1.diagnostics()[0]
         .message
         .contains("IMP:N is given more than once"));
-    assert!(!m.cell(2).unwrap().well_formed());
+    let c2 = m.cell(2).unwrap();
+    assert!(c2.well_formed());
+    assert_eq!(c2.universe(), Some(1));
 }
 
 #[test]

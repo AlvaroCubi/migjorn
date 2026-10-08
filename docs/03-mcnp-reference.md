@@ -143,13 +143,19 @@ them in the source. Typed readers that need expanded values (rare) expand a copy
 on demand; the stored card keeps the shorthand.
 
 What the typed readers do with them today:
-- **Lattice fill arrays** (`CellView::fill_spec`) expand `nR` (and a bare `R`),
-  repeating the previous entry with its `(…)` transform. `nJ`, `nI`, `nM` and
-  `nILOG` are an `Err`: which of them MCNP accepts in a fill array, and what
-  they mean there, is not confirmed.
-- **`TRn` cards and surface coefficients** expand nothing. A shortcut, or any
-  other token that is not a number, makes the card not well formed with a
-  diagnostic; `coeffs()` stops before it so no later value shifts into an
+- **Lattice fill arrays** (`CellView::fill_spec`): `nR` / `R` repeat the
+  previous universe, `nI` / `I` interpolate, `nM` multiplies. MCNP does this in
+  integer arithmetic (`1 1I 2` gives `1 1 2`, `2 1I 1` gives `2 2 1`,
+  `4 0.5M` gives `4`), so `nI` / `nM` are expanded only when the result is
+  exact, and are an `Err` otherwise. `nJ`, `nILOG`, a bare `M`, and any
+  shortcut directly after a `(…)` group are fatal in MCNP and an `Err` here. A
+  group may follow a universe, `nR` (it applies to the last repeated entry),
+  `nM`, or the universe that ends an `nI`; directly after `nI` it is fatal.
+- **`TRn` cards**: trailing `nJ` jumps are values left off, and are accepted.
+  A jump between values (`1 0 0 2J 0 0 1`) is fatal in MCNP.
+- **Other shortcuts on `TRn` and surface cards** are not expanded. They, or
+  any other token that is not a number, make the card not well formed with a
+  diagnostic; `coeffs()` stops before them so no later value shifts into an
   earlier slot.
 
 ## Typed cell parameter values
@@ -164,13 +170,20 @@ cell (`CellView::diagnostics()` recomputes them for one card):
 | `TRCL` / `*TRCL` | `trcl()` | `n`, `(n)`, `(dx dy dz …)` |
 | `U` | `universe()` | one integer, sign kept |
 | `MAT` / `RHO` | `material_override()` / `density_override()` | integer ≥ 0 / one float |
-| `LAT` | `lattice()` | `1` or `2` |
+| `LAT` | `lattice()` | `0`, `1` or `2` |
 | `IMP:p[,q…]` | `importance(p)` | one float ≥ 0; the first `IMP` naming `p` |
 
-An inline transform holds 3, 6, 8, 9, 12 or 13 values (displacement, then a
-rotation given in full, as two vectors, as one vector and a component, or as
-one vector, then `M`); `TRn` cards are held to the same counts. Any of these
-parameters given twice (the same particle counts for `IMP`) is also reported.
+MCNP accepts a transform of 3, 6, 9, 12 or 13 values (displacement, then a
+rotation as one vector, two vectors or in full, then `M`); any other count is a
+fatal "surface transformation is incorrectly defined". A `TRn` card may also
+have 0, 1 or 2 values (the rest of the displacement defaults to 0), and an
+inline transform 2 (one value is a `TRn` number). `TRCL=5 0 0` is read by MCNP
+as `TR5`, so an unparenthesised list is an `Err`.
+
+A repeated `IMP` particle is fatal in MCNP and reported. MCNP silently uses the
+first of two `U`, `FILL` or `TRCL` parameters, as the getters do, so those are
+not reported. A negative universe in a `FILL` is kept as written; MCNP rejects
+it in an array ("universe -1 ... has no cells") and crashes on `FILL=-1`.
 
 ## Numbers and whitespace
 

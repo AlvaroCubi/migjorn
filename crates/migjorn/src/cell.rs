@@ -519,12 +519,13 @@ pub(crate) fn param_spans(card: &Card, range: &Range<usize>) -> (Vec<ParamSpan>,
 }
 
 /// Problems with a cell's parameters: values `FILL`, `TRCL`, `U`, `MAT`,
-/// `RHO`, `LAT` and `IMP` that cannot be read, one of those given twice, and
-/// tokens that belong to no parameter. Each is a token range and a message.
-pub(crate) fn param_problems<'a>(
-    card: &'a Card,
-    range: &Range<usize>,
-) -> Vec<(Range<usize>, String)> {
+/// `RHO`, `LAT` and `IMP` that cannot be read, an `IMP` particle given twice,
+/// and tokens that belong to no parameter. Each is a token range and a message.
+///
+/// Other parameters given twice are not reported: MCNP uses the first `U`,
+/// `FILL` or `TRCL` without complaint, and so do the getters. A repeated
+/// `IMP` particle is a fatal error in MCNP.
+pub(crate) fn param_problems(card: &Card, range: &Range<usize>) -> Vec<(Range<usize>, String)> {
     let (spans, strays) = param_spans(card, range);
     let mut out: Vec<(Range<usize>, String)> = strays
         .into_iter()
@@ -535,8 +536,8 @@ pub(crate) fn param_problems<'a>(
             )
         })
         .collect();
-    // (key, particle) pairs already seen, to report a parameter given twice.
-    let mut seen: Vec<(&str, Option<&str>)> = Vec::new();
+    // Particles with an `IMP` already, to report one given twice.
+    let mut seen: Vec<&str> = Vec::new();
     for p in &spans {
         let key = p.key(card);
         let v = &p.value_tokens;
@@ -561,38 +562,23 @@ pub(crate) fn param_problems<'a>(
         if let Err(e) = res {
             out.push((e.tokens, e.message));
         }
-        let whole = p.key_token..v.end.max(p.key_token + 1);
-        let particle = p.particle(card);
-        if particle.is_none() && is("imp") {
-            out.push((whole, "IMP needs a particle, as in `IMP:N`".to_owned()));
+        if !is("imp") {
             continue;
         }
-        let particles = particle.map(|list| list.split(',').map(str::trim));
-        let mut check = |q: Option<&'a str>| {
-            let same = |&(k, kq): &(&str, Option<&str>)| {
-                k.eq_ignore_ascii_case(key)
-                    && match (kq, q) {
-                        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
-                        (None, None) => true,
-                        _ => false,
-                    }
-            };
-            if seen.iter().any(same) {
-                let name = match q {
-                    Some(q) => format!("{key}:{q}"),
-                    None => key.to_owned(),
-                };
+        let whole = p.key_token..v.end.max(p.key_token + 1);
+        let Some(list) = p.particle(card) else {
+            out.push((whole, "IMP needs a particle, as in `IMP:N`".to_owned()));
+            continue;
+        };
+        for q in list.split(',').map(str::trim) {
+            if seen.iter().any(|s| s.eq_ignore_ascii_case(q)) {
                 out.push((
                     whole.clone(),
-                    format!("{} is given more than once", name.to_ascii_uppercase()),
+                    format!("IMP:{} is given more than once", q.to_ascii_uppercase()),
                 ));
             } else {
-                seen.push((key, q));
+                seen.push(q);
             }
-        };
-        match particles {
-            Some(list) => list.for_each(|q| check(Some(q))),
-            None => check(None),
         }
     }
     out

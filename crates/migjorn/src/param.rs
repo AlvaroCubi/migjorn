@@ -47,10 +47,12 @@ pub enum FillSpec {
     },
 }
 
-/// Number of values an inline transform may hold: the displacement, then a
-/// rotation given in full (9), as two vectors (6), as one vector and one
-/// component (5) or as one vector (3), then the `M` flag after a full rotation.
-const INLINE_TRANSFORM_LENGTHS: [usize; 6] = [3, 6, 8, 9, 12, 13];
+/// Number of values MCNP 6.2 accepts on a transform, checked against MCNP
+/// itself: the displacement, then optionally a rotation given as one vector
+/// (3), two vectors (6) or in full (9), then the `M` flag. A `TRn` card may also
+/// leave displacement entries off (0, 1 or 2 values; they default to 0); an
+/// inline transform of one value is a `TRn` number instead.
+const TRANSFORM_LENGTHS: [usize; 8] = [0, 1, 2, 3, 6, 9, 12, 13];
 
 /// Largest lattice fill array read, in elements. Far past any real model; it
 /// keeps a typo in an index range from allocating gigabytes.
@@ -95,13 +97,16 @@ fn one(k: usize) -> Range<usize> {
     k..k + 1
 }
 
-/// Whether the number of values in an inline transform is one MCNP accepts.
-pub(crate) fn inline_length_ok(n: usize) -> bool {
-    INLINE_TRANSFORM_LENGTHS.contains(&n)
+/// Whether a transform with `n` values is one MCNP accepts. `inline` is a
+/// `( … )` group on a cell, which needs at least two values.
+pub(crate) fn transform_length_ok(n: usize, inline: bool) -> bool {
+    TRANSFORM_LENGTHS.contains(&n) && !(inline && n < 2)
 }
 
-pub(crate) fn inline_length_message(n: usize) -> String {
-    format!("a transform has {n} values; expected 3, 6, 8, 9, 12 or 13")
+pub(crate) fn transform_length_message(n: usize) -> String {
+    format!(
+        "a transform has {n} values; MCNP accepts 3, 6, 9, 12 or 13 (or fewer than 3 on a TR card)"
+    )
 }
 
 /// The inside of a transform group (parentheses excluded), or a bare `TRCL=n`.
@@ -131,8 +136,8 @@ fn transform_group(card: &Card, toks: &[usize], span: Range<usize>) -> Read<Tran
                     }
                 }
             }
-            if !inline_length_ok(values.len()) {
-                return fail(span, inline_length_message(values.len()));
+            if !transform_length_ok(values.len(), true) {
+                return fail(span, transform_length_message(values.len()));
             }
             Ok(TransformSpec::Inline(values))
         }
@@ -169,9 +174,11 @@ pub(crate) fn read_trcl(card: &Card, value: &Range<usize>) -> Read<TransformSpec
     } else if toks.len() == 1 {
         (transform_group(card, &toks, whole(&toks))?, 1)
     } else {
+        // MCNP reads `TRCL=5 0 0` as `TRCL=5` and ignores the rest or
+        // fails, depending on the count; it is never an inline transform.
         return fail(
             whole(&toks),
-            "an inline TRCL transform must be in parentheses".to_owned(),
+            "TRCL takes one TR number, or an inline transform in parentheses".to_owned(),
         );
     };
     if let Some(&extra) = toks.get(used) {
@@ -285,56 +292,123 @@ fn read_fill_array(card: &Card, toks: &[usize]) -> Read<FillSpec> {
         list: Vec::new(),
         count: 0,
         cap: want,
+        last: None,
     };
-    // Whether the last entry was written directly (so a group may follow it).
-    let mut group_allowed = false;
+    let mut prev = Prev::Start;
     while let Some(&k) = toks.get(at) {
         let text = card.token_text(k);
-        match kind_at(card, k) {
-            Some(SyntaxKind::LParen) => {
+        let kind = kind_at(card, k);
+        // `nI` needs a universe written right after it.
+        if let Prev::Interpolate { tok, from, n } = prev {
+            let to = (kind == Some(SyntaxKind::Number))
+                .then(|| parse_int(text))
+                .flatten();
+            let Some(to) = to else {
+                return fail(
+                    tok..k + 1,
+                    format!(
+                        "`{}` must be followed by a universe number",
+                        card.token_text(tok)
+                    ),
+                );
+            };
+            // MCNP steps by a whole number, truncating `(to - from) / (n + 1)`,
+            // so an uneven gap does not give the evenly spaced universes the
+            // shortcut reads as. Only exact steps are expanded.
+            if (to - from) % (n + 1) != 0 {
+                return fail(
+                    tok..k + 1,
+                    format!(
+                        "`{from} {} {to}` does not interpolate to whole universe numbers",
+                        card.token_text(tok)
+                    ),
+                );
+            }
+            let step = (to - from) / (n + 1);
+            for i in 1..=n {
+                entries.push(from + step * i, 1);
+            }
+        }
+        let shortcut = match kind {
+            Some(SyntaxKind::Number) if parse_int(text).is_none() => Some(text),
+            Some(SyntaxKind::Ident) => Some(text),
+            _ => None,
+        }
+        .map(Shortcut::read);
+        match (kind, shortcut) {
+            (Some(SyntaxKind::LParen), _) => {
                 let (spec, n) = paren_group(card, &toks[at..])?;
-                if !group_allowed {
-                    return fail(
-                        toks[at]..toks[at + n - 1] + 1,
-                        "a fill array transform must follow a universe".to_owned(),
-                    );
+                let span = toks[at]..toks[at + n - 1] + 1;
+                match prev {
+                    Prev::Entry => {}
+                    Prev::Start => {
+                        return fail(
+                            span,
+                            "a fill array transform must follow a universe".to_owned(),
+                        )
+                    }
+                    Prev::Group => {
+                        return fail(span, "two transforms for one fill array entry".to_owned())
+                    }
+                    Prev::Interpolate { .. } => unreachable!("handled above"),
                 }
                 if let Some(last) = entries.list.last_mut() {
                     last.transform = Some(spec);
                 }
-                group_allowed = false;
+                prev = Prev::Group;
                 at += n;
                 continue;
             }
-            Some(SyntaxKind::Number) => {
-                if let Some(universe) = parse_int(text) {
-                    entries.push(
-                        FillEntry {
-                            universe,
-                            transform: None,
-                        },
-                        1,
-                    );
-                    group_allowed = true;
-                } else if let Some(n) = repeat_count(text) {
-                    entries.repeat(card, k, n)?;
-                    group_allowed = false;
-                } else if is_shortcut(text) {
-                    return fail(one(k), unsupported_shortcut(text));
-                } else {
-                    return fail(one(k), format!("fill universe `{text}` is not an integer"));
+            (Some(SyntaxKind::Number), None) => {
+                let universe = parse_int(text).expect("checked above");
+                entries.push(universe, 1);
+                prev = Prev::Entry;
+            }
+            (_, Some(shortcut)) => {
+                // MCNP rejects a shortcut right after a transform group.
+                if matches!(prev, Prev::Group) {
+                    return fail(one(k), format!("`{text}` cannot follow a transform group"));
                 }
-            }
-            Some(SyntaxKind::Ident) if text.eq_ignore_ascii_case("r") => {
-                entries.repeat(card, k, 1)?;
-                group_allowed = false;
-            }
-            Some(SyntaxKind::Ident) if is_shortcut(text) => {
-                return fail(one(k), unsupported_shortcut(text));
+                let Some(last) = entries.last.filter(|_| prev != Prev::Start) else {
+                    return fail(one(k), format!("`{text}` has no universe before it"));
+                };
+                match shortcut {
+                    Shortcut::Repeat(n) if n > 0 => {
+                        entries.push(last, n);
+                        prev = Prev::Entry;
+                    }
+                    Shortcut::Multiply(m) => {
+                        let Some(universe) = last.checked_mul(m) else {
+                            return fail(one(k), format!("`{last} {text}` overflows"));
+                        };
+                        entries.push(universe, 1);
+                        prev = Prev::Entry;
+                    }
+                    Shortcut::Interpolate(n) if n > 0 => {
+                        prev = Prev::Interpolate {
+                            tok: k,
+                            from: last,
+                            n: n as i64,
+                        };
+                    }
+                    Shortcut::Other(message) => return fail(one(k), message),
+                    Shortcut::Repeat(_) | Shortcut::Interpolate(_) => {
+                        return fail(one(k), format!("`{text}` has a zero count"))
+                    }
+                }
             }
             _ => return fail(one(k), format!("unexpected `{text}` in a fill array")),
         }
         at += 1;
+    }
+    if let Prev::Interpolate { tok, .. } = prev {
+        return fail(
+            one(tok),
+            format!(
+                "`{}` must be followed by a universe number",
+                card.token_text(tok)
+            ),
+        );
     }
 
     if entries.count != want {
@@ -352,6 +426,76 @@ fn read_fill_array(card: &Card, toks: &[usize]) -> Read<FillSpec> {
     })
 }
 
+/// What the previous fill-array token was, which decides what may follow it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prev {
+    Start,
+    /// An entry: a universe, or one made by `nR` / `nM`.
+    Entry,
+    /// A `( … )` transform group.
+    Group,
+    /// `nI`, waiting for the universe after it.
+    Interpolate {
+        tok: usize,
+        from: i64,
+        n: i64,
+    },
+}
+
+/// A data shortcut inside a fill array.
+enum Shortcut {
+    Repeat(usize),
+    Multiply(i64),
+    Interpolate(usize),
+    /// Not usable in a fill array; the message says why.
+    Other(String),
+}
+
+impl Shortcut {
+    /// What MCNP 6.2 does with each, checked against MCNP itself:
+    /// `nR` / `R` repeat the previous universe; `nI` / `I` interpolate whole
+    /// numbers; `nM` multiplies by a whole number. `nJ`, `nILOG` and a bare
+    /// `M` are fatal errors, and a fractional multiplier does not give the
+    /// product, so those are not read.
+    fn read(text: &str) -> Shortcut {
+        let lower = text.to_ascii_lowercase();
+        let split = lower
+            .find(|c: char| c.is_ascii_alphabetic())
+            .unwrap_or(lower.len());
+        let (count, letters) = lower.split_at(split);
+        let n = || -> Option<usize> {
+            if count.is_empty() {
+                Some(1)
+            } else if count.bytes().all(|b| b.is_ascii_digit()) {
+                count.parse().ok()
+            } else {
+                None
+            }
+        };
+        match letters {
+            "r" => n().map_or_else(|| Shortcut::Other(bad_count(text)), Shortcut::Repeat),
+            "i" => n().map_or_else(|| Shortcut::Other(bad_count(text)), Shortcut::Interpolate),
+            "m" if count.is_empty() => {
+                Shortcut::Other(format!("`{text}` needs a multiplier, as in `2M`"))
+            }
+            "m" => match parse_int(count) {
+                Some(m) => Shortcut::Multiply(m),
+                None => Shortcut::Other(format!(
+                    "`{text}`: only whole-number multipliers are read in a fill array"
+                )),
+            },
+            "j" | "ilog" => {
+                Shortcut::Other(format!("shortcut `{text}` is not allowed in a fill array"))
+            }
+            _ => Shortcut::Other(format!("`{text}` is not a universe number")),
+        }
+    }
+}
+
+fn bad_count(text: &str) -> String {
+    format!("`{text}` does not have a whole-number count")
+}
+
 /// Fill-array entries as they are read. Only the first `cap` are kept, so a
 /// stray `1000000R` cannot allocate past the array's size; `count` still
 /// counts every entry for the length check.
@@ -359,56 +503,22 @@ struct Entries {
     list: Vec<FillEntry>,
     count: i64,
     cap: i64,
+    /// The last universe written, kept past the cap.
+    last: Option<i64>,
 }
 
 impl Entries {
-    fn push(&mut self, entry: FillEntry, n: usize) {
+    /// `n` entries of `universe`, with no transform.
+    fn push(&mut self, universe: i64, n: usize) {
         let room = (self.cap - self.list.len() as i64).max(0) as usize;
+        let entry = FillEntry {
+            universe,
+            transform: None,
+        };
         self.list.extend(std::iter::repeat_n(entry, n.min(room)));
         self.count = self.count.saturating_add(n as i64);
+        self.last = Some(universe);
     }
-
-    /// `nR`: repeat the previous entry, its transform included, `n` times.
-    fn repeat(&mut self, card: &Card, k: usize, n: usize) -> Read<()> {
-        if self.count == 0 {
-            return fail(one(k), format!("`{}` repeats nothing", card.token_text(k)));
-        }
-        if n == 0 {
-            return fail(
-                one(k),
-                format!("`{}` repeats zero times", card.token_text(k)),
-            );
-        }
-        // Past the cap the kept entries no longer matter: the array is too
-        // long and is reported as such.
-        let last = self.list.last().cloned().unwrap_or(FillEntry {
-            universe: 0,
-            transform: None,
-        });
-        self.push(last, n);
-        Ok(())
-    }
-}
-
-/// `nR` (or `nr`) as a repeat count `n`.
-fn repeat_count(text: &str) -> Option<usize> {
-    let n = text.strip_suffix(['r', 'R'])?;
-    n.bytes()
-        .all(|b| b.is_ascii_digit())
-        .then(|| n.parse().ok())
-        .flatten()
-}
-
-/// Whether `text` is a data shortcut other than a repeat: `nJ`, `nI`, `nM`,
-/// `nILOG`, with or without the count.
-fn is_shortcut(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    let letters = lower.trim_start_matches(|c: char| c.is_ascii_digit());
-    matches!(letters, "j" | "i" | "m" | "ilog")
-}
-
-fn unsupported_shortcut(text: &str) -> String {
-    format!("shortcut `{text}` is not supported in a fill array (only `nR` is)")
 }
 
 /// The single number a scalar parameter holds. Runs once per parameter at
@@ -469,9 +579,8 @@ pub(crate) fn read_material(card: &Card, value: &Range<usize>) -> Read<i64> {
 
 pub(crate) fn read_lattice(card: &Card, value: &Range<usize>) -> Read<u8> {
     match read_int(card, "LAT", value)? {
-        1 => Ok(1),
-        2 => Ok(2),
-        n => fail(value.clone(), format!("LAT={n}; expected 1 or 2")),
+        n @ 0..=2 => Ok(n as u8),
+        n => fail(value.clone(), format!("LAT={n}; expected 0, 1 or 2")),
     }
 }
 
@@ -506,11 +615,24 @@ mod tests {
         got
     }
 
-    fn e(universe: i64) -> FillEntry {
-        FillEntry {
-            universe,
-            transform: None,
-        }
+    /// The universes of a 4-element fill array, or the error.
+    fn universes(entries: &str) -> Result<Vec<i64>, String> {
+        let (spec, _) = fill(&format!("1 0 -1 lat=1 fill=0:3 0:0 0:0 {entries}"))?;
+        let FillSpec::Array { entries, .. } = spec else {
+            panic!("not an array")
+        };
+        Ok(entries.iter().map(|e| e.universe).collect())
+    }
+
+    /// Indices of the entries that carry a transform.
+    fn transformed(entries: &str) -> Vec<usize> {
+        let (spec, _) = fill(&format!("1 0 -1 lat=1 fill=0:3 0:0 0:0 {entries}")).unwrap();
+        let FillSpec::Array { entries, .. } = spec else {
+            panic!("not an array")
+        };
+        (0..entries.len())
+            .filter(|&i| entries[i].transform.is_some())
+            .collect()
     }
 
     #[test]
@@ -542,61 +664,84 @@ mod tests {
                 true
             )
         );
+        // MCNP accepts a two-value displacement
+        assert!(fill("1 0 -1 fill=5 (1 2)").is_ok());
         assert!(fill("1 0 -1 fill=5 (3) 4").is_err());
         assert!(fill("1 0 -1 fill=5.5").is_err());
-        assert!(fill("1 0 -1 fill=5 (1 2)").is_err());
+        assert!(fill("1 0 -1 fill=5 (1 2 3 4)").is_err());
         assert!(fill("1 0 -1 fill=5 (1 2 3").is_err());
     }
 
+    // The fill-array cases below were run through MCNP 6.2: a 4-element
+    // lattice, each element probed for the universe (and transform) it holds.
+
     #[test]
-    fn fill_array_expands_repeats_and_attaches_groups() {
-        let (spec, starred) = fill("1 0 -1 lat=1 fill=0:1 -1:0 0:0 1 (4) 2r -7 (0.5 0 0)").unwrap();
-        assert!(!starred);
-        let t4 = Some(TransformSpec::Number(4));
-        assert_eq!(
-            spec,
-            FillSpec::Array {
-                ranges: [(0, 1), (-1, 0), (0, 0)],
-                entries: vec![
-                    FillEntry {
-                        universe: 1,
-                        transform: t4.clone()
-                    },
-                    FillEntry {
-                        universe: 1,
-                        transform: t4.clone()
-                    },
-                    FillEntry {
-                        universe: 1,
-                        transform: t4
-                    },
-                    FillEntry {
-                        universe: -7,
-                        transform: Some(TransformSpec::Inline(vec![0.5, 0.0, 0.0]))
-                    },
-                ],
-            }
-        );
-        // a bare `R` repeats once
-        let (spec, _) = fill("1 0 -1 lat=1 fill=0:1 0:0 0:0 2 R").unwrap();
-        let FillSpec::Array { entries, .. } = spec else {
-            panic!()
-        };
-        assert_eq!(entries, vec![e(2), e(2)]);
+    fn fill_array_shortcuts_match_mcnp() {
+        assert_eq!(universes("1 2 2R"), Ok(vec![1, 2, 2, 2]));
+        assert_eq!(universes("1 R 2 3"), Ok(vec![1, 1, 2, 3]));
+        assert_eq!(universes("1 1I 3 3"), Ok(vec![1, 2, 3, 3]));
+        assert_eq!(universes("1 I 3 3"), Ok(vec![1, 2, 3, 3]));
+        assert_eq!(universes("1 2I 4"), Ok(vec![1, 2, 3, 4]));
+        assert_eq!(universes("4 1I 2 2"), Ok(vec![4, 3, 2, 2]));
+        assert_eq!(universes("1 2M 3 3"), Ok(vec![1, 2, 3, 3]));
+        assert_eq!(universes("1 2M 2M 3"), Ok(vec![1, 2, 4, 3]));
+        assert_eq!(universes("1 2M R 3"), Ok(vec![1, 2, 2, 3]));
+        assert_eq!(universes("1 R 1I 3"), Ok(vec![1, 1, 2, 3]));
     }
 
     #[test]
-    fn fill_array_errors_are_reported_not_guessed() {
-        let err = |s: &str| fill(s).unwrap_err();
-        assert!(err("1 0 -1 lat=1 fill=0:1 0:0 0:0 1").contains("1 entries for 2"));
-        assert!(err("1 0 -1 lat=1 fill=0:1 0:0 0:0 1 2 3").contains("3 entries for 2"));
-        assert!(err("1 0 -1 lat=1 fill=1:0 0:0 0:0 1").contains("empty"));
-        assert!(err("1 0 -1 lat=1 fill=0:1 0:0 1 2").contains("index range"));
-        assert!(err("1 0 -1 lat=1 fill=0:2 0:0 0:0 1 1J 2").contains("`1J`"));
-        assert!(err("1 0 -1 lat=1 fill=0:2 0:0 0:0 1 1I 3").contains("`1I`"));
-        assert!(err("1 0 -1 lat=1 fill=0:1 0:0 0:0 2R 1").contains("repeats nothing"));
-        assert!(err("1 0 -1 lat=1 fill=0:1 0:0 0:0 (3) 1 1").contains("must follow"));
-        assert!(err("1 0 -1 lat=1 fill=0:1 0:0 0:0 1 (3) (4) 1").contains("must follow"));
+    fn fill_array_groups_attach_to_the_entry_before_them() {
+        assert_eq!(transformed("1 (1) 1 (1) 1 2"), vec![0, 1]);
+        assert_eq!(transformed("1 (1) 2 2R"), vec![0]);
+        // after `nR`, only the last repeated entry
+        assert_eq!(transformed("1 2R (1) 2"), vec![2]);
+        // after `nM` and after the end of an interpolation
+        assert_eq!(transformed("1 2M (1) 3 3"), vec![1]);
+        assert_eq!(transformed("1 1I 3 (1) 3"), vec![2]);
+        let (spec, _) = fill("1 0 -1 lat=1 fill=0:1 0:0 0:0 4 (4) -7 (0.5 0 0)").unwrap();
+        let FillSpec::Array { entries, .. } = spec else {
+            panic!()
+        };
+        assert_eq!(
+            entries,
+            vec![
+                FillEntry {
+                    universe: 4,
+                    transform: Some(TransformSpec::Number(4))
+                },
+                FillEntry {
+                    universe: -7,
+                    transform: Some(TransformSpec::Inline(vec![0.5, 0.0, 0.0]))
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn fill_array_inputs_mcnp_rejects_are_errors() {
+        let err = |s: &str| universes(s).unwrap_err();
+        // fatal in MCNP
+        assert!(err("1 1J 2 3").contains("`1J`"));
+        assert!(err("1 1ILOG 3 3").contains("`1ILOG`"));
+        assert!(err("2 M 3 3").contains("`M`"));
+        assert!(err("1 (1) 2R 2").contains("cannot follow a transform"));
+        assert!(err("1 (1) 2M 3 3").contains("cannot follow a transform"));
+        assert!(err("1 (1) 1I 3 3").contains("cannot follow a transform"));
+        assert!(err("1 1I (1) 3 3").contains("must be followed by a universe"));
+        assert!(err("1 2 3").contains("3 entries for 4"));
+        assert!(err("1 2 3 3 3").contains("5 entries for 4"));
+        // accepted by MCNP, but not with the meaning the shortcut reads as
+        assert!(err("1 1I 2 2").contains("whole universe numbers"));
+        assert!(err("1 2I 3").contains("whole universe numbers"));
+        assert!(err("4 0.5M 3 3").contains("whole-number multipliers"));
+        // malformed
+        assert!(err("2R 1 1 1").contains("no universe before"));
+        assert!(err("1 2 3 1I").contains("must be followed by a universe"));
+        assert!(err("(3) 1 1 1 1").contains("must follow"));
+        assert!(err("1 (3) (4) 1 1 1").contains("two transforms"));
+        let range = |s: &str| fill(s).unwrap_err();
+        assert!(range("1 0 -1 lat=1 fill=1:0 0:0 0:0 1").contains("empty"));
+        assert!(range("1 0 -1 lat=1 fill=0:1 0:0 1 2").contains("index range"));
     }
 
     #[test]
@@ -619,13 +764,17 @@ mod tests {
                 314.0, 0.0, 0.0, 30.0, 60.0, 90.0, 120.0, 30.0, 90.0, 90.0, 90.0, 0.0
             ])
         );
-        assert!(trcl("1 0 -1 trcl=(1 2 3 4)")
-            .unwrap_err()
-            .contains("4 values"));
+        // value counts MCNP accepts inline: 2, 3, 6, 9, 12, 13
+        let values = "5 0 0 1 0 0 0 1 0 0 0 1 1".split(' ').collect::<Vec<_>>();
+        for n in 2..=13 {
+            let ok = trcl(&format!("1 0 -1 trcl=({})", values[..n].join(" "))).is_ok();
+            assert_eq!(ok, [2, 3, 6, 9, 12, 13].contains(&n), "{n} values");
+        }
         assert!(trcl("1 0 -1 trcl=(1 2 2J)").unwrap_err().contains("`2J`"));
-        assert!(trcl("1 0 -1 trcl=1 2 3")
+        // MCNP reads this as TR 5, not as a displacement
+        assert!(trcl("1 0 -1 trcl=5 0 0")
             .unwrap_err()
-            .contains("parentheses"));
+            .contains("in parentheses"));
         assert!(trcl("1 0 -1 trcl=(0)").unwrap_err().contains("positive"));
     }
 

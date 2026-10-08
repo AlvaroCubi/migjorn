@@ -190,8 +190,9 @@ impl<'a> CellView<'a> {
         self.scalar("rho", |c, v| param::read_float(c, "RHO", v))
     }
 
-    /// `LAT=`: `1` (hexahedral) or `2` (hexagonal prism). `None` when absent,
-    /// or when the value is anything else (see [`CellView::well_formed`]).
+    /// `LAT=`: `1` (hexahedral), `2` (hexagonal prism), or `0` (not a
+    /// lattice; MCNP accepts it). `None` when absent, or when the value is
+    /// anything else (see [`CellView::well_formed`]).
     pub fn lattice(&self) -> Option<u8> {
         self.scalar("lat", param::read_lattice)
     }
@@ -228,9 +229,16 @@ impl<'a> CellView<'a> {
     /// The `FILL` / `*FILL` value as typed values, single or lattice array.
     /// The `bool` is the star: angles in degrees for every inline transform.
     ///
+    /// Shortcuts are expanded the way MCNP 6.2 reads them: `nR` / `R`
+    /// repeat the previous universe, `nI` / `I` interpolate, `nM` multiplies.
+    /// A `( … )` group applies to the entry just before it (after `nR`, the
+    /// last repeated one). Universes keep their sign as written.
+    ///
     /// `None` when the cell has no fill. `Err` names what could not be read:
-    /// an array whose entry count does not match its index ranges, an empty
-    /// range, a shortcut other than `nR`, a malformed transform group.
+    /// an entry count that does not match the index ranges, an empty range,
+    /// `nJ` / `nILOG` / bare `M` or a shortcut right after a group (all fatal
+    /// in MCNP), and `nI` / `nM` that do not land on whole universe numbers
+    /// (MCNP truncates them, so the shortcut does not mean what it reads as).
     pub fn fill_spec(&self) -> Option<Result<(FillSpec, bool), String>> {
         let p = self.param_span("fill")?;
         Some(
@@ -242,9 +250,11 @@ impl<'a> CellView<'a> {
 
     /// The `TRCL` / `*TRCL` value. The `bool` is the star: rotation entries
     /// in degrees. A group of one value is a `TRn` number, with or without
-    /// parentheses.
+    /// parentheses; an inline transform holds 2, 3, 6, 9, 12 or 13 values,
+    /// the counts MCNP accepts.
     ///
     /// `None` when the cell has no `TRCL`; `Err` names what could not be read.
+    /// `TRCL=5 0 0` is an `Err`: MCNP reads it as `TR5`, not a displacement.
     pub fn trcl(&self) -> Option<Result<(TransformSpec, bool), String>> {
         let p = self.param_span("trcl")?;
         Some(
@@ -346,15 +356,17 @@ impl<'a> TransformView<'a> {
         self.head().starred
     }
 
-    /// The values, up to the first token that is not a number. Such a token
-    /// (a shortcut like `2J` included) makes the transform not well formed,
-    /// so check [`TransformView::well_formed`] before trusting the list.
+    /// The values, up to the first token that is not a number. Trailing `nJ`
+    /// jumps are values left off, so this is the full list; any other such
+    /// token makes the transform not well formed, so check
+    /// [`TransformView::well_formed`] before trusting the list.
     pub fn coeffs(&self) -> Vec<f64> {
         data::values(self.require(), self.head().values_start)
     }
 
-    /// Whether every value is a number and there are 3, 6, 8, 9, 12 or 13 of
-    /// them.
+    /// Whether MCNP reads the card as written: every value a number, and 0,
+    /// 1, 2, 3, 6, 9, 12 or 13 of them. Trailing `nJ` jumps count as values
+    /// left off; any other shortcut makes the card not well formed.
     pub fn well_formed(&self) -> bool {
         data::transform_problem(self.require(), &self.head()).is_none()
     }

@@ -4,7 +4,7 @@ use migjorn_syntax::{Card, SyntaxKind};
 use std::fmt;
 use std::ops::Range;
 
-use crate::scan::{float_at, int_at, kind_at, next, sig, text_at};
+use crate::scan::{float_at, int_at, kind_at, next, prev, sig, text_at};
 
 /// Where each field of a cell card sits, as token indices.
 ///
@@ -277,6 +277,7 @@ pub(crate) fn params(card: &Card, range: &Range<usize>) -> Vec<CellParam> {
         let value_start = cur.unwrap_or(end);
         let mut value_end = value_start;
         let mut depth = 0i32;
+        let mut in_fill_array = false;
         let mut j = value_start;
         while j < end {
             let Some(k) = sig(card, j) else { break };
@@ -286,7 +287,11 @@ pub(crate) fn params(card: &Card, range: &Range<usize>) -> Vec<CellParam> {
             match kind_at(card, k) {
                 Some(SyntaxKind::LParen) => depth += 1,
                 Some(SyntaxKind::RParen) => depth -= 1,
+                // Lattice-array shortcuts written as a bare letter (`J`, `R`, ...)
+                // lex as identifiers but belong to the `fill` array.
+                Some(SyntaxKind::Ident) if in_fill_array && is_array_shortcut(card, k) => {}
                 Some(SyntaxKind::Ident) | Some(SyntaxKind::Star) if depth <= 0 => break,
+                Some(SyntaxKind::Colon) if key.eq_ignore_ascii_case("fill") => in_fill_array = true,
                 _ => {}
             }
             value_end = k + 1;
@@ -411,4 +416,76 @@ pub(crate) fn fill(card: &Card, p: &CellParam) -> Option<Fill> {
         starred: p.starred,
         transform,
     })
+}
+
+/// A bare-letter data shortcut (`J` jump, `R` repeat, `I` interpolate, `M`
+/// multiply, `ILOG`) as it can appear inside a `fill` array.
+fn is_array_shortcut(card: &Card, i: usize) -> bool {
+    let t = card.token_text(i);
+    ["j", "r", "i", "m", "ilog"]
+        .iter()
+        .any(|s| t.eq_ignore_ascii_case(s))
+}
+
+/// Token indices of the ids a `fill` / `trcl` parameter names, split by family.
+#[derive(Debug, Default)]
+pub(crate) struct ParamRefs {
+    /// Universe numbers (single fill, or every plain entry of a lattice array).
+    pub universes: Vec<usize>,
+    /// Transform numbers: `fill=u (n)`, `trcl=n`, `trcl=(n)`, and the `(n)`
+    /// groups inside a fill array. Inline transforms `(dx dy dz ...)` hold
+    /// several numbers and name no transform, so they are not listed.
+    pub transforms: Vec<usize>,
+}
+
+/// Locate the universe and transform number tokens of a `fill` or `trcl`
+/// parameter. Other keys return nothing.
+pub(crate) fn param_refs(card: &Card, p: &CellParam) -> ParamRefs {
+    let mut out = ParamRefs::default();
+    let end = p.value_tokens.end.min(card.tokens().len());
+    let is_fill = p.key.eq_ignore_ascii_case("fill");
+    if !is_fill && !p.key.eq_ignore_ascii_case("trcl") {
+        return out;
+    }
+    let is_plain_int = |k: usize| int_at(card, k).is_some();
+    let mut k = p.value_tokens.start;
+    // Whether the next plain number is a universe (fill) or transform (trcl).
+    let mut in_parens = false;
+    let mut group: Vec<usize> = Vec::new();
+    while let Some(i) = sig(card, k) {
+        if i >= end {
+            break;
+        }
+        k = i + 1;
+        match kind_at(card, i) {
+            Some(SyntaxKind::LParen) => {
+                in_parens = true;
+                group.clear();
+            }
+            Some(SyntaxKind::RParen) => {
+                if in_parens && group.len() == 1 {
+                    out.transforms.push(group[0]);
+                }
+                in_parens = false;
+            }
+            Some(SyntaxKind::Number) if in_parens => group.push(i),
+            Some(SyntaxKind::Number) => {
+                // Range bounds (`-1:1`) sit next to a colon and are not ids.
+                let next_is_colon =
+                    next(card, i).is_some_and(|j| kind_at(card, j) == Some(SyntaxKind::Colon));
+                let prev_is_colon =
+                    prev(card, i).is_some_and(|j| kind_at(card, j) == Some(SyntaxKind::Colon));
+                if next_is_colon || prev_is_colon || !is_plain_int(i) {
+                    continue;
+                }
+                if is_fill {
+                    out.universes.push(i);
+                } else {
+                    out.transforms.push(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }

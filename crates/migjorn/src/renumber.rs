@@ -41,6 +41,31 @@ pub(crate) fn remap_token<F: Fn(i64) -> i64>(text: &str, map: &F) -> Option<Comp
     Some(format_compact!("{sign}{}", map(n)))
 }
 
+/// Remap a surface reference in cell geometry. Like [`remap_token`], but also
+/// accepts a macrobody facet reference (`-470.1`: facet 1 of macrobody 470),
+/// remapping the macrobody number and keeping the `.k` suffix.
+pub(crate) fn remap_surface_ref<F: Fn(i64) -> i64>(text: &str, map: &F) -> Option<CompactString> {
+    match text.split_once('.') {
+        Some((whole, facet)) if !facet.is_empty() && facet.bytes().all(|b| b.is_ascii_digit()) => {
+            let new = remap_token(whole, map)?;
+            Some(format_compact!("{new}.{facet}"))
+        }
+        _ => remap_token(text, map),
+    }
+}
+
+/// [`remap_surface_ref`] for a tally bin, which may be glued to the start of a
+/// lattice index (`2[0`): only the part before the `[` is an id.
+fn remap_bin<F: Fn(i64) -> i64>(text: &str, map: &F) -> Option<CompactString> {
+    match text.split_once('[') {
+        Some((id, rest)) if !id.is_empty() => {
+            Some(format_compact!("{}[{rest}", remap_surface_ref(id, map)?))
+        }
+        Some(_) => None,
+        None => remap_surface_ref(text, map),
+    }
+}
+
 /// Remap the id baked into a data-card name token (`m1` -> `m501`, `TR3` -> `TR9`,
 /// `f4` -> `f14`), keeping the alphabetic part exactly as written.
 pub(crate) fn remap_name<F: Fn(i64) -> i64>(name: &str, map: &F) -> Option<CompactString> {
@@ -62,6 +87,148 @@ fn push_if_changed(
             edits.push((tok, new));
         }
     }
+}
+
+/// `nI` data shortcut (`n` evenly spaced values between its neighbours): the
+/// count `n`, or `None` if the token is anything else (`3R`, `4ILOG`, `7`).
+fn interp_count(text: &str) -> Option<i64> {
+    let digits = text.strip_suffix(['i', 'I'])?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Edits for the `nI` interpolation shortcuts among the tokens `range` of a
+/// card's id list (fill-array universes, tally bins).
+///
+/// `a 2I b` stands for `a, a+d, a+2d, b`; the intermediate ids are implicit, so
+/// a map that is not linear over them would silently change them. When the
+/// mapped endpoints still interpolate to the mapped intermediates the shortcut
+/// is kept; otherwise it is replaced by the explicit mapped values.
+/// `skip_parens` ignores parenthesised groups (a fill array's `(tr)` groups).
+fn interpolation_edits<F: Fn(i64) -> i64>(
+    card: &Card,
+    range: std::ops::Range<usize>,
+    skip_parens: bool,
+    map: &F,
+) -> Vec<(usize, CompactString)> {
+    let mut edits = Vec::new();
+    let (mut depth, mut brackets) = (0i32, false);
+    let mut last: Option<i64> = None;
+    let mut pending: Option<(usize, i64, i64)> = None; // (token, n, a)
+    let mut i = range.start;
+    while let Some(k) = sig(card, i) {
+        if k >= range.end {
+            break;
+        }
+        i = k + 1;
+        let text = card.token_text(k);
+        match card.tokens()[k].kind {
+            SyntaxKind::LParen => depth += 1,
+            SyntaxKind::RParen => depth -= 1,
+            _ if text.contains('[') => brackets = true,
+            _ if text.contains(']') => brackets = false,
+            SyntaxKind::Number if !brackets && !(skip_parens && depth > 0) => {
+                let near_colon = [crate::scan::prev(card, k), crate::scan::next(card, k)]
+                    .into_iter()
+                    .flatten()
+                    .any(|j| kind_at(card, j) == Some(SyntaxKind::Colon));
+                if near_colon {
+                    continue;
+                }
+                if let Some(n) = interp_count(text) {
+                    if let Some(a) = last {
+                        pending = Some((k, n, a));
+                    }
+                } else if let Some(v) = crate::scan::parse_int(text) {
+                    if let Some((tok, n, a)) = pending.take() {
+                        if let Some(e) = interpolate(tok, n, a, v, map) {
+                            edits.push(e);
+                        }
+                    }
+                    last = Some(v);
+                } else {
+                    // another shortcut (`3R`, `2J`): the neighbours are unknown
+                    pending = None;
+                    last = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    edits
+}
+
+fn interpolate<F: Fn(i64) -> i64>(
+    tok: usize,
+    n: i64,
+    a: i64,
+    b: i64,
+    map: &F,
+) -> Option<(usize, CompactString)> {
+    let steps = n + 1;
+    if n <= 0 || (b - a) % steps != 0 {
+        return None; // not an integer progression; leave it as written
+    }
+    let d = (b - a) / steps;
+    let mapped: Vec<i64> = (1..=n).map(|j| map(a + j * d)).collect();
+    let (ma, mb) = (map(a), map(b));
+    let linear = (mb - ma) % steps == 0
+        && mapped
+            .iter()
+            .enumerate()
+            .all(|(j, &m)| m == ma + (j as i64 + 1) * ((mb - ma) / steps));
+    if linear {
+        return None;
+    }
+    let text: Vec<String> = mapped.iter().map(i64::to_string).collect();
+    Some((tok, CompactString::from(text.join(" "))))
+}
+
+/// The bins of an `Fn` tally card: whether they are surfaces (`F1`/`F2`) or
+/// cells (`F4`/`F6`/`F7`/`F8`), and the token range holding them. Other tally
+/// types (`F5` detectors, ...) have no cell/surface bins.
+fn tally_bins(card: &Card) -> Option<(bool, std::ops::Range<usize>)> {
+    if card.kind() != CardKind::Data {
+        return None;
+    }
+    let h = data::head(card)?;
+    if h.mnemonic != "f" {
+        return None;
+    }
+    let surfaces = match h.number? % 10 {
+        1 | 2 => true,
+        4 | 6 | 7 | 8 => false,
+        _ => return None,
+    };
+    Some((surfaces, h.values_start..card.tokens().len()))
+}
+
+/// Bin ids of a tally card, as token indices: plain numbers outside `[...]`
+/// lattice indices, and not the `n` of a `nR`-style shortcut.
+fn tally_bin_tokens(card: &Card, range: std::ops::Range<usize>) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut brackets = false;
+    let mut i = range.start;
+    while let Some(k) = sig(card, i) {
+        if k >= range.end {
+            break;
+        }
+        i = k + 1;
+        let text = card.token_text(k);
+        // `2[0` is one word: the id, then the start of a lattice index.
+        if !brackets && card.tokens()[k].kind == SyntaxKind::Number {
+            out.push(k);
+        }
+        if text.contains('[') {
+            brackets = true;
+        }
+        if text.contains(']') {
+            brackets = false;
+        }
+    }
+    out
 }
 
 /// Which definition index a renumber rebuilds.
@@ -107,7 +274,7 @@ impl Model {
                         SyntaxKind::Number => {
                             if !after_hash {
                                 let i = start + offset;
-                                let new = remap_token(card.token_text(i), &map);
+                                let new = remap_surface_ref(card.token_text(i), &map);
                                 push_if_changed(&mut e, card, i, new);
                             }
                             after_hash = false;
@@ -115,6 +282,17 @@ impl Model {
                         SyntaxKind::Hash => after_hash = true,
                         _ => after_hash = false,
                     }
+                }
+                e
+            }
+            CardKind::Data => {
+                let mut e = Vec::new();
+                if let Some((true, range)) = tally_bins(card) {
+                    for tok in tally_bin_tokens(card, range.clone()) {
+                        let new = remap_bin(card.token_text(tok), &map);
+                        push_if_changed(&mut e, card, tok, new);
+                    }
+                    e.extend(interpolation_edits(card, range, false, &map));
                 }
                 e
             }
@@ -133,6 +311,15 @@ impl Model {
     /// every `LIKE n` base reference.
     pub fn renumber_cells<F: Fn(i64) -> i64 + Sync>(&mut self, map: F) {
         self.renumber_pass(Some(Family::Cell), |card| {
+            if let Some((false, range)) = tally_bins(card) {
+                let mut edits = Vec::new();
+                for tok in tally_bin_tokens(card, range.clone()) {
+                    let new = remap_bin(card.token_text(tok), &map);
+                    push_if_changed(&mut edits, card, tok, new);
+                }
+                edits.extend(interpolation_edits(card, range, false, &map));
+                return edits;
+            }
             if card.kind() != CardKind::Cell {
                 return Vec::new();
             }
@@ -239,6 +426,17 @@ impl Model {
                         push_if_changed(&mut edits, card, tok, new);
                     }
                 }
+                CardKind::Cell => {
+                    // `fill=u (n)`, `trcl=n` / `trcl=(n)` and the `(n)` groups
+                    // inside a lattice fill array.
+                    let l = cell::layout(card);
+                    for p in cell::params(card, &l.params) {
+                        for tok in cell::param_refs(card, &p).transforms {
+                            let new = remap_token(card.token_text(tok), &map);
+                            push_if_changed(&mut edits, card, tok, new);
+                        }
+                    }
+                }
                 _ => {}
             }
             edits
@@ -247,10 +445,10 @@ impl Model {
 
     // --- universes & tallies (no definition index) --------------------------
 
-    /// Renumber universes: every cell `u=` and every single-universe `fill=`
-    /// (keeping any following `(transform)` group). Lattice `fill=` arrays
-    /// (`fill=0:2 0:1 ...`) are left untouched — they name a grid of universes and
-    /// need their own array-aware pass.
+    /// Renumber universes: every cell `u=`, every single-universe `fill=`
+    /// (keeping any following `(transform)` group) and every universe entry of a
+    /// lattice `fill=` array (`fill=0:2 0:1 0:0 5 6 7`). Array shortcuts
+    /// (`3R`, `2J`, ...) and `(transform)` groups are left alone.
     pub fn renumber_universes<F: Fn(i64) -> i64 + Sync>(&mut self, map: F) {
         self.renumber_pass(None, |card| {
             if card.kind() != CardKind::Cell {
@@ -259,21 +457,25 @@ impl Model {
             let l = cell::layout(card);
             let mut edits = Vec::new();
             for p in cell::params(card, &l.params) {
-                let key = p.key.to_ascii_lowercase();
-                let single = key == "u" || key == "fill";
-                if !single {
-                    continue;
-                }
-                // A `:` in the value means an index range: the lattice array form.
-                let is_array = (p.value_tokens.start..p.value_tokens.end)
-                    .any(|k| kind_at(card, k) == Some(SyntaxKind::Colon));
-                if is_array {
-                    continue;
-                }
-                if let Some(tok) = sig(card, p.value_tokens.start) {
-                    if tok < p.value_tokens.end {
+                if p.key.eq_ignore_ascii_case("u") {
+                    if let Some(tok) = sig(card, p.value_tokens.start) {
+                        if tok < p.value_tokens.end {
+                            let new = remap_token(card.token_text(tok), &map);
+                            push_if_changed(&mut edits, card, tok, new);
+                        }
+                    }
+                } else {
+                    for tok in cell::param_refs(card, &p).universes {
                         let new = remap_token(card.token_text(tok), &map);
                         push_if_changed(&mut edits, card, tok, new);
+                    }
+                    if p.key.eq_ignore_ascii_case("fill") {
+                        edits.extend(interpolation_edits(
+                            card,
+                            p.value_tokens.clone(),
+                            true,
+                            &map,
+                        ));
                     }
                 }
             }
@@ -286,11 +488,10 @@ impl Model {
     /// remapped are touched, so the generous mnemonic set cannot disturb an
     /// unrelated card.
     ///
-    /// This does **not** touch the cell/surface *bins* inside those cards (e.g.
-    /// the `1 2 3` in `f4:n 1 2 3`) — [`Model::renumber_cells`] /
-    /// [`Model::renumber_surfaces`] only scan `Cell`/`Surface` cards, not
-    /// `Data` cards, so a bin referencing a renumbered cell or surface is left
-    /// dangling. See `docs/03-mcnp-reference.md`.
+    /// This does **not** touch the cell/surface *bins* inside those cards; that is
+    /// the job of [`Model::renumber_cells`] / [`Model::renumber_surfaces`], which
+    /// rewrite the bins of `F1`/`F2` (surfaces, facets included) and
+    /// `F4`/`F6`/`F7`/`F8` (cells) cards.
     pub fn renumber_tallies<F: Fn(i64) -> i64 + Sync>(&mut self, map: F) {
         const TALLY: &[&str] = &[
             "f", "fc", "fm", "fs", "fq", "fu", "ft", "fic", "fip", "fir", "e", "t", "c", "sd",
@@ -478,6 +679,64 @@ mod tests {
         let out = m.to_source();
         assert!(out.contains("u=42"), "{out}");
         assert!(out.contains("fill=42"), "{out}");
+    }
+
+    #[test]
+    fn renumber_facets_transforms_and_arrays() {
+        let src = "t\n1 0 -470.1 +470.2 imp:n=1\n2 0 -2 fill=3 (7) trcl=8 imp:n=1\n\
+3 0 -2 lat=1 u=4 fill=0:1 0:0 0:0 3 (7) 2R 5(9) imp:n=1\n4 0 -2 *trcl=(0 0 5) fill=3 (1 2 3) imp:n=1\n\n\
+470 RPP -1 1 -1 1 -1 1\n2 SO 9\n\nm1 1001 1\ntr7 0 0 1\n";
+        let mut m = Model::parse(src);
+        m.renumber_surfaces(|i| i + 1000);
+        assert!(
+            m.to_source().contains("-1470.1 +1470.2"),
+            "{}",
+            m.to_source()
+        );
+        m.renumber_transforms(|i| i + 100);
+        let out = m.to_source();
+        assert!(out.contains("fill=3 (107) trcl=108"), "{out}");
+        assert!(out.contains("3 (107) 2R 5(109)"), "{out}");
+        assert!(out.contains("*trcl=(0 0 5) fill=3 (1 2 3)"), "{out}");
+        m.renumber_universes(|i| i + 50);
+        let out = m.to_source();
+        assert!(
+            out.contains("u=54 fill=0:1 0:0 0:0 53 (107) 2R 55(109)"),
+            "{out}"
+        );
+        assert!(out.contains("fill=53 (107)"), "{out}");
+    }
+
+    #[test]
+    fn interpolation_shortcuts_are_expanded_when_not_preserved() {
+        let src = "t\n3 0 -2 lat=1 u=4 fill=0:3 0:0 0:0 1 2I 4 imp:n=1\n\n2 SO 9\n\nm1 1001 1\n";
+        let mut m = Model::parse(src);
+        m.renumber_universes(|i| i + 10); // linear: shortcut kept
+        assert!(m.to_source().contains("11 2I 14"), "{}", m.to_source());
+        let mut m = Model::parse(src);
+        m.renumber_universes(|i| if i == 2 { 77 } else { i + 10 });
+        assert!(
+            m.to_source().contains("fill=0:3 0:0 0:0 11 77 13 14"),
+            "{}",
+            m.to_source()
+        );
+    }
+
+    #[test]
+    fn renumber_tally_bins() {
+        let src = "t\n1 0 -1 imp:n=1\n2 0 -470.1 imp:n=1\n\n1 SO 5\n470 RPP -1 1 -1 1 -1 1\n\n\
+m1 1001 1\nf1:n 470.1 470.2 1\nf2:n,p (1 470.3) T\nf4:n 1<2[0 0 0] (1 2) 1 2I 7\nf5:n 1 1 1 0.1\n";
+        let mut m = Model::parse(src);
+        m.renumber_surfaces(|i| i + 1000);
+        m.renumber_cells(|i| i + 500);
+        let out = m.to_source();
+        assert!(out.contains("f1:n 1470.1 1470.2 1001"), "{out}");
+        assert!(out.contains("f2:n,p (1001 1470.3) T"), "{out}");
+        assert!(
+            out.contains("f4:n 501<502[0 0 0] (501 502) 501 2I 507"),
+            "{out}"
+        );
+        assert!(out.contains("f5:n 1 1 1 0.1"), "{out}");
     }
 
     #[test]

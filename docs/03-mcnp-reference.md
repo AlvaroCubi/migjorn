@@ -88,6 +88,10 @@ factor       := '#' '(' union ')'                       # complement of a region
   region whose interior numbers are **surface** references. The distinction
   (a `NUMBER` right after `#` is a cell, else a surface) is essential for
   renumbering — cell renumber must touch `#n` but not surfaces, and vice versa.
+- `CellView::geometry_expr()` reads this grammar into an `Expr` tree. It is an
+  `Err` exactly when the geometry has a diagnostic: unbalanced parentheses, a
+  `:` with nothing on one side, an empty `()`, a `#` with no cell number or
+  `(` after it, a bad reference, or nesting past 256 levels.
 
 ## Surface cards
 
@@ -182,7 +186,9 @@ as `TR5`, so an unparenthesised list is an `Err`.
 
 A repeated `IMP` particle is fatal in MCNP and reported. MCNP silently uses the
 first of two `U`, `FILL` or `TRCL` parameters, as the getters do, so those are
-not reported. A negative universe in a `FILL` is kept as written; MCNP rejects
+not reported. `Model::cell_data_cards()` lists the data cards (`IMP`, `U`,
+`FILL`, `TRCL`, `LAT`, vertical format, `READ`) that the getters do not read,
+so a caller can warn that they may not be what MCNP uses. A negative universe in a `FILL` is kept as written; MCNP rejects
 it in an array ("universe -1 ... has no cells") and crashes on `FILL=-1`.
 
 ## Numbers and whitespace

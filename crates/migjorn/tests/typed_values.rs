@@ -297,3 +297,62 @@ fn parse_float_reads_implicit_exponents() {
     assert_eq!(migjorn::parse_float("6.02+23"), Some(6.02e23));
     assert_eq!(migjorn::parse_float("1001.31c"), None);
 }
+
+#[test]
+fn geometry_expression_tree() {
+    use migjorn::Expr;
+    let m = cells("1 0 -1 #2 : -2.3 imp:n=1\n2 0 #(1 : -2) imp:n=1\n3 like 1 but imp:n=0");
+    let e = m.cell(1).unwrap().geometry_expr().unwrap();
+    let Expr::Or(items) = &e else { panic!("{e:?}") };
+    assert_eq!(items.len(), 2);
+    assert_eq!(e.to_string(), "-1 #2:-2.3");
+    assert!(matches!(
+        m.cell(2).unwrap().geometry_expr().unwrap(),
+        Expr::Not(_)
+    ));
+    assert!(m.cell(3).unwrap().geometry_expr().is_err());
+}
+
+#[test]
+fn card_lines_count_from_the_first_token() {
+    let src = "title\nc a comment\n1 0 -1\n     imp:n=1\nc above 2\n2 0 1 imp:n=0\n\n1 SO 5\n\n";
+    let m = Model::parse(src);
+    let lines = m.card_lines();
+    for (id, want) in [(1, 3), (2, 6)] {
+        let c = m.cell(id).unwrap();
+        assert_eq!(c.line(), want, "cell {id}");
+        assert_eq!(lines.line(c.slot()), Some(want));
+        assert_eq!(
+            src.lines().nth(want - 1).unwrap().split(' ').next(),
+            Some(&*id.to_string())
+        );
+    }
+    assert_eq!(m.surface(1).unwrap().line(), 8);
+}
+
+#[test]
+fn cell_parameters_on_data_cards_are_found() {
+    let plain = model("1 0 -1 imp:n=1", "1 SO 5", "m1 1001 1\ntr1 0 0 1\nimp:p 1");
+    // `imp:p` is a cell-parameter data card too
+    assert_eq!(plain.cell_data_cards().count(), 1);
+    let none = model("1 0 -1 imp:n=1", "1 SO 5", "m1 1001 1\ntr1 0 0 1\nmode n");
+    assert_eq!(none.cell_data_cards().count(), 0);
+    let all = model(
+        "1 0 -1",
+        "1 SO 5",
+        "imp:n 1\nu 0\n*fill 0\ntrcl 0\nlat 0\nread file=x.i\n#  imp:n\n   1",
+    );
+    let names: Vec<_> = all
+        .cell_data_cards()
+        .map(|d| d.name().map(str::to_owned))
+        .collect();
+    assert_eq!(names.len(), 7, "{names:?}");
+    // a vertical card with only weight windows does not change the cell cards
+    let wwn = model(
+        "1 0 -1",
+        "1 SO 5",
+        "#  wwn1:n  wwn2:n
+   1 1",
+    );
+    assert_eq!(wwn.cell_data_cards().count(), 0);
+}

@@ -137,6 +137,7 @@ name = "migjorn"
 version = "0.1.0"
 dependencies = [
  "compact_str",
+ "memchr",
  "migjorn-syntax",
  "rayon",
  "rustc-hash",

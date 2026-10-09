@@ -277,6 +277,67 @@ impl Model {
         (self.cst.card(slot)?.kind() == kind).then_some(())
     }
 
+    // --- source locations ---------------------------------------------------
+
+    /// The 1-based line, in [`Model::to_source`] as it reads now, of the first
+    /// token of the card at `slot` (comment lines above it not counted).
+    /// `None` if the slot was removed.
+    ///
+    /// A pass over the text up to the card; see [`Model::card_lines`] to
+    /// place many cards.
+    pub fn line_of(&self, slot: u32) -> Option<usize> {
+        let mut line = 1usize;
+        for &s in self.cst.order() {
+            let card = self.cst.card(s)?;
+            if s == slot {
+                return Some(line + first_token_line(card));
+            }
+            line += newlines(card.text());
+        }
+        None
+    }
+
+    /// The line of every card, in one pass: what [`Model::line_of`] returns,
+    /// for all slots at once. A snapshot: an edit that adds or removes a line
+    /// moves the cards after it, so build a new table after editing.
+    pub fn card_lines(&self) -> CardLines {
+        let order = self.cst.order();
+        let len = order.iter().max().map_or(0, |&s| s as usize + 1);
+        let mut lines = vec![0u32; len];
+        let mut line = 1usize;
+        for &s in order {
+            if let Some(card) = self.cst.card(s) {
+                lines[s as usize] =
+                    u32::try_from(line + first_token_line(card)).unwrap_or(u32::MAX);
+                line += newlines(card.text());
+            }
+        }
+        CardLines { lines }
+    }
+
+    // --- cell parameters outside cell cards -----------------------------------
+
+    /// Data cards that set or change what the cell cards say, which the
+    /// [`CellView`] getters do not read: the cell-parameter data cards `IMP`,
+    /// `U`, `FILL`, `TRCL` and `LAT` (starred or not), a vertical-format
+    /// card (`#` in the first columns) with one of them as a column, and
+    /// `READ` cards (which may bring in any of these).
+    ///
+    /// In a model with any of these, `CellView::importance`, `universe`,
+    /// `fill_spec`, `trcl` and `lattice` may not be what MCNP uses.
+    pub fn cell_data_cards(&self) -> impl Iterator<Item = DataCardView<'_>> + '_ {
+        self.cst
+            .cards()
+            .filter(|c| c.kind() == CardKind::Data)
+            .filter(|&c| match data::head(c) {
+                Some(h) => {
+                    h.number.is_none() && (is_cell_param(&h.mnemonic) || h.mnemonic == "read")
+                }
+                None => vertical_names_cell_param(c),
+            })
+            .map(move |c| DataCardView::new(self, c.slot()))
+    }
+
     // --- index construction -------------------------------------------------
 
     /// Build the four id indices and the parse diagnostics in one parallel pass.
@@ -365,6 +426,65 @@ impl Model {
                 self.diagnostics.push(pending.at(base));
             }
         }
+    }
+}
+
+/// The line of every card, by slot; see [`Model::card_lines`].
+#[derive(Debug, Clone)]
+pub struct CardLines {
+    /// Indexed by slot; 0 for a slot that is not in the model.
+    lines: Vec<u32>,
+}
+
+impl CardLines {
+    /// The 1-based line of the card at `slot`, or `None` if the slot was not
+    /// in the model when the table was built.
+    pub fn line(&self, slot: u32) -> Option<usize> {
+        match self.lines.get(slot as usize) {
+            Some(&0) | None => None,
+            Some(&line) => Some(line as usize),
+        }
+    }
+}
+
+/// A cell parameter that can also be given on a data card, and that the
+/// `CellView` getters read from the cell card only.
+fn is_cell_param(mnemonic: &str) -> bool {
+    matches!(mnemonic, "imp" | "u" | "fill" | "trcl" | "lat")
+}
+
+/// A vertical-format data card (`#  imp:n  u …`, then one row per cell) with
+/// a cell parameter among its column names.
+fn vertical_names_cell_param(card: &Card) -> bool {
+    let Some(first) = crate::scan::sig(card, 0) else {
+        return false;
+    };
+    if card.tokens()[first].kind != SyntaxKind::Hash {
+        return false;
+    }
+    // Column names are identifiers; a particle after `:` is not one.
+    (first + 1..card.tokens().len()).any(|i| {
+        card.tokens()[i].kind == SyntaxKind::Ident
+            && crate::scan::prev(card, i).is_none_or(|j| card.tokens()[j].kind != SyntaxKind::Colon)
+            && is_cell_param(
+                &card
+                    .token_text(i)
+                    .trim_start_matches('*')
+                    .to_ascii_lowercase(),
+            )
+    })
+}
+
+fn newlines(text: &str) -> usize {
+    memchr::memchr_iter(b'\n', text.as_bytes()).count()
+}
+
+/// Lines before the card's first token, within the card (comment lines that
+/// belong to it).
+fn first_token_line(card: &Card) -> usize {
+    match crate::scan::sig(card, 0) {
+        Some(i) => newlines(&card.text()[..card.tokens()[i].start as usize]),
+        None => 0,
     }
 }
 

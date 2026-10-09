@@ -308,14 +308,31 @@ fn complement_cell(text: &str) -> Option<i64> {
         .filter(|&n| n > 0)
 }
 
+/// Deepest parenthesis nesting read in a geometry expression. Far past any
+/// real model; it keeps a pathological input from overflowing the stack of
+/// the recursive [`crate::expr`] builder.
+pub(crate) const MAX_GEOMETRY_DEPTH: i32 = 256;
+
 /// Problems with a geometry expression that the layout does not catch: a
 /// token that is not a surface, cell or operator, a number that is not a valid
-/// reference, and unbalanced parentheses. Each is a token range and a message.
+/// reference, a `#` with no cell or group after it, a `:` with no operand on
+/// one side, an empty `()`, and unbalanced parentheses. Each is a token range
+/// and a message.
+///
+/// When this is empty, `crate::expr::build` reads the expression into a tree;
+/// the two read the same grammar, so every expression this accepts builds.
 pub(crate) fn geometry_problems(card: &Card, range: &Range<usize>) -> Vec<(Range<usize>, String)> {
     let mut out = Vec::new();
     let tokens = card.tokens();
     let end = range.end.min(tokens.len());
-    let mut depth = 0i32;
+    // Token indices of the open `(`s, innermost last.
+    let mut open: Vec<usize> = Vec::new();
+    // What the previous significant token was: `None` at the start of the
+    // expression or of a group, `Some(true)` after an operand (a surface, a
+    // `#n`, or a closing `)`), `Some(false)` after a `:`.
+    let mut after: Option<bool> = None;
+    // The `:` that `after == Some(false)` refers to.
+    let mut colon = 0usize;
     let mut i = range.start;
     while i < end {
         let tok = tokens[i];
@@ -329,36 +346,78 @@ pub(crate) fn geometry_problems(card: &Card, range: &Range<usize>) -> Vec<(Range
                 if SurfaceRef::parse(text).is_none() {
                     out.push((i..i + 1, format!("`{text}` is not a surface reference")));
                 }
+                after = Some(true);
             }
-            SyntaxKind::Hash => {
-                if let Some(j) = next(card, i).filter(|&j| j < end) {
-                    if kind_at(card, j) == Some(SyntaxKind::Number) {
-                        let number = card.token_text(j);
-                        if complement_cell(number).is_none() {
-                            out.push((i..j + 1, format!("`#{number}` is not a cell complement")));
-                        }
-                        i = j + 1;
-                        continue;
+            SyntaxKind::Hash => match next(card, i).filter(|&j| j < end) {
+                Some(j) if kind_at(card, j) == Some(SyntaxKind::Number) => {
+                    let number = card.token_text(j);
+                    if complement_cell(number).is_none() {
+                        out.push((i..j + 1, format!("`#{number}` is not a cell complement")));
                     }
+                    after = Some(true);
+                    i = j + 1;
+                    continue;
                 }
+                // `#( … )`: the `(` is read next, as any other group.
+                Some(j) if kind_at(card, j) == Some(SyntaxKind::LParen) => {}
+                _ => {
+                    out.push((
+                        i..i + 1,
+                        "`#` must be followed by a cell number or `(`".to_owned(),
+                    ));
+                    after = Some(true);
+                }
+            },
+            SyntaxKind::LParen => {
+                open.push(i);
+                if open.len() as i32 > MAX_GEOMETRY_DEPTH {
+                    out.push((
+                        i..i + 1,
+                        format!("geometry nested more than {MAX_GEOMETRY_DEPTH} deep"),
+                    ));
+                    return out;
+                }
+                after = None;
             }
-            SyntaxKind::LParen => depth += 1,
             SyntaxKind::RParen => {
-                depth -= 1;
-                if depth < 0 {
-                    out.push((i..i + 1, "unmatched `)` in geometry".to_owned()));
-                    depth = 0;
+                match after {
+                    // Only a `(` leaves `after` unset inside a group.
+                    None => {
+                        if let Some(&o) = open.last() {
+                            out.push((o..i + 1, "empty `()` in geometry".to_owned()));
+                        }
+                    }
+                    Some(false) => {
+                        out.push((colon..colon + 1, "`:` with nothing after it".to_owned()))
+                    }
+                    _ => {}
                 }
+                if open.pop().is_none() {
+                    out.push((i..i + 1, "unmatched `)` in geometry".to_owned()));
+                }
+                after = Some(true);
             }
-            SyntaxKind::Colon => {}
-            _ => out.push((i..i + 1, format!("unexpected `{text}` in geometry"))),
+            SyntaxKind::Colon => {
+                if after != Some(true) {
+                    out.push((i..i + 1, "`:` with nothing before it".to_owned()));
+                }
+                after = Some(false);
+                colon = i;
+            }
+            _ => {
+                out.push((i..i + 1, format!("unexpected `{text}` in geometry")));
+                after = Some(true);
+            }
         }
         i += 1;
     }
-    if depth > 0 {
+    if after == Some(false) {
+        out.push((colon..colon + 1, "`:` with nothing after it".to_owned()));
+    }
+    if !open.is_empty() {
         out.push((
             range.start..end,
-            format!("{depth} unclosed `(` in geometry"),
+            format!("{} unclosed `(` in geometry", open.len()),
         ));
     }
     out

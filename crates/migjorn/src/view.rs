@@ -13,6 +13,7 @@ use migjorn_syntax::Card;
 use crate::cell::{self, CellParam, Fill, GeometryTerm, ParamSpan, SurfaceRef};
 use crate::data::{self, DataHead};
 use crate::diagnostic::Diagnostic;
+use crate::expr::{self, Expr, GeometryError};
 use crate::model::Model;
 use crate::param::{self, FillSpec, TransformSpec};
 use crate::surface;
@@ -48,6 +49,18 @@ macro_rules! view {
             /// This card's exact current text.
             pub fn text(&self) -> &'a str {
                 self.require().text()
+            }
+
+            /// The 1-based line, in [`Model::to_source`] as it reads now, of
+            /// the card's first token (comment lines above it not counted).
+            ///
+            /// Counts the lines of every card before this one, so it costs a
+            /// pass over the text up to here; to place many cards, build a
+            /// [`Model::card_lines`] table once instead.
+            pub fn line(&self) -> usize {
+                self.model
+                    .line_of(self.slot)
+                    .expect("view refers to a removed card")
             }
 
             /// Every problem with this card as it reads now: what
@@ -94,6 +107,18 @@ impl<'a> CellView<'a> {
     pub fn geometry(&self) -> Vec<GeometryTerm> {
         let card = self.require();
         cell::walk_geometry(card, &cell::layout(card).geometry)
+    }
+
+    /// The geometry expression as a tree, precedence applied (see [`Expr`]).
+    ///
+    /// `Err` exactly when the geometry has a diagnostic, naming the first
+    /// problem and the token at fault: an unbalanced parenthesis, a `:` with
+    /// no operand on one side, an empty `()`, a `#` with no cell or group
+    /// after it, or a number that is not a surface or cell reference. A
+    /// `LIKE n BUT` cell has no geometry of its own, and is an `Err` too.
+    pub fn geometry_expr(&self) -> Result<Expr, GeometryError> {
+        let card = self.require();
+        expr::build(card, &cell::layout(card).geometry)
     }
 
     /// The geometry expression's exact source text, trimmed.

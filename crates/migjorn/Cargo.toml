@@ -9,6 +9,7 @@ description = "Fast, lossless MCNP input parser and editor"
 [dependencies]
 migjorn-syntax.workspace = true
 compact_str.workspace = true
+memchr.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
 
